@@ -537,6 +537,111 @@ function withDefaultHooks(record: IGuardrailV2): IGuardrailV2 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// MCP protection preset
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Pinned like `DEFAULT_TOOL_GUARDRAIL_KEY`: an MCP server binds the preset by this key. */
+export const MCP_PROTECTION_GUARDRAIL_KEY = 'mcp-protection';
+
+/**
+ * The preset an MCP server can bind: limits and private-network URLs on both
+ * hooks, credential redaction both ways, and the bundled prompt-shield
+ * classifier on what the upstream returns. No PII family: personal data on an
+ * MCP server is handled by the server's PII protection (a round trip), which a
+ * one-way redaction here would destroy.
+ */
+function mcpProtectionGuardrailHooks(): GuardrailHooksConfig {
+  return {
+    contractVersion: GUARDRAIL_CONTRACT_VERSION,
+    policies: [
+      {
+        id: 'mcp-limits',
+        family: 'tool_access',
+        enabled: true,
+        hooks: ['tool.pre', 'tool.post'],
+        schedule: SYNC_BLOCK,
+        label: 'Size limits and private-network URLs',
+        denyPrivateNetworks: true,
+        maxArgBytes: 512 * 1024,
+        maxResultBytes: 4 * 1024 * 1024,
+        maxArgDepth: 32,
+      },
+      {
+        id: 'mcp-secrets',
+        family: 'secrets',
+        enabled: true,
+        hooks: ['tool.pre', 'tool.post'],
+        schedule: SYNC_BLOCK,
+        action: 'redact',
+        label: 'Credential redaction',
+        known: true,
+        genericHighEntropy: false,
+      },
+      {
+        id: 'mcp-prompt-shield',
+        family: 'cognipeer_guardrail_prompt_shield',
+        enabled: true,
+        hooks: ['tool.post'],
+        schedule: SYNC_BLOCK,
+        action: 'block',
+        label: 'Instructions hidden in tool results',
+        categories: { prompt_injection: true, jailbreak: true, data_exfiltration: true },
+        profile: 'balanced',
+      },
+    ],
+    bindings: {
+      'tool.pre': { enabled: true, schedule: SYNC_BLOCK },
+      'tool.post': { enabled: true, schedule: SYNC_BLOCK },
+    },
+    stream: { enabled: false },
+    shortCircuit: false,
+  };
+}
+
+/**
+ * Create the tenant's MCP protection preset if it does not exist yet, and
+ * return it. Idempotent and race-safe in the same way as
+ * `ensureDefaultToolGuardrail`; called when a server is bound to the preset.
+ */
+export async function ensureMcpProtectionGuardrail(
+  tenantDbName: string,
+  tenantId: string,
+): Promise<IGuardrailV2> {
+  const existing = await getCachedGuardrail(tenantDbName, MCP_PROTECTION_GUARDRAIL_KEY, null);
+  if (existing) return existing;
+  try {
+    const created = await runWithTenantScope(tenantDbName, (db) =>
+      db.createGuardrail({
+        tenantId,
+        projectId: undefined,
+        key: MCP_PROTECTION_GUARDRAIL_KEY,
+        name: 'MCP protection',
+        description:
+          'Built-in preset for MCP servers: size limits, private-network URLs, credential redaction, and a prompt-shield check on tool results.',
+        type: 'preset',
+        target: 'input',
+        action: 'block',
+        enabled: true,
+        failMode: 'open',
+        // The server's binding mode (monitor / enforce) decides whether a finding blocks.
+        mode: 'enforce',
+        hooksVersion: 1,
+        hooks: mcpProtectionGuardrailHooks(),
+        metadata: { managed: 'guardrail-hook-plane', purpose: 'mcp-protection' },
+        createdBy: 'system',
+      }),
+    );
+    invalidateGuardrailCache(tenantDbName, MCP_PROTECTION_GUARDRAIL_KEY);
+    return created;
+  } catch (error) {
+    invalidateGuardrailCache(tenantDbName, MCP_PROTECTION_GUARDRAIL_KEY);
+    const raced = await getCachedGuardrail(tenantDbName, MCP_PROTECTION_GUARDRAIL_KEY, null);
+    if (raced) return raced;
+    throw error;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // runHook
 // ═══════════════════════════════════════════════════════════════════════════
 

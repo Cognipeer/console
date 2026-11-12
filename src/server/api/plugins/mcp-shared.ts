@@ -17,15 +17,117 @@ import type {
   IMcpExposureConfig,
   IMcpGuardrailConfig,
   IMcpRemoteConfig,
+  IMcpServer,
   IMcpStdioConfig,
   McpAuthType,
 } from '@/lib/database';
-import type { McpAuditContext } from '@/lib/services/mcp';
+import type { McpAuditContext, UpdateMcpServerInput } from '@/lib/services/mcp';
 import { mcpInstructionsInputError } from '@/lib/services/mcp';
+import { readPiiProtectionField } from '@/lib/services/pii/protectionConfig';
+import { mcpRuntimeHeaderPolicyError } from '@/lib/services/runtimeContext';
 import type { SpecFormatHint } from '@/lib/services/specImport';
 import { getClientIp } from '../fastify-utils';
 
 export const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic', CONSOLE_IDENTITY_AUTH_TYPE];
+
+export const PUBLIC_EXPOSURE_FORBIDDEN_ERROR =
+  'Serving an MCP server at its public URL requires elevated "mcp" permission (admin level).';
+
+/**
+ * True when a create or update would start serving the server at its public
+ * (unauthenticated) URL, or move that URL. Publishing is a separate, admin-level
+ * act: write-level access may create and edit servers reached with an API token.
+ */
+export function publishesPublicly(
+  body: Record<string, unknown>,
+  existing?: Pick<IMcpServer, 'exposure' | 'endpointSlug'> | null,
+): boolean {
+  const next = body.exposure !== undefined ? parseExposure(body.exposure) : undefined;
+  const wasPublic = existing?.exposure?.accessMode === 'public';
+  const willBePublic = next ? next.accessMode === 'public' : wasPublic;
+  if (!willBePublic) return false;
+  if (!wasPublic) return true;
+  const slug = typeof body.endpointSlug === 'string' ? body.endpointSlug.trim() : '';
+  return slug !== '' && slug !== existing?.endpointSlug;
+}
+
+type McpSecurityUpdateFields = Pick<
+  UpdateMcpServerInput,
+  'runtimeHeaders' | 'piiProtection' | 'piiPassthroughTools' | 'toolChangePolicy' | 'toolReview'
+>;
+
+function isNameList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= 1000 && value.every((name) => typeof name === 'string');
+}
+
+type ReviewItem = string | { name: string; hash: string };
+const DEFINITION_HASH = /^[a-f0-9]{64}$/;
+
+/** Tool names, or `{ name, hash }` entries that bind a decision to one definition; null when malformed. */
+function readReviewList(value: unknown): ReviewItem[] | null {
+  if (!Array.isArray(value) || value.length > 1000) return null;
+  const items: ReviewItem[] = [];
+  for (const item of value) {
+    if (typeof item === 'string') {
+      items.push(item);
+      continue;
+    }
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+    const { name, hash } = item as { name?: unknown; hash?: unknown };
+    if (typeof name !== 'string' || typeof hash !== 'string' || !DEFINITION_HASH.test(hash)) return null;
+    items.push({ name, hash });
+  }
+  return items;
+}
+
+/**
+ * The security settings an MCP server update may carry, validated (the
+ * dashboard and the client API share this parse). Fields absent from the body
+ * stay absent.
+ */
+export async function readMcpSecurityUpdate(
+  body: Record<string, unknown>,
+  scope: { tenantDbName: string; projectId?: string },
+): Promise<{ error: string } | { fields: McpSecurityUpdateFields }> {
+  const headerError = mcpRuntimeHeaderPolicyError(body.runtimeHeaders);
+  if (headerError) return { error: headerError };
+  const fields: McpSecurityUpdateFields = {};
+  if (body.runtimeHeaders !== undefined) {
+    const raw = body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null;
+    fields.runtimeHeaders = raw === null
+      ? null
+      : { allow: raw.allow === true, allowedNames: (raw.allowedNames ?? []).map((name) => name.trim()).filter(Boolean) };
+  }
+  const pii = await readPiiProtectionField(body.piiProtection, scope);
+  if (pii.error) return { error: pii.error };
+  if (pii.value !== undefined) fields.piiProtection = pii.value ? { policyKey: pii.value.policyKey } : null;
+  if (body.piiPassthroughTools !== undefined) {
+    if (!isNameList(body.piiPassthroughTools)) return { error: 'piiPassthroughTools must be an array of tool names' };
+    fields.piiPassthroughTools = body.piiPassthroughTools;
+  }
+  if (body.toolChangePolicy !== undefined) {
+    if (body.toolChangePolicy !== 'approve' && body.toolChangePolicy !== 'notify') {
+      return { error: 'toolChangePolicy must be "approve" or "notify"' };
+    }
+    fields.toolChangePolicy = body.toolChangePolicy;
+  }
+  if (body.toolReview !== undefined) {
+    const review = body.toolReview as { approve?: unknown; reject?: unknown } | null;
+    const shaped = !!review && typeof review === 'object' && !Array.isArray(review);
+    const approve = shaped && review.approve !== undefined ? readReviewList(review.approve) : undefined;
+    const reject = shaped && review.reject !== undefined ? readReviewList(review.reject) : undefined;
+    if (!shaped || approve === null || reject === null) {
+      return {
+        error: 'toolReview must be { "approve"?: [...], "reject"?: [...] } listing tool names or { "name", "hash" } entries',
+      };
+    }
+    fields.toolReview = {
+      ...(approve ? { approve } : {}),
+      ...(reject ? { reject } : {}),
+    };
+  }
+  return { fields };
+}
 
 export const JSONRPC_VERSION = '2.0';
 export const MCP_PROTOCOL_VERSION = '2025-03-26';

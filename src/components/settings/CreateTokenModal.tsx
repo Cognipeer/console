@@ -27,6 +27,7 @@ import FormShell, {
   SummaryKV,
 } from '@/components/common/ui/FormShell';
 import ExpiryField from '@/components/iam/tokens/ExpiryField';
+import McpServerField from '@/components/iam/tokens/McpServerField';
 import IpAllowlistField from '@/components/iam/tokens/IpAllowlistField';
 import { readJsonObject, tokenErrorMessage } from '@/components/iam/tokens/tokenErrors';
 import {
@@ -61,6 +62,7 @@ interface CreatedInfo {
   token: string;
   expiresAt: string | null;
   allowedIpRanges: string[] | null;
+  allowedMcpServerIds: string[] | null;
 }
 
 export default function CreateTokenModal({
@@ -96,6 +98,7 @@ export default function CreateTokenModal({
   const { policy, ready: policyReady } = useTokenPolicy(opened);
   const [expiry, setExpiry] = useState<ExpiryChoice>({ kind: 'none' });
   const [ipText, setIpText] = useState('');
+  const [mcpServerIds, setMcpServerIds] = useState<string[]>([]);
   const touched = useRef(false);
 
   useEffect(() => {
@@ -141,6 +144,7 @@ export default function CreateTokenModal({
           ...form.values,
           ...expiryPayload(expiry, 'create'),
           ...(allowlist.ranges.length > 0 ? { allowedIpRanges: allowlist.ranges } : {}),
+          ...(mcpServerIds.length > 0 ? { allowedMcpServerIds: mcpServerIds } : {}),
           ...extraBody,
         }),
       });
@@ -155,6 +159,7 @@ export default function CreateTokenModal({
         token: String(data.token ?? ''),
         expiresAt: typeof data.expiresAt === 'string' ? data.expiresAt : null,
         allowedIpRanges: Array.isArray(data.allowedIpRanges) ? (data.allowedIpRanges as string[]) : null,
+        allowedMcpServerIds: Array.isArray(data.allowedMcpServerIds) ? (data.allowedMcpServerIds as string[]) : null,
       });
       notifications.show({
         title: tCommon('success'),
@@ -177,6 +182,7 @@ export default function CreateTokenModal({
     setCreated(null);
     setExpiry({ kind: 'none' });
     setIpText('');
+    setMcpServerIds([]);
     touched.current = false;
     form.reset();
     onClose();
@@ -189,6 +195,9 @@ export default function CreateTokenModal({
     ranges && ranges.length > 0
       ? tIam(ranges.length === 1 ? 'network.countOne' : 'network.countMany', { count: ranges.length })
       : tIam('detail.summary.anyAddress');
+
+  const mcpSummary = (ids: string[] | null) =>
+    ids && ids.length > 0 ? `${ids.length} MCP server${ids.length === 1 ? '' : 's'}` : 'All MCP servers';
 
   if (created) {
     const successSummary = (
@@ -203,6 +212,7 @@ export default function CreateTokenModal({
             value={created.expiresAt ? formatDateTime(created.expiresAt, locale) : tIam('detail.summary.noExpiry')}
           />
           <SummaryKV label={tIam('detail.summary.network')} value={networkSummary(created.allowedIpRanges)} />
+          <SummaryKV label="MCP servers" value={mcpSummary(created.allowedMcpServerIds)} />
           <SummaryKV
             label={tIam('detail.summary.status')}
             value={<span className="ds-badge ds-badge-ok">{tIam('create.created')}</span>}
@@ -328,6 +338,7 @@ export default function CreateTokenModal({
           }
         />
         <SummaryKV label={tIam('detail.summary.network')} value={networkSummary(allowlist.ranges)} />
+        <SummaryKV label="MCP servers" value={mcpSummary(mcpServerIds)} />
       </SummaryGroup>
       <SummaryGroup title={tIam('detail.summary.preflight')}>
         <Checklist items={checklist} />
@@ -396,6 +407,15 @@ export default function CreateTokenModal({
         done={ipValid}
       >
         <IpAllowlistField text={ipText} onChange={setIpText} policy={policy} />
+      </FormSection>
+
+      <FormSection
+        number={4 + offset}
+        title={tIam('mcpServers.title')}
+        description={tIam('mcpServers.description')}
+        done
+      >
+        <McpServerField value={mcpServerIds} onChange={setMcpServerIds} />
       </FormSection>
     </FormShell>
   );

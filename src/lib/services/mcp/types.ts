@@ -188,6 +188,20 @@ export interface UpdateMcpServerInput {
   toolDescriptions?: Record<string, string | null>;
   /** Partial patch of per-tool name overrides, keyed by real tool name (null/empty restores the discovered name). */
   toolNames?: Record<string, string | null>;
+  /** PII policy whose round trip protects this server's tool calls (null turns it off). */
+  piiProtection?: { policyKey: string } | null;
+  /** Full replacement list of tools that receive real values instead of PII tokens. */
+  piiPassthroughTools?: string[];
+  /** What an upstream change to a tool definition does: wait for approval, or only notify. */
+  toolChangePolicy?: 'approve' | 'notify';
+  /**
+   * Approve or reject tool definitions waiting for review (real tool names). An entry with `hash` holds only for the
+   * definition with that hash (the `hash` of its review entry).
+   */
+  toolReview?: {
+    approve?: Array<string | { name: string; hash: string }>;
+    reject?: Array<string | { name: string; hash: string }>;
+  };
   /** Operator-authored MCP `instructions` (null/empty falls back to what the source supplies). */
   instructions?: string | null;
 }

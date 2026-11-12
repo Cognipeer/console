@@ -16,6 +16,8 @@ import { recordAuditLog } from '@/lib/services/audit';
 export interface TokenRestrictionSnapshot {
   expiresAt: string | null;
   allowedIpRanges: string[] | null;
+  /** Absent in older callers = unrestricted. */
+  allowedMcpServerIds?: string[] | null;
   /** Absent in older callers = not required. */
   requireUserToken?: boolean;
 }
@@ -49,10 +51,13 @@ const MAX_LOGGED_RANGES = 25;
 
 function snapshot(value: TokenRestrictionSnapshot) {
   const ranges = value.allowedIpRanges;
+  const mcpIds = value.allowedMcpServerIds?.length ? value.allowedMcpServerIds : null;
   return {
     expiresAt: value.expiresAt,
     allowedIpRanges: ranges ? ranges.slice(0, MAX_LOGGED_RANGES) : null,
     allowedIpRangeCount: ranges ? ranges.length : 0,
+    allowedMcpServerIds: mcpIds ? mcpIds.slice(0, MAX_LOGGED_RANGES) : null,
+    allowedMcpServerCount: mcpIds ? mcpIds.length : 0,
     requireUserToken: value.requireUserToken === true,
   };
 }
@@ -64,7 +69,10 @@ export function restrictionsChanged(change: TokenRestrictionChange): boolean {
   if ((before.requireUserToken === true) !== (after.requireUserToken === true)) return true;
   const a = before.allowedIpRanges ?? [];
   const b = after.allowedIpRanges ?? [];
-  return a.length !== b.length || a.some((range, index) => range !== b[index]);
+  if (a.length !== b.length || a.some((range, index) => range !== b[index])) return true;
+  const c = before.allowedMcpServerIds ?? [];
+  const d = after.allowedMcpServerIds ?? [];
+  return c.length !== d.length || c.some((id, index) => id !== d[index]);
 }
 
 export function recordTokenRestrictionChange(input: TokenRestrictionAuditInput): void {

@@ -1,5 +1,6 @@
 /**
- * The PII protection picker (`components/pii/PiiProtectionField`) on the model edit page and the agent Build tab.
+ * The PII protection picker (`components/pii/PiiProtectionField`) on the model edit page, the agent Build tab and an
+ * MCP server's Security tab.
  * Registered in `en.ts` as `piiProtection`; the twin is `piiProtection.tr.ts`.
  */
 export const piiProtectionEn = {
@@ -12,6 +13,10 @@ export const piiProtectionEn = {
     description: 'The model sees tokens; tools, the conversation and the user see the real values.',
     inherited: 'The model {model} already protects every call with the policy {policy}. A policy chosen here replaces it for this agent.',
     replaces: 'Replaces the policy {policy} of the model {model} for this agent.',
+  },
+  mcp: {
+    description:
+      'The upstream never sees personal data: each value the PII policy finds in a call’s arguments goes out as a token, and tokens in the result come back as the real values. Callers and agents see the values as before.',
   },
   policy: {
     label: 'PII policy',
@@ -32,5 +37,8 @@ export const piiProtectionEn = {
     media: 'Images, files and audio are refused while protection is on.',
     logs: 'Usage logs keep the tokens, not the values.',
     session: 'A value keeps the same token for the whole session.',
+    mcpText: 'Only text values in the arguments are checked. A tool that needs the real values can be listed below.',
+    mcpLogs: 'The server’s request logs keep the tokens, not the values.',
+    mcpStable: 'A value always gets the same token on this server, so the upstream can still find a record by it.',
   },
 };

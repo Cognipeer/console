@@ -162,6 +162,18 @@ describe('token routes: expiry, IP allowlist and the tenant policy', () => {
       expect(created.expiresAt).toBeInstanceOf(Date);
     });
 
+    it('stores a deduped MCP server restriction and refuses a malformed one', async () => {
+      const res = await post(USER, { label: 'mcp token', allowedMcpServerIds: ['s1', 's2', 's1'] });
+      expect(res.statusCode).toBe(201);
+      expect(parseJsonBody<TokenReply>(res.body)).toMatchObject({ allowedMcpServerIds: ['s1', 's2'] });
+      const created = db.createApiToken.mock.calls[0][0] as unknown as Record<string, unknown>;
+      expect(created.allowedMcpServerIds).toEqual(['s1', 's2']);
+
+      const bad = await post(USER, { label: 'bad mcp', allowedMcpServerIds: 's1' });
+      expect(bad.statusCode).toBe(400);
+      expect(parseJsonBody<{ code?: string }>(bad.body).code).toBe('invalid_mcp_servers');
+    });
+
     it('without the new fields it mints exactly what it always did', async () => {
       const res = await post(USER, { label: 'plain token' });
       expect(res.statusCode).toBe(201);
@@ -170,6 +182,7 @@ describe('token routes: expiry, IP allowlist and the tenant policy', () => {
       const created = db.createApiToken.mock.calls[0][0] as unknown as Record<string, unknown>;
       expect('expiresAt' in created).toBe(false);
       expect('allowedIpRanges' in created).toBe(false);
+      expect('allowedMcpServerIds' in created).toBe(false);
     });
 
     it('accepts an absolute expiresAt', async () => {

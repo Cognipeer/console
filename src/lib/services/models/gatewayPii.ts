@@ -32,7 +32,7 @@ function isRecord(value: unknown): value is AnyRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function roundTripSecret(): string {
+export function roundTripSecret(): string {
   const { auth } = getConfig();
   const secret = auth.providerEncryptionSecret || auth.jwtSecret;
   if (!secret) throw new Error('PII protection needs PROVIDER_ENCRYPTION_SECRET (or JWT_SECRET) to key its tokens.');

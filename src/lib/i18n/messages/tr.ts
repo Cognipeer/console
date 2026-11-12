@@ -849,6 +849,16 @@ export const tr: typeof en = {
       label: 'Her çağrıda kullanıcı token\'ı zorunlu olsun',
       hint: 'Kullanıcı token\'ı olmayan çağrılar (X-Cognipeer-User-Token ya da Authorization içinde "<api token>~<user token>") 401 user_token_required ile reddedilir; token sahibine asla geri düşülmez. Önce aşağıdaki "Kullanıcı adına çalışma" ayarını yapın, yoksa tüm çağrılar reddedilir.',
     },
+    mcpServers: {
+      title: 'MCP sunucuları',
+      description: 'Token\'ı belirli MCP sunucularıyla sınırlayın. Hepsine izin vermek için boş bırakın.',
+      placeholder: 'Tüm MCP sunucuları',
+      none: 'MCP sunucusu bulunamadı',
+      all: 'Tüm MCP sunucuları',
+      limited: 'Sınırlı',
+      countOne: '1 MCP sunucusu',
+      countMany: '{count} MCP sunucusu',
+    },
     network: {
       title: 'Ağ erişimi',
       description: 'Token\'ı güvendiğiniz IP adresleriyle sınırlayın. Başka bir yerden gelen çağrılar reddedilir (403) ve denetim günlüğüne yazılır. Sınır istemiyorsanız boş bırakın.',

@@ -13,6 +13,8 @@ import { createServer, type Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 process.env.OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK = 'false';
+// These cases run stdio servers as subprocesses, which a hosted deployment does not do by default.
+process.env.MCP_STDIO_ENABLED = 'true';
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-for-mcp-hub-tests';
 
 import { remoteCallTool, remoteListTools, buildUpstreamAuthHeaders } from '@/lib/services/mcp/remoteMcpClient';

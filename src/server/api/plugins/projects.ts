@@ -15,6 +15,7 @@ import {
   loadTokenPolicyForDisplay,
   prepareTokenCreate,
   presentAllowedIpRanges,
+  presentAllowedMcpServerIds,
   presentApiToken,
   tokenExceedsPolicy,
 } from '@/lib/services/apiTokens/tokenPolicy';
@@ -993,6 +994,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           userId: session.userId,
           ...(prepared.expiresAt ? { expiresAt: prepared.expiresAt } : {}),
           ...(prepared.allowedIpRanges ? { allowedIpRanges: prepared.allowedIpRanges } : {}),
+          ...(prepared.allowedMcpServerIds ? { allowedMcpServerIds: prepared.allowedMcpServerIds } : {}),
         });
 
         return reply.code(201).send({
@@ -1002,6 +1004,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           token,
           expiresAt: prepared.expiresAt ? prepared.expiresAt.toISOString() : null,
           allowedIpRanges: presentAllowedIpRanges(apiToken.allowedIpRanges),
+          allowedMcpServerIds: presentAllowedMcpServerIds(apiToken.allowedMcpServerIds),
           lastUsedAt: null,
           exceedsTenantPolicy: tokenExceedsPolicy(apiToken, prepared.policy),
         });

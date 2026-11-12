@@ -14,8 +14,11 @@ export interface PiiProtectionFieldProps {
   /** The chosen PII policy key; `null` is off. */
   value: string | null;
   onChange: (next: string | null) => void;
-  /** Which screen: the wording of the notes differs (a model protects every caller; an agent its own session). */
-  surface: 'model' | 'agent';
+  /**
+   * Which screen: the wording of the notes differs (a model protects every caller; an agent its own session; an MCP
+   * server the calls to its upstream).
+   */
+  surface: 'model' | 'agent' | 'mcp';
   /** Agent only: the main model's own policy, which applies when the agent picks none. */
   modelPolicyKey?: string | null;
   /** Agent only: the main model's name, for the note about its policy. */
@@ -137,7 +140,13 @@ export default function PiiProtectionField({
         />
       ) : null}
 
-      {value ? (
+      {value && surface === 'mcp' ? (
+        <List size="xs" c="dimmed" spacing={2}>
+          <List.Item>{t('limits.mcpText')}</List.Item>
+          <List.Item>{t('limits.mcpStable')}</List.Item>
+          <List.Item>{t('limits.mcpLogs')}</List.Item>
+        </List>
+      ) : value ? (
         <List size="xs" c="dimmed" spacing={2}>
           <List.Item>{t('limits.media')}</List.Item>
           <List.Item>{surface === 'model' ? t('limits.logs') : t('limits.session')}</List.Item>

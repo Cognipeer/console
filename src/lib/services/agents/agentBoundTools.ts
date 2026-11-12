@@ -15,7 +15,14 @@ import { isToolOutput } from '@/lib/services/tools/toolOutput';
 import { classifyTool } from './agentHumanInTheLoop';
 import { effectiveActionAnnotations, mcpToolMarkings } from '@/lib/services/tools/actionAnnotations';
 import { mayUseSharedResource } from './sharedResourceAccess';
-import { resolveMcpGuardrailBinding, getToolAnnotationOverrides, resolveSourceType } from '@/lib/services/mcp/mcpService';
+import {
+    getToolAnnotationOverrides,
+    logMcpRequest,
+    mcpRequestSecretValues,
+    resolveMcpGuardrailBinding,
+    resolveSourceType,
+} from '@/lib/services/mcp/mcpService';
+import { exposedMcpToolNames } from './boundToolNames';
 import { defaultAnnotationsForSource } from '@/lib/services/mcp/toolAnnotations';
 import { isMcpToolEnabled, executeMcpTool } from '@/lib/services/mcp';
 import { noteRestrictedKnowledge, restrictedKnowledgeTagsOf } from '@/lib/services/rag/access';
@@ -91,6 +98,13 @@ export async function buildBoundTools(
     const tools: AgentSdkToolInterface[] = [];
     const definitions: TraceToolDefinition[] = [];
     const cleanupTasks: Array<() => Promise<void>> = [];
+    // MCP tools are built once every bound tool is known: a name two of them
+    // share (or that another tool uses) is exposed with its server's key.
+    const pendingMcpTools: Array<{
+        serverKey: string;
+        name: string;
+        build: (exposedName: string) => { tool: AgentSdkToolInterface; definition: TraceToolDefinition };
+    }> = [];
 
     for (const binding of bindings) {
         if (binding.source === 'tool') {
@@ -245,35 +259,103 @@ export async function buildBoundTools(
                 }
 
                 const dispatch = async (args: Record<string, unknown>) => {
-                    const { result, logSummary } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders, mcpIdentity);
-                    // A knowledge base tool that ran on another node marked only its own work: mark the run's here.
-                    await noteRestrictedKnowledge(restrictedKnowledgeTagsOf(logSummary?.restrictedKnowledge));
-                    if (isToolOutput(result)) return result;
-                    return typeof result === 'string' ? result : JSON.stringify(result);
+                    const startedAt = Date.now();
+                    try {
+                        const outcome = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders, mcpIdentity);
+                        const { result, logSummary } = outcome;
+                        logAgentMcpCall({ status: 'success', args, result, latencyMs: outcome.latencyMs });
+                        // A knowledge base tool that ran on another node marked only its own work: mark the run's here.
+                        await noteRestrictedKnowledge(restrictedKnowledgeTagsOf(logSummary?.restrictedKnowledge));
+                        if (isToolOutput(result)) return result;
+                        return typeof result === 'string' ? result : JSON.stringify(result);
+                    } catch (error) {
+                        logAgentMcpCall({ status: 'error', args, error, latencyMs: Date.now() - startedAt });
+                        throw error;
+                    }
+                };
+                // The server's request log has the agent's calls too, next to the API and dashboard ones. Usage is
+                // not counted again here: the run accounts for it.
+                const logAgentMcpCall = (call: {
+                    status: 'success' | 'error';
+                    args: Record<string, unknown>;
+                    result?: unknown;
+                    error?: unknown;
+                    latencyMs: number;
+                }) => {
+                    // Logging never fails the call it records.
+                    try {
+                        void logMcpRequest(tenantDbName, {
+                            tenantId,
+                            projectId: server.projectId ?? projectId,
+                            serverId: server._id !== undefined && server._id !== null ? String(server._id) : undefined,
+                            serverKey: server.key,
+                            toolName,
+                            status: call.status,
+                            latencyMs: call.latencyMs,
+                            requestPayload: {
+                                tool: toolName,
+                                arguments: call.args,
+                                _agent: {
+                                    ...(agentId ? { agentId } : {}),
+                                    ...(flowCaller?.conversationId ? { conversationId: flowCaller.conversationId } : {}),
+                                },
+                            },
+                            ...(call.status === 'success'
+                                ? {
+                                    responsePayload: typeof call.result === 'object' && call.result !== null
+                                        ? call.result as Record<string, unknown>
+                                        : { value: call.result },
+                                }
+                                : { errorMessage: call.error instanceof Error ? call.error.message : 'Tool execution failed' }),
+                            callerType: 'agent',
+                            callerUserId: mcpIdentity?.userId,
+                            callerTokenId: mcpIdentity?.tokenId,
+                            transport: 'internal',
+                            sourceType: resolveSourceType(server),
+                        }, mcpRequestSecretValues(server, mcpRuntimeHeaders), { skipUsageEvent: true })
+                            .catch(() => undefined);
+                    } catch {
+                        // Nothing to do: the call already has its outcome.
+                    }
                 };
                 const description = mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`;
-                const tool = createToolFn({
-                    name: mcpToolDef.name,
-                    description,
-                    schema: toolInputSchemaToZod(mcpToolDef.inputSchema),
-                    // Wrapped in `guard` ONLY when the server has no binding of
-                    // its own; otherwise `executeMcpTool` -> `executeMcpToolLocal`
-                    // already fires `tool.pre` and `tool.post` around the dispatch
-                    // and a second wrap would double-evaluate. See `guardAtAgent`.
-                    func: guardAtAgent
-                        ? guard.protect(
-                            { name: `${server.key}/${toolName}`, requestedName: mcpToolDef.name },
-                            dispatch,
-                        )
-                        : dispatch,
-                });
                 const markings = mcpToolMarkings(
                     mcpToolDef,
                     Object.hasOwn(annotationOverrides, toolName) ? annotationOverrides[toolName] : undefined,
                     sourceAnnotations,
                 );
-                tools.push(Object.assign(tool, { hitlKind: classifyTool(mcpToolDef.name, markings) }));
-                definitions.push({ name: mcpToolDef.name, description, parameters: mcpToolDef.inputSchema });
+                pendingMcpTools.push({
+                    serverKey: server.key,
+                    name: mcpToolDef.name,
+                    build: (exposedName) => {
+                        const renamed = exposedName !== mcpToolDef.name;
+                        // A renamed tool says whose it is, so the model can tell same-named tools apart.
+                        const exposedDescription = renamed ? `[${server.name}] ${description}` : description;
+                        const tool = createToolFn({
+                            name: exposedName,
+                            description: exposedDescription,
+                            schema: toolInputSchemaToZod(mcpToolDef.inputSchema),
+                            // Wrapped in `guard` ONLY when the server has no binding of
+                            // its own; otherwise `executeMcpTool` -> `executeMcpToolLocal`
+                            // already fires `tool.pre` and `tool.post` around the dispatch
+                            // and a second wrap would double-evaluate. See `guardAtAgent`.
+                            func: guardAtAgent
+                                ? guard.protect(
+                                    { name: `${server.key}/${toolName}`, requestedName: exposedName },
+                                    dispatch,
+                                )
+                                : dispatch,
+                        });
+                        return {
+                            tool: Object.assign(tool, {
+                                hitlKind: classifyTool(mcpToolDef.name, markings),
+                                // Approval settings are saved under the tool's own name; a renamed tool keeps them.
+                                ...(renamed ? { hitlPolicyName: mcpToolDef.name } : {}),
+                            }),
+                            definition: { name: exposedName, description: exposedDescription, parameters: mcpToolDef.inputSchema },
+                        };
+                    },
+                });
             }
         } else if (binding.source === 'system' && binding.sourceKey === 'browser_use') {
             // ── System tool: Browser Use ───────────────────────
@@ -416,6 +498,18 @@ export async function buildBoundTools(
             tools.push(...(flowTools.tools as AgentSdkToolInterface[]));
             definitions.push(...(flowTools.definitions as TraceToolDefinition[]));
         }
+    }
+
+    if (pendingMcpTools.length) {
+        const exposed = exposedMcpToolNames(
+            pendingMcpTools.map(({ serverKey, name }) => ({ serverKey, name })),
+            tools.map((tool) => tool.name),
+        );
+        pendingMcpTools.forEach((pending, index) => {
+            const { tool, definition } = pending.build(exposed[index]);
+            tools.push(tool);
+            definitions.push(definition);
+        });
     }
 
     return { cleanupTasks, tools, definitions };
