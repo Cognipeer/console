@@ -20,7 +20,13 @@ vi.mock('@/lib/limits/events', () => ({
   outcomeEventFor: (d: unknown, c: unknown) => h.events.push({ d, c }),
   recordLimitEvent: vi.fn(),
 }));
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(await getDatabase())),
+  };
+});
 vi.mock('@/lib/services/availability/serviceAvailability', () => ({
   assertServiceEnabled: vi.fn().mockResolvedValue(undefined),
 }));

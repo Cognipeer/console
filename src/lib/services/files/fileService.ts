@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { getDatabase, type DatabaseProvider, type FileMarkdownStatus, type IFileBucketRecord, type IFileMarkdownExtraction, type IFileRecord, type IProviderRecord } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider, type FileMarkdownStatus, type IFileBucketRecord, type IFileMarkdownExtraction, type IFileRecord, type IProviderRecord } from '@/lib/database';
 import { normalizeFolderPrefix } from '@/lib/database/fileEntryWalk';
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
@@ -92,12 +92,6 @@ const logger = createLogger('files');
 
 function createProviderLogger(scope: string) {
     return createLogger(`files:${scope}`);
-}
-
-async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db;
 }
 
 /** The capability keys a view of a platform provider may carry: what the store can do, never what serves it. */
@@ -279,14 +273,15 @@ export async function requireBucketRecord(
     projectId: string,
     bucketKey: string,
 ): Promise<IFileBucketRecord> {
-    const db = await withTenantDb(tenantDbName);
-    const bucket = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const bucket = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
 
-    if (!bucket) {
-        throw new FileServiceError('bucket_not_found', 404, 'File bucket not found.');
-    }
+        if (!bucket) {
+            throw new FileServiceError('bucket_not_found', 404, 'File bucket not found.');
+        }
 
-    return bucket;
+        return bucket;
+    });
 }
 
 /** `read`: the bucket may be switched off (its files can still be downloaded). `write`: it must be active. */
@@ -760,20 +755,21 @@ export async function listFileBuckets(
     tenantId: string,
     projectId: string,
 ): Promise<FileBucketView[]> {
-    const db = await withTenantDb(tenantDbName);
-    const [buckets, providers] = await Promise.all([
-        db.listFileBuckets(tenantId, projectId),
-        listProviderConfigs(tenantDbName, tenantId, { type: 'file', projectId }),
-    ]);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const [buckets, providers] = await Promise.all([
+            db.listFileBuckets(tenantId, projectId),
+            listProviderConfigs(tenantDbName, tenantId, { type: 'file', projectId }),
+        ]);
 
-    const providerMap = new Map<string, FileProviderView>(
-        providers.map((provider) => [provider.key, attachDriverCapabilities(provider)]),
-    );
+        const providerMap = new Map<string, FileProviderView>(
+            providers.map((provider) => [provider.key, attachDriverCapabilities(provider)]),
+        );
 
-    return buckets.map((bucket) => {
-        const view = serializeFileBucket(bucket);
-        const provider = providerMap.get(bucket.providerKey);
-        return provider ? { ...view, provider } : view;
+        return buckets.map((bucket) => {
+            const view = serializeFileBucket(bucket);
+            const provider = providerMap.get(bucket.providerKey);
+            return provider ? { ...view, provider } : view;
+        });
     });
 }
 
@@ -791,45 +787,45 @@ export async function createFileBucket(
     const prefix = payload.prefix == null ? key : parseBucketPrefix(payload.prefix);
     const metadata = payload.metadata == null ? undefined : parseBucketMetadata(payload.metadata);
 
-    const db = await withTenantDb(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const existing = await db.findFileBucketByKey(tenantId, key, projectId);
+        if (existing) {
+            throw new FileServiceError('duplicate_key', 409, `Bucket with key "${key}" already exists.`);
+        }
 
-    const existing = await db.findFileBucketByKey(tenantId, key, projectId);
-    if (existing) {
-        throw new FileServiceError('duplicate_key', 409, `Bucket with key "${key}" already exists.`);
-    }
+        const provider = await getProviderConfigByKey(
+            tenantDbName,
+            tenantId,
+            payload.providerKey,
+            projectId,
+        );
 
-    const provider = await getProviderConfigByKey(
-        tenantDbName,
-        tenantId,
-        payload.providerKey,
-        projectId,
-    );
+        if (!provider) {
+            throw new FileServiceError('provider_missing', 400, 'Associated file provider not found.');
+        }
 
-    if (!provider) {
-        throw new FileServiceError('provider_missing', 400, 'Associated file provider not found.');
-    }
+        if (provider.status !== 'active') {
+            throw new FileServiceError('provider_inactive', 409, 'Provider must be active to create a bucket.');
+        }
 
-    if (provider.status !== 'active') {
-        throw new FileServiceError('provider_inactive', 409, 'Provider must be active to create a bucket.');
-    }
+        const record = await db.createFileBucket({
+            tenantId,
+            projectId,
+            key,
+            name,
+            providerKey: payload.providerKey,
+            description,
+            prefix,
+            metadata,
+            status,
+            createdBy: payload.createdBy,
+        });
 
-    const record = await db.createFileBucket({
-        tenantId,
-        projectId,
-        key,
-        name,
-        providerKey: payload.providerKey,
-        description,
-        prefix,
-        metadata,
-        status,
-        createdBy: payload.createdBy,
+        return {
+            ...serializeFileBucket(record),
+            provider: attachDriverCapabilities(provider),
+        } satisfies FileBucketView;
     });
-
-    return {
-        ...serializeFileBucket(record),
-        provider: attachDriverCapabilities(provider),
-    } satisfies FileBucketView;
 }
 
 export async function getFileBucket(
@@ -858,39 +854,40 @@ export async function deleteFileBucket(
     bucketKey: string,
     options?: DeleteFileBucketOptions,
 ): Promise<boolean> {
-    const db = await withTenantDb(tenantDbName);
-    const record = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const record = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
 
-    if (!record) {
-        return false;
-    }
-
-    // The job that deletes the bucket with its files owns the bucket until it ends. Only `force` goes past it: a job the
-    // queue lost (a restart) leaves the bucket marked for good, and when its storage location is shared the deletion
-    // cannot be asked for again - removing the bucket record, with the files left where they are, is the way out.
-    if (isBucketDeleting(record) && !options?.force) {
-        throw bucketDeletingError();
-    }
-
-    if (!options?.force) {
-        const { items } = await db.listFileRecords({
-            providerKey: record.providerKey,
-            bucketKey: record.key,
-            projectId,
-            limit: 1,
-        });
-
-        if (items.length > 0) {
-            throw new FileServiceError('bucket_not_empty', 409, 'Bucket contains files. Remove files or use force delete.');
+        if (!record) {
+            return false;
         }
-    }
 
-    const bucketId = record._id?.toString();
-    if (!bucketId) {
-        throw new Error('Bucket identifier missing.');
-    }
+        // The job that deletes the bucket with its files owns the bucket until it ends. Only `force` goes past it: a job the
+        // queue lost (a restart) leaves the bucket marked for good, and when its storage location is shared the deletion
+        // cannot be asked for again - removing the bucket record, with the files left where they are, is the way out.
+        if (isBucketDeleting(record) && !options?.force) {
+            throw bucketDeletingError();
+        }
 
-    return db.deleteFileBucket(bucketId);
+        if (!options?.force) {
+            const { items } = await db.listFileRecords({
+                providerKey: record.providerKey,
+                bucketKey: record.key,
+                projectId,
+                limit: 1,
+            });
+
+            if (items.length > 0) {
+                throw new FileServiceError('bucket_not_empty', 409, 'Bucket contains files. Remove files or use force delete.');
+            }
+        }
+
+        const bucketId = record._id?.toString();
+        if (!bucketId) {
+            throw new Error('Bucket identifier missing.');
+        }
+
+        return db.deleteFileBucket(bucketId);
+    });
 }
 
 export interface UpdateFileBucketInput extends BucketFieldsPatch {
@@ -908,57 +905,58 @@ export async function updateFileBucket(
     const { updatedBy, ...fields } = updates;
     const patch = parseBucketPatch(fields);
 
-    const db = await withTenantDb(tenantDbName);
-    const record = await requireBucketRecord(tenantDbName, tenantId, projectId, bucketKey);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const record = await requireBucketRecord(tenantDbName, tenantId, projectId, bucketKey);
 
-    const bucketId = record._id?.toString();
-    if (!bucketId) {
-        throw new Error('Bucket identifier missing.');
-    }
-
-    // The job that deletes the bucket owns it until it ends.
-    if (isBucketDeleting(record)) {
-        throw bucketDeletingError();
-    }
-
-    // Stored objects are addressed through the prefix: moving it would leave every record pointing at nothing.
-    if (patch.prefix !== undefined && patch.prefix !== resolveBucketPrefix(record)) {
-        const { items } = await db.listFileRecords({
-            providerKey: record.providerKey,
-            bucketKey: record.key,
-            projectId,
-            limit: 1,
-        });
-        if (items.length > 0) {
-            throw new FileServiceError('prefix_locked', 409, 'The prefix cannot change while the bucket holds files.');
+        const bucketId = record._id?.toString();
+        if (!bucketId) {
+            throw new Error('Bucket identifier missing.');
         }
-    }
 
-    const data: Parameters<DatabaseProvider['updateFileBucket']>[1] = { ...patch, ...(updatedBy ? { updatedBy } : {}) };
+        // The job that deletes the bucket owns it until it ends.
+        if (isBucketDeleting(record)) {
+            throw bucketDeletingError();
+        }
 
-    // The metadata a caller sends replaces the stored one, except for the keys the service keeps for itself. A bucket
-    // that is switched on again is no longer one whose deletion failed.
-    const clearsDeleteError = patch.status === 'active' && bucketDeleteError(record) !== undefined;
-    if (patch.metadata !== undefined || clearsDeleteError) {
-        const kept = reservedBucketMetadata(record.metadata);
-        if (clearsDeleteError) delete kept[BUCKET_DELETE_ERROR_KEY];
-        data.metadata = { ...(patch.metadata ?? withoutReservedBucketMetadata(record.metadata ?? {})), ...kept };
-    }
+        // Stored objects are addressed through the prefix: moving it would leave every record pointing at nothing.
+        if (patch.prefix !== undefined && patch.prefix !== resolveBucketPrefix(record)) {
+            const { items } = await db.listFileRecords({
+                providerKey: record.providerKey,
+                bucketKey: record.key,
+                projectId,
+                limit: 1,
+            });
+            if (items.length > 0) {
+                throw new FileServiceError('prefix_locked', 409, 'The prefix cannot change while the bucket holds files.');
+            }
+        }
 
-    const updated = await db.updateFileBucket(bucketId, data);
-    if (!updated) {
-        throw new FileServiceError('bucket_not_found', 404, 'File bucket not found.');
-    }
+        const data: Parameters<DatabaseProvider['updateFileBucket']>[1] = { ...patch, ...(updatedBy ? { updatedBy } : {}) };
 
-    const provider = await getProviderConfigByKey(
-        tenantDbName,
-        tenantId,
-        updated.providerKey,
-        projectId,
-    );
+        // The metadata a caller sends replaces the stored one, except for the keys the service keeps for itself. A bucket
+        // that is switched on again is no longer one whose deletion failed.
+        const clearsDeleteError = patch.status === 'active' && bucketDeleteError(record) !== undefined;
+        if (patch.metadata !== undefined || clearsDeleteError) {
+            const kept = reservedBucketMetadata(record.metadata);
+            if (clearsDeleteError) delete kept[BUCKET_DELETE_ERROR_KEY];
+            data.metadata = { ...(patch.metadata ?? withoutReservedBucketMetadata(record.metadata ?? {})), ...kept };
+        }
 
-    const view = serializeFileBucket(updated);
-    return provider ? { ...view, provider: attachDriverCapabilities(provider) } : view;
+        const updated = await db.updateFileBucket(bucketId, data);
+        if (!updated) {
+            throw new FileServiceError('bucket_not_found', 404, 'File bucket not found.');
+        }
+
+        const provider = await getProviderConfigByKey(
+            tenantDbName,
+            tenantId,
+            updated.providerKey,
+            projectId,
+        );
+
+        const view = serializeFileBucket(updated);
+        return provider ? { ...view, provider: attachDriverCapabilities(provider) } : view;
+    });
 }
 
 export async function listFiles(
@@ -979,44 +977,44 @@ export async function listFiles(
         throw new FileServiceError('provider_mismatch', 400, 'Bucket is not associated with the requested provider.');
     }
 
-    const db = await withTenantDb(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        // A folder, not a search or a filter: its files and its sub-folders, derived from the keys.
+        if (request.prefix !== undefined && !request.search && !request.type) {
+            const prefix = normalizeFolderPrefix(request.prefix);
+            const page = await db.listFileEntries({
+                providerKey: bucket.providerKey,
+                bucketKey: bucket.key,
+                projectId,
+                prefix,
+                purpose: request.purpose,
+                limit: request.limit,
+                cursor: request.cursor,
+            });
+            return {
+                items: page.items.map(serializeFileRecord) as FileRecordListItem[],
+                folders: page.folders,
+                prefix,
+                nextCursor: page.nextCursor,
+            };
+        }
 
-    // A folder, not a search or a filter: its files and its sub-folders, derived from the keys.
-    if (request.prefix !== undefined && !request.search && !request.type) {
-        const prefix = normalizeFolderPrefix(request.prefix);
-        const page = await db.listFileEntries({
+        const { items, nextCursor } = await db.listFileRecords({
             providerKey: bucket.providerKey,
             bucketKey: bucket.key,
             projectId,
-            prefix,
+            search: request.search,
+            ...(request.prefix ? { prefix: normalizeFolderPrefix(request.prefix) } : {}),
             purpose: request.purpose,
+            ...(request.type ? { type: request.type } : {}),
             limit: request.limit,
             cursor: request.cursor,
         });
+
         return {
-            items: page.items.map(serializeFileRecord) as FileRecordListItem[],
-            folders: page.folders,
-            prefix,
-            nextCursor: page.nextCursor,
+            items: items.map(serializeFileRecord) as FileRecordListItem[],
+            nextCursor,
         };
-    }
-
-    const { items, nextCursor } = await db.listFileRecords({
-        providerKey: bucket.providerKey,
-        bucketKey: bucket.key,
-        projectId,
-        search: request.search,
-        ...(request.prefix ? { prefix: normalizeFolderPrefix(request.prefix) } : {}),
-        purpose: request.purpose,
-        ...(request.type ? { type: request.type } : {}),
-        limit: request.limit,
-        cursor: request.cursor,
     });
-
-    return {
-        items: items.map(serializeFileRecord) as FileRecordListItem[],
-        nextCursor,
-    };
 }
 
 async function persistRecord(
@@ -1441,154 +1439,154 @@ export async function uploadFile(
         throw new FileServiceError('provider_mismatch', 400, 'Bucket is not associated with the provided provider key.');
     }
 
-    const db = await withTenantDb(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const fileBuffer = decodeData(request.data);
+        assertUploadAllowed(request, fileBuffer);
+        const fileName = normalizeFileName(request.fileName);
+        const chosenRelativeKey = chooseRelativeFileKey(request.keyHint, fileName);
 
-    const fileBuffer = decodeData(request.data);
-    assertUploadAllowed(request, fileBuffer);
-    const fileName = normalizeFileName(request.fileName);
-    const chosenRelativeKey = chooseRelativeFileKey(request.keyHint, fileName);
-
-    const providerObjectKey = composeProviderObjectKey(
-        bucket,
-        chosenRelativeKey,
-    );
-
-    const conversionRequested = request.convertToMarkdown ?? true;
-    // `queued`: a background job makes the copy, and only for the formats it can read (markdownSupport): a file of
-    // any other kind has nothing to wait for. The default (`sync`) converts before the call returns.
-    const convertLater = conversionRequested && request.markdown === 'queued'
-        && isMarkdownConvertible(fileName, { ocr: compactExtraction(request.extraction)?.ocr });
-    const convertNow = conversionRequested && request.markdown !== 'queued';
-    const initialStatus: FileMarkdownStatus = convertNow || convertLater ? 'pending' : 'skipped';
-    const wholeKey = namesWholeKey(request.keyHint);
-
-    // The object, then the record that carries it. An upload to a whole key writes over the file that has that key,
-    // when there is one, so the two steps are one for the uploads to that key (see `oneAtATime`): two that wrote
-    // their bytes and then looked for the record would each find none, and the one object would have two records.
-    const store = async (): Promise<{ record: FileRecordView; replaced: boolean; storedRelativeKey: string }> => {
-        const upload = await withResilience(
-            () => runtime.uploadFile({
-                key: providerObjectKey,
-                name: fileName,
-                contentType: request.contentType,
-                data: fileBuffer,
-                metadata: request.metadata,
-            }),
-            fileResilience('upload', tenantId, bucket.providerKey),
-        );
-
-        const storedRelativeKey = stripBucketPrefix(
+        const providerObjectKey = composeProviderObjectKey(
             bucket,
-            upload.handle.key ?? providerObjectKey,
+            chosenRelativeKey,
         );
 
-        const adjustedHandle: FileObjectHandle = {
-            ...upload.handle,
-            key: storedRelativeKey,
-            name: upload.handle.name ?? fileName,
-            contentType: upload.handle.contentType ?? request.contentType,
-        };
+        const conversionRequested = request.convertToMarkdown ?? true;
+        // `queued`: a background job makes the copy, and only for the formats it can read (markdownSupport): a file of
+        // any other kind has nothing to wait for. The default (`sync`) converts before the call returns.
+        const convertLater = conversionRequested && request.markdown === 'queued'
+            && isMarkdownConvertible(fileName, { ocr: compactExtraction(request.extraction)?.ocr });
+        const convertNow = conversionRequested && request.markdown !== 'queued';
+        const initialStatus: FileMarkdownStatus = convertNow || convertLater ? 'pending' : 'skipped';
+        const wholeKey = namesWholeKey(request.keyHint);
 
-        try {
-            const existing = wholeKey
-                ? await db.findFileRecordByKey(bucket.providerKey, bucket.key, storedRelativeKey, projectId)
-                : null;
-            const replacement = existing
-                ? await replaceRecord(db, runtime, bucket, existing, adjustedHandle, request, fileBuffer.length, initialStatus)
-                : null;
-            if (replacement) return { record: replacement, replaced: true, storedRelativeKey };
-            const created = await persistRecord(
-                db,
-                tenantId,
-                projectId,
-                bucket.providerKey,
-                bucket.key,
-                storedRelativeKey,
-                adjustedHandle,
-                request,
-                fileBuffer.length,
-                initialStatus,
+        // The object, then the record that carries it. An upload to a whole key writes over the file that has that key,
+        // when there is one, so the two steps are one for the uploads to that key (see `oneAtATime`): two that wrote
+        // their bytes and then looked for the record would each find none, and the one object would have two records.
+        const store = async (): Promise<{ record: FileRecordView; replaced: boolean; storedRelativeKey: string }> => {
+            const upload = await withResilience(
+                () => runtime.uploadFile({
+                    key: providerObjectKey,
+                    name: fileName,
+                    contentType: request.contentType,
+                    data: fileBuffer,
+                    metadata: request.metadata,
+                }),
+                fileResilience('upload', tenantId, bucket.providerKey),
             );
-            return { record: created, replaced: false, storedRelativeKey };
-        } catch (error) {
-            await discardUploadedObject(db, runtime, bucket, projectId, storedRelativeKey);
-            throw error;
-        }
-    };
-    // The plan storage: checked and held for the write; an upload over a file counts only what it adds to it.
-    const storeWithinStorage = async () => {
-        const before = wholeKey
-            ? await db.findFileRecordByKey(bucket.providerKey, bucket.key, chosenRelativeKey, projectId)
-            : null;
-        return withStorageReservation({
-            tenantId,
-            incomingBytes: fileBuffer.length - storedBytesOf(before),
-            source: { type: 'user', id: request.createdBy },
-        }, store);
-    };
-    const { record, replaced, storedRelativeKey } = wholeKey
-        ? await oneAtATime(`upload:${tenantId}:${bucket.providerKey}:${bucket.key}:${chosenRelativeKey}`, storeWithinStorage)
-        : await storeWithinStorage();
 
-    await withdrawIfBucketClosed(db, runtime, bucket, projectId, record, replaced);
+            const storedRelativeKey = stripBucketPrefix(
+                bucket,
+                upload.handle.key ?? providerObjectKey,
+            );
 
-    if (convertLater) {
-        return {
-            record: await handOverToConversionJob(db, record, {
-                tenantDbName,
-                tenantId,
-                projectId,
-                bucketKey: bucket.key,
+            const adjustedHandle: FileObjectHandle = {
+                ...upload.handle,
                 key: storedRelativeKey,
-                recordId: record.id,
-                actor: request.createdBy,
-            }),
-        };
-    }
+                name: upload.handle.name ?? fileName,
+                contentType: upload.handle.contentType ?? request.contentType,
+            };
 
-    if (!convertNow) {
-        return {
+            try {
+                const existing = wholeKey
+                    ? await db.findFileRecordByKey(bucket.providerKey, bucket.key, storedRelativeKey, projectId)
+                    : null;
+                const replacement = existing
+                    ? await replaceRecord(db, runtime, bucket, existing, adjustedHandle, request, fileBuffer.length, initialStatus)
+                    : null;
+                if (replacement) return { record: replacement, replaced: true, storedRelativeKey };
+                const created = await persistRecord(
+                    db,
+                    tenantId,
+                    projectId,
+                    bucket.providerKey,
+                    bucket.key,
+                    storedRelativeKey,
+                    adjustedHandle,
+                    request,
+                    fileBuffer.length,
+                    initialStatus,
+                );
+                return { record: created, replaced: false, storedRelativeKey };
+            } catch (error) {
+                await discardUploadedObject(db, runtime, bucket, projectId, storedRelativeKey);
+                throw error;
+            }
+        };
+        // The plan storage: checked and held for the write; an upload over a file counts only what it adds to it.
+        const storeWithinStorage = async () => {
+            const before = wholeKey
+                ? await db.findFileRecordByKey(bucket.providerKey, bucket.key, chosenRelativeKey, projectId)
+                : null;
+            return withStorageReservation({
+                tenantId,
+                incomingBytes: fileBuffer.length - storedBytesOf(before),
+                source: { type: 'user', id: request.createdBy },
+            }, store);
+        };
+        const { record, replaced, storedRelativeKey } = wholeKey
+            ? await oneAtATime(`upload:${tenantId}:${bucket.providerKey}:${bucket.key}:${chosenRelativeKey}`, storeWithinStorage)
+            : await storeWithinStorage();
+
+        await withdrawIfBucketClosed(db, runtime, bucket, projectId, record, replaced);
+
+        if (convertLater) {
+            return {
+                record: await handOverToConversionJob(db, record, {
+                    tenantDbName,
+                    tenantId,
+                    projectId,
+                    bucketKey: bucket.key,
+                    key: storedRelativeKey,
+                    recordId: record.id,
+                    actor: request.createdBy,
+                }),
+            };
+        }
+
+        if (!convertNow) {
+            return {
+                record,
+            };
+        }
+
+        const conversion = await applyMarkdownConversion(
+            runtime,
+            bucket,
             record,
+            request,
+            fileBuffer,
+            db,
+            {
+                tenantDbName,
+                projectId,
+                userId: request.createdBy,
+                budget: 'inline',
+                ...(request.signal ? { signal: request.signal } : {}),
+            },
+        );
+
+        const settled = await db.updateFileRecord(record.id, {
+            markdownStatus: conversion.markdownStatus,
+            markdownKey: conversion.markdownKey,
+            markdownSize: conversion.markdownSize,
+            markdownContentType: conversion.markdownContentType,
+            markdownError: conversion.markdownError,
+            ...(conversion.markdownExtraction ? { markdownExtraction: conversion.markdownExtraction } : {}),
+            updatedBy: request.createdBy,
+        });
+        if (!settled) {
+            // The bucket's deletion took the file while it was converted.
+            await discardOrphanedCopy(runtime, bucket, conversion);
+            throw bucketDeletingError();
+        }
+
+        const updated = await db.findFileRecordById(record.id);
+        const view = updated ? serializeFileRecord(updated) : record;
+
+        return {
+            record: view,
         };
-    }
-
-    const conversion = await applyMarkdownConversion(
-        runtime,
-        bucket,
-        record,
-        request,
-        fileBuffer,
-        db,
-        {
-            tenantDbName,
-            projectId,
-            userId: request.createdBy,
-            budget: 'inline',
-            ...(request.signal ? { signal: request.signal } : {}),
-        },
-    );
-
-    const settled = await db.updateFileRecord(record.id, {
-        markdownStatus: conversion.markdownStatus,
-        markdownKey: conversion.markdownKey,
-        markdownSize: conversion.markdownSize,
-        markdownContentType: conversion.markdownContentType,
-        markdownError: conversion.markdownError,
-        ...(conversion.markdownExtraction ? { markdownExtraction: conversion.markdownExtraction } : {}),
-        updatedBy: request.createdBy,
     });
-    if (!settled) {
-        // The bucket's deletion took the file while it was converted.
-        await discardOrphanedCopy(runtime, bucket, conversion);
-        throw bucketDeletingError();
-    }
-
-    const updated = await db.findFileRecordById(record.id);
-    const view = updated ? serializeFileRecord(updated) : record;
-
-    return {
-        record: view,
-    };
 }
 
 /**
@@ -1637,35 +1635,36 @@ export async function replaceFileContent(
             fileResilience('upload', tenantId, bucket.providerKey),
         );
 
-        const db = await withTenantDb(tenantDbName);
-        const conversion: UpdateFileConversionPayload = input.convertToMarkdown === false
-            ? { markdownStatus: 'skipped' }
-            : await applyMarkdownConversion(runtime, bucket, record, request, input.data, db, {
-                tenantDbName,
-                projectId,
-                userId: input.updatedBy,
-                budget: 'inline',
-                ...(input.signal ? { signal: input.signal } : {}),
+        return runWithTenantScope(tenantDbName, async (db) => {
+            const conversion: UpdateFileConversionPayload = input.convertToMarkdown === false
+                ? { markdownStatus: 'skipped' }
+                : await applyMarkdownConversion(runtime, bucket, record, request, input.data, db, {
+                    tenantDbName,
+                    projectId,
+                    userId: input.updatedBy,
+                    budget: 'inline',
+                    ...(input.signal ? { signal: input.signal } : {}),
+                });
+            // What the last run found belongs to the old bytes: a run that did not produce a new result leaves none behind.
+            const clearedExtraction = !conversion.markdownExtraction && record.markdownExtraction
+                ? { markdownExtraction: compactExtraction(record.markdownExtraction) ?? null }
+                : {};
+            const updated = await db.updateFileRecord(record.id, {
+                size: upload.handle.size ?? input.data.length,
+                checksum: upload.handle.checksum,
+                etag: upload.handle.etag,
+                ...conversion,
+                ...clearedExtraction,
+                updatedBy: input.updatedBy,
             });
-        // What the last run found belongs to the old bytes: a run that did not produce a new result leaves none behind.
-        const clearedExtraction = !conversion.markdownExtraction && record.markdownExtraction
-            ? { markdownExtraction: compactExtraction(record.markdownExtraction) ?? null }
-            : {};
-        const updated = await db.updateFileRecord(record.id, {
-            size: upload.handle.size ?? input.data.length,
-            checksum: upload.handle.checksum,
-            etag: upload.handle.etag,
-            ...conversion,
-            ...clearedExtraction,
-            updatedBy: input.updatedBy,
+            if (!updated) {
+                // The file was deleted (its bucket with it) while the new content was written: the object and the copy have no record.
+                await discardUploadedObject(db, runtime, bucket, projectId, record.key);
+                await discardOrphanedCopy(runtime, bucket, conversion);
+                throw new FileServiceError('file_not_found', 404, 'File record not found.');
+            }
+            return serializeFileRecord(updated);
         });
-        if (!updated) {
-            // The file was deleted (its bucket with it) while the new content was written: the object and the copy have no record.
-            await discardUploadedObject(db, runtime, bucket, projectId, record.key);
-            await discardOrphanedCopy(runtime, bucket, conversion);
-            throw new FileServiceError('file_not_found', 404, 'File record not found.');
-        }
-        return serializeFileRecord(updated);
     });
 }
 
@@ -1717,19 +1716,20 @@ export async function findFileRecord(
     bucket: IFileBucketRecord,
     key: string,
 ): Promise<IFileRecord> {
-    const db = await withTenantDb(tenantDbName);
-    const record = await db.findFileRecordByKey(
-        bucket.providerKey,
-        bucket.key,
-        key,
-        projectId,
-    );
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const record = await db.findFileRecordByKey(
+            bucket.providerKey,
+            bucket.key,
+            key,
+            projectId,
+        );
 
-    if (!record) {
-        throw new FileServiceError('file_not_found', 404, 'File record not found.');
-    }
+        if (!record) {
+            throw new FileServiceError('file_not_found', 404, 'File record not found.');
+        }
 
-    return record;
+        return record;
+    });
 }
 
 /**
@@ -1856,11 +1856,12 @@ export async function deleteFile(
 
     await removeStoredObjects(runtime, bucket, record);
 
-    const db = await withTenantDb(tenantDbName);
-    logger.debug('Deleting file record', { bucketKey: bucket.key, key: record.key, deletedBy });
-    const deleted = await db.deleteFileRecord(record.id);
-    forgetStoredBytes(tenantId);
-    return deleted;
+    return runWithTenantScope(tenantDbName, async (db) => {
+        logger.debug('Deleting file record', { bucketKey: bucket.key, key: record.key, deletedBy });
+        const deleted = await db.deleteFileRecord(record.id);
+        forgetStoredBytes(tenantId);
+        return deleted;
+    });
 }
 
 export async function getFileRecord(

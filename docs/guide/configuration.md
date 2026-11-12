@@ -76,6 +76,7 @@ Production refuses to start unless `PROVIDER_ENCRYPTION_SECRET` is valid, and in
 |----------|-------------|---------|
 | `TRUSTED_PROXIES` | Comma-separated IPs / CIDRs of the reverse proxies or load balancers allowed to set `X-Forwarded-For`. Token IP allowlists and the IP condition of access policies use the address resolved through them; unset, they use the direct connection address and ignore forwarded headers, while rate limits and audit logs take the address from `X-Forwarded-For` as received (in production a startup warning says so). | — |
 | `IAM_VALIDATE_REQUESTS` | Set to `1` to validate every authorization request against the engine's schema (diagnostics; adds about 0.1 ms per decision). | off |
+| `AUTHZ_STRICT_REGISTRATION` | Set to `1` to make the API refuse to start when an `/api` route declares no authorization (neither `config.authz` nor a service path prefix). Always on under `NODE_ENV=test`. Without it, such a route is logged once at startup and every request to it is refused with `403 route_not_declared`. Intended for developers and CI. | off |
 
 There is no switch for the authorization engine itself: it decides every request. See [Authorization](/guide/authorization).
 

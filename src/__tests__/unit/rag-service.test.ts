@@ -4,10 +4,7 @@ import { runWithRequestContext } from '@/lib/core/requestContext';
 
 vi.mock('@/lib/database', () => {
   const getDatabase = vi.fn();
-  return {
-    getDatabase,
-    runWithTenantScope: vi.fn(async (_tenant: string, fn: (db: unknown) => unknown) => fn(await getDatabase())),
-  };
+  return { getDatabase, runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(await getDatabase())) };
 });
 vi.mock('@cognipeer/to-markdown', () => ({
   convertToMarkdown: vi.fn().mockResolvedValue('## Converted markdown content'),
@@ -64,7 +61,7 @@ import {
   getRagDocumentTextLines,
 } from '@/lib/services/rag/ragService';
 import { hashSourceText, INLINE_SOURCE_MAX_CHARS } from '@/lib/services/rag/ragSource';
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import { upsertVectors, queryVectorIndex, deleteVectors } from '@/lib/services/vector/vectorService';
 import { runReranker } from '@/lib/services/reranker';
@@ -180,7 +177,7 @@ describe('RAG Service', () => {
       );
     });
 
-    it('switches to tenant database', async () => {
+    it('runs in the tenant scope', async () => {
       db.findRagModuleByKey.mockResolvedValue(null);
       db.createRagModule.mockResolvedValue(mockModule);
       await createRagModule(DB_NAME, TENANT_ID, PROJECT_ID, {
@@ -191,7 +188,7 @@ describe('RAG Service', () => {
         chunkConfig: { strategy: 'recursive_character' as const, chunkSize: 400, chunkOverlap: 0 },
         createdBy: 'user-1',
       });
-      expect(db.switchToTenant).toHaveBeenCalledWith(DB_NAME);
+      expect(runWithTenantScope).toHaveBeenCalledWith(DB_NAME, expect.any(Function));
     });
 
     it('throws if module key already exists', async () => {

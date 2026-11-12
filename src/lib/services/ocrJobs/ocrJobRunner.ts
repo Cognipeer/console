@@ -10,7 +10,7 @@
 
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase, type DatabaseProvider } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import type { IModel, IOcrJob, IOcrJobItem, IOcrJobItemResult } from '@/lib/database';
 import {
   handleChatCompletion,
@@ -32,12 +32,6 @@ const logger = createLogger('ocr-job:runner');
 
 /** Set on a pending item whose queue message arrived while its job was paused. */
 export const OCR_ITEM_HELD_WHILE_PAUSED = 'Waiting: the job was paused';
-
-async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
-}
 
 const DEFAULT_SUMMARY_PROMPT =
   'Summarize the following document text concisely, preserving key facts, names, dates, and figures.';
@@ -147,301 +141,302 @@ interface ProcessedTotals {
  * per-document failures so the queue does not retry indefinitely on bad input.
  */
 export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promise<IOcrJobItem | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const item = await db.findOcrJobItemById(itemId);
-  if (!item || item.tenantId !== ctx.tenantId) {
-    logger.warn('OCR item not found, skipping', { itemId });
-    return null;
-  }
-  if (item.status === 'succeeded') return item;
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const item = await db.findOcrJobItemById(itemId);
+    if (!item || item.tenantId !== ctx.tenantId) {
+      logger.warn('OCR item not found, skipping', { itemId });
+      return null;
+    }
+    if (item.status === 'succeeded') return item;
 
-  const job = await db.findOcrJobById(item.jobId);
-  if (!job) {
-    logger.warn('OCR job not found for item, skipping', { itemId, jobId: item.jobId });
-    return null;
-  }
-  if (job.status === 'archived') {
-    await db.updateOcrJobItem(itemId, { status: 'failed', errorMessage: 'Job archived', endedAt: new Date() });
-    await db.incrementOcrJobAggregates(item.jobId, { itemsFailed: 1 }, { lastItemAt: new Date() });
-    return null;
-  }
+    const job = await db.findOcrJobById(item.jobId);
+    if (!job) {
+      logger.warn('OCR job not found for item, skipping', { itemId, jobId: item.jobId });
+      return null;
+    }
+    if (job.status === 'archived') {
+      await db.updateOcrJobItem(itemId, { status: 'failed', errorMessage: 'Job archived', endedAt: new Date() });
+      await db.incrementOcrJobAggregates(item.jobId, { itemsFailed: 1 }, { lastItemAt: new Date() });
+      return null;
+    }
 
-  // A paused job keeps its queued items pending rather than failing them. The
-  // marker tells the resume which items lost their queue message here, so it
-  // re-enqueues exactly those (items still waiting in the queue are left alone).
-  if (job.status === 'paused') {
-    logger.info('OCR job is paused, leaving item pending', { itemId, jobId: item.jobId });
-    return db.updateOcrJobItem(itemId, { errorMessage: OCR_ITEM_HELD_WHILE_PAUSED });
-  }
+    // A paused job keeps its queued items pending rather than failing them. The
+    // marker tells the resume which items lost their queue message here, so it
+    // re-enqueues exactly those (items still waiting in the queue are left alone).
+    if (job.status === 'paused') {
+      logger.info('OCR job is paused, leaving item pending', { itemId, jobId: item.jobId });
+      return db.updateOcrJobItem(itemId, { errorMessage: OCR_ITEM_HELD_WHILE_PAUSED });
+    }
 
-  await db.updateOcrJobItem(itemId, { status: 'running', startedAt: new Date() });
-  const startedAt = Date.now();
-  // Hoisted so a failure after OCR (or a first LLM step) still rolls the tokens,
-  // pages and cost already billed into the item and the job aggregates.
-  const totals: ProcessedTotals = {
-    inputTokens: 0, outputTokens: 0, totalTokens: 0, pages: 0,
-    ocrTokens: 0, llmTokens: 0, costOcr: 0, costLlm: 0, cost: 0,
-  };
-  let llmPricing: Parameters<typeof calculateCost>[0] | undefined;
-  // Set once the success aggregates hold this item's tokens and cost: a later
-  // failure (callback status, completion check) must not add them a second time.
-  let aggregated = false;
-
-  try {
-    // Inside the try so a switched-off service fails this item (recorded,
-    // webhook sent, job completion counted) instead of throwing into the queue
-    // and being retried. A paused job was already held above.
-    await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'ocr');
-    const projectId = ctx.projectId ?? '';
-    const document = await resolveDocument(ctx, item);
-
-    const ocr = await handleOcrRequest({
-      tenantDbName: ctx.tenantDbName,
-      modelKey: job.ocrModelKey,
-      projectId,
-      input: {
-        document,
-        language: job.language,
-        features: (job.features as OcrFeature[] | undefined) ?? undefined,
-        pdfMaxPages: job.pdfMaxPages,
-      },
-    });
-
-    const fullText = ocr.response?.text ?? '';
-    const ocrUsage = ocr.response?.usage ?? {};
-    const result: IOcrJobItemResult = {};
-    const usage: NonNullable<IOcrJobItem['usage']> = { ocr: ocrUsage as Record<string, unknown> };
-
-    // Steps whose reply was cut off at the output limit: the item still succeeds (the text it has is kept),
-    // but the result says which part is incomplete. 'ocr' = a VLM page whose transcription was cut off.
-    const truncatedSteps: NonNullable<IOcrJobItemResult['truncated']> = [];
-    if (ocr.response?.pages?.some((p) => p.truncated)) truncatedSteps.push('ocr');
-
-    if (job.outputs.includes('full_text')) result.fullText = fullText;
-    result.pages = ocrUsage.pages;
-
-    // ── Cost: OCR ──
-    const ocrTokenUsage: TokenUsage = {
-      inputTokens: ocrUsage.inputTokens,
-      outputTokens: ocrUsage.outputTokens,
-      pages: ocrUsage.pages,
-      ...(ocrUsage.cachedInputTokens ? { cachedInputTokens: ocrUsage.cachedInputTokens } : {}),
-      ...(ocrUsage.cachedWriteTokens ? { cachedWriteTokens: ocrUsage.cachedWriteTokens } : {}),
-      ...(ocrUsage.reasoningTokens ? { reasoningTokens: ocrUsage.reasoningTokens } : {}),
+    await db.updateOcrJobItem(itemId, { status: 'running', startedAt: new Date() });
+    const startedAt = Date.now();
+    // Hoisted so a failure after OCR (or a first LLM step) still rolls the tokens,
+    // pages and cost already billed into the item and the job aggregates.
+    const totals: ProcessedTotals = {
+      inputTokens: 0, outputTokens: 0, totalTokens: 0, pages: 0,
+      ocrTokens: 0, llmTokens: 0, costOcr: 0, costLlm: 0, cost: 0,
     };
-    if (ocr.model?.pricing) {
-      const c = calculateCost(ocr.model.pricing, ocrTokenUsage, ocr.model);
-      totals.costOcr += c.totalCost;
-      totals.cost += c.totalCost;
-      totals.currency = c.currency;
-    }
-    totals.inputTokens += ocrUsage.inputTokens ?? 0;
-    totals.outputTokens += ocrUsage.outputTokens ?? 0;
-    totals.ocrTokens += (ocrUsage.inputTokens ?? 0) + (ocrUsage.outputTokens ?? 0);
-    totals.pages += ocrUsage.pages ?? 0;
+    let llmPricing: Parameters<typeof calculateCost>[0] | undefined;
+    // Set once the success aggregates hold this item's tokens and cost: a later
+    // failure (callback status, completion check) must not add them a second time.
+    let aggregated = false;
 
-    // ── Summary / structured via LLM ──
-    const needsLlm = job.outputs.includes('summary') || job.outputs.includes('structured');
-    if (needsLlm && job.llmModelKey) {
-      const llmModel = await getModelByKey(ctx.tenantDbName, job.llmModelKey, projectId);
-      llmPricing = llmModel?.pricing;
-      const stepMaxTokens = llmStepMaxTokens(llmModel);
-      if (job.outputs.includes('summary')) {
-        const resp = await handleChatCompletion({
-          tenantDbName: ctx.tenantDbName,
-          modelKey: job.llmModelKey,
-          projectId,
-          body: {
-            messages: [
-              { role: 'system', content: job.summaryPrompt || DEFAULT_SUMMARY_PROMPT },
-              { role: 'user', content: fullText },
-            ],
-            ...(stepMaxTokens !== undefined ? { max_tokens: stepMaxTokens } : {}),
-          },
-        });
-        result.summary = extractMessageText(resp.response).trim();
-        if (wasCutOff(resp.response)) truncatedSteps.push('summary');
-        usage.llm = { ...(usage.llm ?? {}), summary: resp.usage };
-        accumulateLlm(totals, resp.usage, llmModel?.pricing);
+    try {
+      // Inside the try so a switched-off service fails this item (recorded,
+      // webhook sent, job completion counted) instead of throwing into the queue
+      // and being retried. A paused job was already held above.
+      await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'ocr');
+      const projectId = ctx.projectId ?? '';
+      const document = await resolveDocument(ctx, item);
+
+      const ocr = await handleOcrRequest({
+        tenantDbName: ctx.tenantDbName,
+        modelKey: job.ocrModelKey,
+        projectId,
+        input: {
+          document,
+          language: job.language,
+          features: (job.features as OcrFeature[] | undefined) ?? undefined,
+          pdfMaxPages: job.pdfMaxPages,
+        },
+      });
+
+      const fullText = ocr.response?.text ?? '';
+      const ocrUsage = ocr.response?.usage ?? {};
+      const result: IOcrJobItemResult = {};
+      const usage: NonNullable<IOcrJobItem['usage']> = { ocr: ocrUsage as Record<string, unknown> };
+
+      // Steps whose reply was cut off at the output limit: the item still succeeds (the text it has is kept),
+      // but the result says which part is incomplete. 'ocr' = a VLM page whose transcription was cut off.
+      const truncatedSteps: NonNullable<IOcrJobItemResult['truncated']> = [];
+      if (ocr.response?.pages?.some((p) => p.truncated)) truncatedSteps.push('ocr');
+
+      if (job.outputs.includes('full_text')) result.fullText = fullText;
+      result.pages = ocrUsage.pages;
+
+      // ── Cost: OCR ──
+      const ocrTokenUsage: TokenUsage = {
+        inputTokens: ocrUsage.inputTokens,
+        outputTokens: ocrUsage.outputTokens,
+        pages: ocrUsage.pages,
+        ...(ocrUsage.cachedInputTokens ? { cachedInputTokens: ocrUsage.cachedInputTokens } : {}),
+        ...(ocrUsage.cachedWriteTokens ? { cachedWriteTokens: ocrUsage.cachedWriteTokens } : {}),
+        ...(ocrUsage.reasoningTokens ? { reasoningTokens: ocrUsage.reasoningTokens } : {}),
+      };
+      if (ocr.model?.pricing) {
+        const c = calculateCost(ocr.model.pricing, ocrTokenUsage, ocr.model);
+        totals.costOcr += c.totalCost;
+        totals.cost += c.totalCost;
+        totals.currency = c.currency;
       }
+      totals.inputTokens += ocrUsage.inputTokens ?? 0;
+      totals.outputTokens += ocrUsage.outputTokens ?? 0;
+      totals.ocrTokens += (ocrUsage.inputTokens ?? 0) + (ocrUsage.outputTokens ?? 0);
+      totals.pages += ocrUsage.pages ?? 0;
 
-      if (job.outputs.includes('structured') && job.structuredSchema) {
-        const resp = await handleChatCompletion({
-          tenantDbName: ctx.tenantDbName,
-          modelKey: job.llmModelKey,
-          projectId,
-          body: {
-            messages: [
-              {
-                role: 'system',
-                content: `${DEFAULT_STRUCTURED_PROMPT}\n\nJSON Schema:\n${JSON.stringify(job.structuredSchema)}`,
-              },
-              { role: 'user', content: fullText },
-            ],
-            response_format: {
-              type: 'json_schema',
-              json_schema: { name: 'extraction', schema: job.structuredSchema },
+      // ── Summary / structured via LLM ──
+      const needsLlm = job.outputs.includes('summary') || job.outputs.includes('structured');
+      if (needsLlm && job.llmModelKey) {
+        const llmModel = await getModelByKey(ctx.tenantDbName, job.llmModelKey, projectId);
+        llmPricing = llmModel?.pricing;
+        const stepMaxTokens = llmStepMaxTokens(llmModel);
+        if (job.outputs.includes('summary')) {
+          const resp = await handleChatCompletion({
+            tenantDbName: ctx.tenantDbName,
+            modelKey: job.llmModelKey,
+            projectId,
+            body: {
+              messages: [
+                { role: 'system', content: job.summaryPrompt || DEFAULT_SUMMARY_PROMPT },
+                { role: 'user', content: fullText },
+              ],
+              ...(stepMaxTokens !== undefined ? { max_tokens: stepMaxTokens } : {}),
             },
-            ...(stepMaxTokens !== undefined ? { max_tokens: stepMaxTokens } : {}),
-          },
-        });
-        const raw = extractMessageText(resp.response);
-        if (wasCutOff(resp.response)) {
-          // A reply cut at the limit is not the object the schema asked for (the JSON stops mid-value, and one that
-          // still parses is missing fields). Kept raw and flagged, never stored as a parsed result.
-          result.structured = { _raw: raw, _truncated: true };
-          truncatedSteps.push('structured');
-        } else {
-          try {
-            result.structured = JSON.parse(stripJsonFences(raw)) as Record<string, unknown>;
-          } catch {
-            result.structured = { _raw: raw, _parseError: true };
-          }
+          });
+          result.summary = extractMessageText(resp.response).trim();
+          if (wasCutOff(resp.response)) truncatedSteps.push('summary');
+          usage.llm = { ...(usage.llm ?? {}), summary: resp.usage };
+          accumulateLlm(totals, resp.usage, llmModel?.pricing);
         }
-        usage.llm = { ...(usage.llm ?? {}), structured: resp.usage };
-        accumulateLlm(totals, resp.usage, llmModel?.pricing);
+
+        if (job.outputs.includes('structured') && job.structuredSchema) {
+          const resp = await handleChatCompletion({
+            tenantDbName: ctx.tenantDbName,
+            modelKey: job.llmModelKey,
+            projectId,
+            body: {
+              messages: [
+                {
+                  role: 'system',
+                  content: `${DEFAULT_STRUCTURED_PROMPT}\n\nJSON Schema:\n${JSON.stringify(job.structuredSchema)}`,
+                },
+                { role: 'user', content: fullText },
+              ],
+              response_format: {
+                type: 'json_schema',
+                json_schema: { name: 'extraction', schema: job.structuredSchema },
+              },
+              ...(stepMaxTokens !== undefined ? { max_tokens: stepMaxTokens } : {}),
+            },
+          });
+          const raw = extractMessageText(resp.response);
+          if (wasCutOff(resp.response)) {
+            // A reply cut at the limit is not the object the schema asked for (the JSON stops mid-value, and one that
+            // still parses is missing fields). Kept raw and flagged, never stored as a parsed result.
+            result.structured = { _raw: raw, _truncated: true };
+            truncatedSteps.push('structured');
+          } else {
+            try {
+              result.structured = JSON.parse(stripJsonFences(raw)) as Record<string, unknown>;
+            } catch {
+              result.structured = { _raw: raw, _parseError: true };
+            }
+          }
+          usage.llm = { ...(usage.llm ?? {}), structured: resp.usage };
+          accumulateLlm(totals, resp.usage, llmModel?.pricing);
+        }
+
       }
 
-    }
+      if (truncatedSteps.length > 0) result.truncated = truncatedSteps;
 
-    if (truncatedSteps.length > 0) result.truncated = truncatedSteps;
+      totals.totalTokens = totals.inputTokens + totals.outputTokens;
+      usage.inputTokens = totals.inputTokens;
+      usage.outputTokens = totals.outputTokens;
+      usage.totalTokens = totals.totalTokens;
+      usage.pages = totals.pages;
 
-    totals.totalTokens = totals.inputTokens + totals.outputTokens;
-    usage.inputTokens = totals.inputTokens;
-    usage.outputTokens = totals.outputTokens;
-    usage.totalTokens = totals.totalTokens;
-    usage.pages = totals.pages;
-
-    const updated = await db.updateOcrJobItem(itemId, {
-      status: 'succeeded',
-      result,
-      usage,
-      costTotal: totals.cost,
-      costCurrency: totals.currency,
-      endedAt: new Date(),
-    });
-
-    const afterJob = await db.incrementOcrJobAggregates(
-      item.jobId,
-      {
-        itemsProcessed: 1,
-        usageInputTokens: totals.inputTokens,
-        usageOutputTokens: totals.outputTokens,
-        usageTotalTokens: totals.totalTokens,
-        usagePages: totals.pages,
-        usageOcrTokens: totals.ocrTokens,
-        usageLlmTokens: totals.llmTokens,
-        costOcr: totals.costOcr,
-        costLlm: totals.costLlm,
+      const updated = await db.updateOcrJobItem(itemId, {
+        status: 'succeeded',
+        result,
+        usage,
         costTotal: totals.cost,
-      },
-      { costCurrency: totals.currency, lastItemAt: new Date() },
-    );
-    aggregated = true;
+        costCurrency: totals.currency,
+        endedAt: new Date(),
+      });
 
-    // Rollup event per item — attribution comes from the fields stamped on
-    // the job row at creation (the runner is outside the request ALS). No
-    // tokens/cost: OCR + LLM calls already meter via logModelUsage.
-    recordUsageEvent({
-      tenantDbName: ctx.tenantDbName,
-      tenantId: ctx.tenantId,
-      projectId: job.projectId,
-      service: 'ocr',
-      refKey: job.ocrModelKey,
-      status: 'success',
-      latencyMs: Date.now() - startedAt,
-      units: { items: 1, pages: totals.pages },
-      attribution: {
-        userId: job.userId,
-        apiTokenId: job.apiTokenId,
-        actorType: job.actorType,
-      },
-    });
+      const afterJob = await db.incrementOcrJobAggregates(
+        item.jobId,
+        {
+          itemsProcessed: 1,
+          usageInputTokens: totals.inputTokens,
+          usageOutputTokens: totals.outputTokens,
+          usageTotalTokens: totals.totalTokens,
+          usagePages: totals.pages,
+          usageOcrTokens: totals.ocrTokens,
+          usageLlmTokens: totals.llmTokens,
+          costOcr: totals.costOcr,
+          costLlm: totals.costLlm,
+          costTotal: totals.cost,
+        },
+        { costCurrency: totals.currency, lastItemAt: new Date() },
+      );
+      aggregated = true;
 
-    const delivered = await sendOcrJobWebhook({
-      job,
-      event: 'item.succeeded',
-      data: { itemId, index: item.index, fileName: item.fileName, result, usage, cost: totals.cost, currency: totals.currency },
-    }).catch(() => false);
-    if (job.callbackUrl) {
-      await db.updateOcrJobItem(itemId, { callbackStatus: delivered ? 'delivered' : 'failed' });
+      // Rollup event per item — attribution comes from the fields stamped on
+      // the job row at creation (the runner is outside the request ALS). No
+      // tokens/cost: OCR + LLM calls already meter via logModelUsage.
+      recordUsageEvent({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: job.projectId,
+        service: 'ocr',
+        refKey: job.ocrModelKey,
+        status: 'success',
+        latencyMs: Date.now() - startedAt,
+        units: { items: 1, pages: totals.pages },
+        attribution: {
+          userId: job.userId,
+          apiTokenId: job.apiTokenId,
+          actorType: job.actorType,
+        },
+      });
+
+      const delivered = await sendOcrJobWebhook({
+        job,
+        event: 'item.succeeded',
+        data: { itemId, index: item.index, fileName: item.fileName, result, usage, cost: totals.cost, currency: totals.currency },
+      }).catch(() => false);
+      if (job.callbackUrl) {
+        await db.updateOcrJobItem(itemId, { callbackStatus: delivered ? 'delivered' : 'failed' });
+      }
+
+      await maybeFireJobCompleted(afterJob);
+
+      logger.info('OCR item succeeded', { itemId, jobId: item.jobId, durationMs: Date.now() - startedAt });
+      return updated ?? item;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // An output-limit hit burned real LLM tokens that never reached a response.
+      if ((err instanceof OutputTokenLimitError || err instanceof UpstreamFinishError) && err.usage) {
+        accumulateLlm(totals, err.usage, llmPricing);
+      }
+      totals.totalTokens = totals.inputTokens + totals.outputTokens;
+      const burned = !aggregated
+        && (totals.inputTokens > 0 || totals.outputTokens > 0 || totals.pages > 0 || totals.cost > 0);
+      await db.updateOcrJobItem(itemId, {
+        status: 'failed',
+        errorMessage: message,
+        endedAt: new Date(),
+        ...(burned
+          ? {
+              usage: {
+                inputTokens: totals.inputTokens,
+                outputTokens: totals.outputTokens,
+                totalTokens: totals.totalTokens,
+                pages: totals.pages,
+              },
+              costTotal: totals.cost,
+              ...(totals.currency ? { costCurrency: totals.currency } : {}),
+            }
+          : {}),
+      });
+      const afterJob = await db.incrementOcrJobAggregates(
+        item.jobId,
+        burned
+          ? {
+              itemsFailed: 1,
+              usageInputTokens: totals.inputTokens,
+              usageOutputTokens: totals.outputTokens,
+              usageTotalTokens: totals.totalTokens,
+              usagePages: totals.pages,
+              usageOcrTokens: totals.ocrTokens,
+              usageLlmTokens: totals.llmTokens,
+              costOcr: totals.costOcr,
+              costLlm: totals.costLlm,
+              costTotal: totals.cost,
+            }
+          : { itemsFailed: 1 },
+        { ...(burned && totals.currency ? { costCurrency: totals.currency } : {}), lastItemAt: new Date() },
+      );
+      recordUsageEvent({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: job.projectId,
+        service: 'ocr',
+        refKey: job.ocrModelKey,
+        status: 'error',
+        latencyMs: Date.now() - startedAt,
+        units: { items: 1 },
+        attribution: {
+          userId: job.userId,
+          apiTokenId: job.apiTokenId,
+          actorType: job.actorType,
+        },
+      });
+      const delivered = await sendOcrJobWebhook({
+        job,
+        event: 'item.failed',
+        data: { itemId, index: item.index, fileName: item.fileName, error: message },
+      }).catch(() => false);
+      if (job.callbackUrl) {
+        await db.updateOcrJobItem(itemId, { callbackStatus: delivered ? 'delivered' : 'failed' });
+      }
+      await maybeFireJobCompleted(afterJob);
+      logger.error('OCR item failed', { itemId, jobId: item.jobId, error: message });
+      return null;
     }
-
-    await maybeFireJobCompleted(afterJob);
-
-    logger.info('OCR item succeeded', { itemId, jobId: item.jobId, durationMs: Date.now() - startedAt });
-    return updated ?? item;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    // An output-limit hit burned real LLM tokens that never reached a response.
-    if ((err instanceof OutputTokenLimitError || err instanceof UpstreamFinishError) && err.usage) {
-      accumulateLlm(totals, err.usage, llmPricing);
-    }
-    totals.totalTokens = totals.inputTokens + totals.outputTokens;
-    const burned = !aggregated
-      && (totals.inputTokens > 0 || totals.outputTokens > 0 || totals.pages > 0 || totals.cost > 0);
-    await db.updateOcrJobItem(itemId, {
-      status: 'failed',
-      errorMessage: message,
-      endedAt: new Date(),
-      ...(burned
-        ? {
-            usage: {
-              inputTokens: totals.inputTokens,
-              outputTokens: totals.outputTokens,
-              totalTokens: totals.totalTokens,
-              pages: totals.pages,
-            },
-            costTotal: totals.cost,
-            ...(totals.currency ? { costCurrency: totals.currency } : {}),
-          }
-        : {}),
-    });
-    const afterJob = await db.incrementOcrJobAggregates(
-      item.jobId,
-      burned
-        ? {
-            itemsFailed: 1,
-            usageInputTokens: totals.inputTokens,
-            usageOutputTokens: totals.outputTokens,
-            usageTotalTokens: totals.totalTokens,
-            usagePages: totals.pages,
-            usageOcrTokens: totals.ocrTokens,
-            usageLlmTokens: totals.llmTokens,
-            costOcr: totals.costOcr,
-            costLlm: totals.costLlm,
-            costTotal: totals.cost,
-          }
-        : { itemsFailed: 1 },
-      { ...(burned && totals.currency ? { costCurrency: totals.currency } : {}), lastItemAt: new Date() },
-    );
-    recordUsageEvent({
-      tenantDbName: ctx.tenantDbName,
-      tenantId: ctx.tenantId,
-      projectId: job.projectId,
-      service: 'ocr',
-      refKey: job.ocrModelKey,
-      status: 'error',
-      latencyMs: Date.now() - startedAt,
-      units: { items: 1 },
-      attribution: {
-        userId: job.userId,
-        apiTokenId: job.apiTokenId,
-        actorType: job.actorType,
-      },
-    });
-    const delivered = await sendOcrJobWebhook({
-      job,
-      event: 'item.failed',
-      data: { itemId, index: item.index, fileName: item.fileName, error: message },
-    }).catch(() => false);
-    if (job.callbackUrl) {
-      await db.updateOcrJobItem(itemId, { callbackStatus: delivered ? 'delivered' : 'failed' });
-    }
-    await maybeFireJobCompleted(afterJob);
-    logger.error('OCR item failed', { itemId, jobId: item.jobId, error: message });
-    return null;
-  }
+  });
 }
 
 /**

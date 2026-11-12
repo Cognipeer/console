@@ -7,7 +7,7 @@
  * were. Deleting a bucket together with its files is refused while a module of the project keeps its sources there.
  */
 
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 
 /** A Knowledge Engine module whose `fileBucketKey` names a bucket. */
 export interface BucketModuleUse {
@@ -21,13 +21,13 @@ export async function findModulesKeepingSourcesIn(
   projectId: string,
   bucketKey: string,
 ): Promise<BucketModuleUse[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const modules = await db.listRagModules({ projectId });
-  return modules
-    .filter((ragModule) => ragModule.fileBucketKey === bucketKey)
-    .map((ragModule) => ({ key: ragModule.key, name: ragModule.name }))
-    .sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const modules = await db.listRagModules({ projectId });
+    return modules
+      .filter((ragModule) => ragModule.fileBucketKey === bucketKey)
+      .map((ragModule) => ({ key: ragModule.key, name: ragModule.name }))
+      .sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
+  });
 }
 
 /** The 409 body for deleting a bucket together with its files while modules keep their sources in it. */

@@ -15,8 +15,8 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
-import type { DatabaseProvider, IAgent, ITenant } from '@/lib/database';
-import { getDatabase } from '@/lib/database';
+import type { IAgent, ITenant } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { authz } from '@/lib/iam/routeAuthz';
@@ -53,16 +53,6 @@ function jsonRpcError(id: string | number | null, code: number, message: string)
   return { error: { code, message }, id, jsonrpc: '2.0' };
 }
 
-async function withTenantDb<T>(
-  db: DatabaseProvider,
-  tenantDbName: string,
-  fn: () => T | Promise<T>,
-): Promise<T> {
-  if (db.runWithTenant) return db.runWithTenant(tenantDbName, fn);
-  await db.switchToTenant(tenantDbName);
-  return fn();
-}
-
 /**
  * Resolve tenant + publicly exposed agent for a request. Returns null (→ 404)
  * when the tenant or slug is unknown, the agent is not active, or its A2A
@@ -79,8 +69,8 @@ async function resolvePublicAgent(
   // A switched-off agents service answers like an unknown agent.
   if (!(await isServiceEnabled({ tenantId: String(tenant._id) }, 'agents'))) return null;
 
-  const agent = await withTenantDb(db, tenant.dbName, async () => {
-    const agents = await db.listAgents();
+  const agent = await runWithTenantScope(tenant.dbName, async (tenantDb) => {
+    const agents = await tenantDb.listAgents();
     return agents.find((candidate) => {
       const exposure = resolveA2aExposure(candidate);
       return exposure.enabled
@@ -138,8 +128,7 @@ export const publicA2aApiPlugin: FastifyPluginAsync = async (app) => {
       const refused = await gatePublicRequestRate(request, reply, { tenantId: agent.tenantId, sourceType: 'a2a', sourceId: agent.key });
       if (refused) return refused;
 
-      const db = await getDatabase();
-      return await withTenantDb(db, tenant.dbName, () => handleA2aRpc(
+      return await runWithTenantScope(tenant.dbName, () => handleA2aRpc(
         {
           tenantDbName: tenant.dbName,
           tenantId: agent.tenantId,

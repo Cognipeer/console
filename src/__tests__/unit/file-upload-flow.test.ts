@@ -21,7 +21,10 @@ const mocks = vi.hoisted(() => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return { getDatabase, runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(await getDatabase()) };
+});
 vi.mock('@/lib/services/providers/providerService', () => ({
   createProviderConfig: mocks.createProviderConfig,
   getProviderConfigByKey: mocks.getProviderConfigByKey,

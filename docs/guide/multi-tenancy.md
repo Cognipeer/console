@@ -120,7 +120,7 @@ Middleware injects tenant identity into request headers:
 ### Dashboard Routes
 
 ```typescript
-export const GET = withRequestContext(async (request) => {
+export const GET = withApiRequestContext(async (request) => {
   const tenantDbName = request.headers.get('x-tenant-db-name')!;
   const tenantId = request.headers.get('x-tenant-id')!;
   

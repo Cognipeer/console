@@ -8,10 +8,7 @@
  * Dataset items live in their own `evaluation_dataset_items` table (one row
  * per item, ordered by `position`) — mirroring the MongoDB provider. Dataset
  * writes still accept an inline `items` array (create inserts, update
- * replaces) and maintain the denormalised `itemCount`; rows created before
- * the split keep their JSON `items` column until the first item write
- * migrates them, and the item read methods serve that legacy column
- * transparently in the meantime.
+ * replaces) and maintain the denormalised `itemCount`.
  */
 
 import type {
@@ -31,7 +28,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
-import { assertUniqueItemIds, legacyItemMatches, sanitizeLegacyItemIds } from '../provider/evaluationItems';
+import { assertUniqueItemIds } from '../provider/evaluationItems';
 import { agentRevisionFromColumn, agentVersionFromColumn, agentVersionToColumn } from './agentRevisionColumns';
 import {
   labelJsonPath,
@@ -218,9 +215,9 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       const createAll = db.transaction(() => {
         db.prepare(`
           INSERT INTO ${TABLES.evaluationDatasets}
-          (id, tenantId, projectId, key, name, description, source, items, itemCount, metadata,
+          (id, tenantId, projectId, key, name, description, source, itemCount, metadata,
            createdBy, updatedBy, createdAt, updatedAt)
-          VALUES (@id, @tenantId, @projectId, @key, @name, @description, @source, '[]', @itemCount, @metadata,
+          VALUES (@id, @tenantId, @projectId, @key, @name, @description, @source, @itemCount, @metadata,
            @createdBy, @updatedBy, @createdAt, @updatedAt)
         `).run({
           id,
@@ -260,12 +257,11 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       if (rest.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = rest.updatedBy; }
       if (rest.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = rest.projectId; }
       if (items !== undefined) {
-        // Full replace mirroring the old embedded semantics; also clears the
-        // legacy JSON column. Duplicate ids in the payload are rejected
-        // BEFORE anything is touched, and the whole replace runs in ONE
+        // Full replace. Duplicate ids in the payload are rejected BEFORE
+        // anything is touched, and the whole replace runs in ONE
         // transaction — a failed insert must never leave the dataset emptied.
         assertUniqueItemIds(items);
-        sets.push("items = '[]'", 'itemCount = @itemCount');
+        sets.push('itemCount = @itemCount');
         params.itemCount = items.length;
         const header = this.getDatasetHeader(id);
         const applyUpdate = db.transaction(() => {
@@ -328,21 +324,18 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       return { tenantId: row.tenantId as string, projectId: (row.projectId as string | null) ?? undefined };
     }
 
-    /** Bulk insert item rows at consecutive positions, inside a transaction.
-     *  `orIgnore` (legacy migration) skips rows whose itemId already exists
-     *  instead of failing — never overwriting post-split rows. */
+    /** Bulk insert item rows at consecutive positions, inside a transaction. */
     private insertDatasetItemRows(
       datasetId: string,
       tenantId: string,
       projectId: string | undefined,
       items: IEvaluationDatasetItem[],
       startPosition: number,
-      opts?: { orIgnore?: boolean },
     ): void {
       if (items.length === 0) return;
       const db = this.getTenantDb();
       const stmt = db.prepare(`
-        INSERT ${opts?.orIgnore ? 'OR IGNORE ' : ''}INTO ${TABLES.evaluationDatasetItems}
+        INSERT INTO ${TABLES.evaluationDatasetItems}
         (id, tenantId, projectId, datasetId, itemId, position, input, expected, tools, toolResults, responseFormat, tags,
          labels, labelMeta, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @datasetId, @itemId, @position, @input, @expected, @tools, @toolResults, @responseFormat, @tags,
@@ -381,58 +374,6 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       }
     }
 
-    /** Parse the legacy embedded JSON column (null when empty/absent). */
-    private readLegacyItemColumn(datasetId: string): IEvaluationDatasetItem[] | null {
-      const db = this.getTenantDb();
-      const row = db
-        .prepare(`SELECT items FROM ${TABLES.evaluationDatasets} WHERE id = @datasetId`)
-        .get({ datasetId }) as SqliteRow | undefined;
-      if (!row) return null;
-      const items = this.parseJson<IEvaluationDatasetItem[]>(row.items, []);
-      return items.length > 0 ? items : null;
-    }
-
-    /**
-     * Idempotent, NON-destructive legacy migration: copy the embedded JSON
-     * array into the item table (rows that already exist — from a crashed
-     * earlier attempt or written post-split — are skipped via INSERT OR
-     * IGNORE, never overwritten), then clear the column and stamp the real
-     * row count, all in one transaction. Legacy ids are sanitized first (the
-     * old storage never enforced uniqueness). Empty legacy rows (itemCount
-     * still NULL) just get their count stamped.
-     */
-    private migrateLegacyItemColumn(datasetId: string): void {
-      const db = this.getTenantDb();
-      const row = db
-        .prepare(`SELECT items, itemCount, tenantId, projectId FROM ${TABLES.evaluationDatasets} WHERE id = @datasetId`)
-        .get({ datasetId }) as SqliteRow | undefined;
-      if (!row) return;
-      const legacy = this.parseJson<IEvaluationDatasetItem[]>(row.items, []);
-      const alreadyStamped = typeof row.itemCount === 'number';
-      if (legacy.length === 0 && alreadyStamped) return; // migrated / post-split
-      const tenantId = row.tenantId as string;
-      const projectId = (row.projectId as string | null) ?? undefined;
-      const migrate = db.transaction(() => {
-        if (legacy.length > 0) {
-          this.insertDatasetItemRows(
-            datasetId,
-            tenantId,
-            projectId,
-            sanitizeLegacyItemIds(legacy),
-            0,
-            { orIgnore: true },
-          );
-        }
-        const count = db
-          .prepare(`SELECT COUNT(*) AS n FROM ${TABLES.evaluationDatasetItems} WHERE datasetId = @datasetId`)
-          .get({ datasetId }) as SqliteRow;
-        db.prepare(
-          `UPDATE ${TABLES.evaluationDatasets} SET items = '[]', itemCount = @itemCount, updatedAt = @updatedAt WHERE id = @datasetId`,
-        ).run({ datasetId, itemCount: Number(count.n ?? 0), updatedAt: this.now() });
-      });
-      migrate();
-    }
-
     /** Recount item rows and stamp the parent row's itemCount. */
     private stampDatasetItemCount(datasetId: string): void {
       const db = this.getTenantDb();
@@ -449,7 +390,6 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       assertUniqueItemIds(items);
       const header = this.getDatasetHeader(datasetId);
       if (!header) throw new Error(`Evaluation dataset "${datasetId}" not found`);
-      this.migrateLegacyItemColumn(datasetId);
       const db = this.getTenantDb();
       const append = db.transaction(() => {
         const last = db
@@ -473,19 +413,11 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
         db.prepare(`DELETE FROM ${TABLES.evaluationDatasetItems} WHERE datasetId = @datasetId`).run({ datasetId });
         this.insertDatasetItemRows(datasetId, header.tenantId, header.projectId, items, 0);
         db.prepare(
-          `UPDATE ${TABLES.evaluationDatasets} SET items = '[]', itemCount = @itemCount, updatedAt = @updatedAt WHERE id = @datasetId`,
+          `UPDATE ${TABLES.evaluationDatasets} SET itemCount = @itemCount, updatedAt = @updatedAt WHERE id = @datasetId`,
         ).run({ datasetId, itemCount: items.length, updatedAt: this.now() });
       });
       replaceAll();
       return items.length;
-    }
-
-    /** Table-backed rows exist for this dataset? (legacy datasets: none) */
-    private hasDatasetItemRows(datasetId: string): boolean {
-      const db = this.getTenantDb();
-      return !!db
-        .prepare(`SELECT 1 FROM ${TABLES.evaluationDatasetItems} WHERE datasetId = @datasetId LIMIT 1`)
-        .get({ datasetId });
     }
 
     async listEvaluationDatasetItems(
@@ -495,37 +427,22 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       const db = this.getTenantDb();
       const skip = Math.max(0, options?.skip ?? 0);
       const limit = Math.max(1, Math.min(options?.limit ?? 100, 500));
-      if (this.hasDatasetItemRows(datasetId)) {
-        const clauses = ['datasetId = @datasetId'];
-        const params: Record<string, unknown> = { datasetId };
-        if (options?.search) {
-          clauses.push(itemSearchClause(TABLES.evaluationDatasetItems));
-          params.search = this.likePattern(options.search);
-        }
-        const labels = labelClauses(TABLES.evaluationDatasetItems, options ?? {});
-        clauses.push(...labels.clauses);
-        Object.assign(params, labels.params);
-        // itemId tiebreak keeps the order total even if positions collide.
-        const rows = db
-          .prepare(
-            `SELECT * FROM ${TABLES.evaluationDatasetItems} WHERE ${clauses.join(' AND ')} ORDER BY position ASC, itemId ASC LIMIT ${limit} OFFSET ${skip}`,
-          )
-          .all(params) as SqliteRow[];
-        return rows.map((r) => this.mapDatasetItemRow(r));
+      const clauses = ['datasetId = @datasetId'];
+      const params: Record<string, unknown> = { datasetId };
+      if (options?.search) {
+        clauses.push(itemSearchClause(TABLES.evaluationDatasetItems));
+        params.search = this.likePattern(options.search);
       }
-      // Legacy dataset — serve a slice of the embedded JSON column.
-      const legacy = this.readLegacyItemColumn(datasetId);
-      if (!legacy) return [];
-      const header = this.getDatasetHeader(datasetId);
-      if (!header) return [];
-      const filtered = legacy.filter((item) => legacyItemMatches(item, options));
-      return filtered.slice(skip, skip + limit).map((item, i) => ({
-        ...item,
-        datasetId,
-        tenantId: header.tenantId,
-        projectId: header.projectId,
-        position: skip + i,
-      }));
+      const labels = labelClauses(TABLES.evaluationDatasetItems, options ?? {});
+      clauses.push(...labels.clauses);
+      Object.assign(params, labels.params);
+      // itemId tiebreak keeps the order total even if positions collide.
+      const rows = db
+        .prepare(
+          `SELECT * FROM ${TABLES.evaluationDatasetItems} WHERE ${clauses.join(' AND ')} ORDER BY position ASC, itemId ASC LIMIT ${limit} OFFSET ${skip}`,
+        )
+        .all(params) as SqliteRow[];
+      return rows.map((r) => this.mapDatasetItemRow(r));
     }
 
     async countEvaluationDatasetItems(
@@ -534,23 +451,19 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       filters?: Omit<EvaluationDatasetItemQuery, 'skip' | 'limit' | 'search'>,
     ): Promise<number> {
       const db = this.getTenantDb();
-      if (this.hasDatasetItemRows(datasetId)) {
-        const clauses = ['datasetId = @datasetId'];
-        const params: Record<string, unknown> = { datasetId };
-        if (search) {
-          clauses.push(itemSearchClause(TABLES.evaluationDatasetItems));
-          params.search = this.likePattern(search);
-        }
-        const labels = labelClauses(TABLES.evaluationDatasetItems, filters ?? {});
-        clauses.push(...labels.clauses);
-        Object.assign(params, labels.params);
-        const row = db
-          .prepare(`SELECT COUNT(*) AS n FROM ${TABLES.evaluationDatasetItems} WHERE ${clauses.join(' AND ')}`)
-          .get(params) as SqliteRow;
-        return Number(row.n ?? 0);
+      const clauses = ['datasetId = @datasetId'];
+      const params: Record<string, unknown> = { datasetId };
+      if (search) {
+        clauses.push(itemSearchClause(TABLES.evaluationDatasetItems));
+        params.search = this.likePattern(search);
       }
-      const legacy = this.readLegacyItemColumn(datasetId) ?? [];
-      return legacy.filter((item) => legacyItemMatches(item, { ...filters, search })).length;
+      const labels = labelClauses(TABLES.evaluationDatasetItems, filters ?? {});
+      clauses.push(...labels.clauses);
+      Object.assign(params, labels.params);
+      const row = db
+        .prepare(`SELECT COUNT(*) AS n FROM ${TABLES.evaluationDatasetItems} WHERE ${clauses.join(' AND ')}`)
+        .get(params) as SqliteRow;
+      return Number(row.n ?? 0);
     }
 
     async findEvaluationDatasetItem(datasetId: string, itemId: string): Promise<IEvaluationDatasetItemRecord | null> {
@@ -558,14 +471,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       const row = db
         .prepare(`SELECT * FROM ${TABLES.evaluationDatasetItems} WHERE datasetId = @datasetId AND itemId = @itemId`)
         .get({ datasetId, itemId }) as SqliteRow | undefined;
-      if (row) return this.mapDatasetItemRow(row);
-      const legacy = this.readLegacyItemColumn(datasetId);
-      if (!legacy) return null;
-      const index = legacy.findIndex((item) => item.id === itemId);
-      if (index < 0) return null;
-      const header = this.getDatasetHeader(datasetId);
-      if (!header) return null;
-      return { ...legacy[index], datasetId, tenantId: header.tenantId, projectId: header.projectId, position: index };
+      return row ? this.mapDatasetItemRow(row) : null;
     }
 
     async updateEvaluationDatasetItem(
@@ -573,7 +479,6 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       itemId: string,
       data: Partial<Omit<IEvaluationDatasetItem, 'id'>>,
     ): Promise<IEvaluationDatasetItemRecord | null> {
-      this.migrateLegacyItemColumn(datasetId);
       const db = this.getTenantDb();
       const sets: string[] = ['updatedAt = @updatedAt'];
       const params: Record<string, unknown> = { datasetId, itemId, updatedAt: this.now() };
@@ -595,7 +500,6 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
     }
 
     async deleteEvaluationDatasetItem(datasetId: string, itemId: string): Promise<boolean> {
-      this.migrateLegacyItemColumn(datasetId);
       const db = this.getTenantDb();
       const deleted = db
         .prepare(`DELETE FROM ${TABLES.evaluationDatasetItems} WHERE datasetId = @datasetId AND itemId = @itemId`)
@@ -808,12 +712,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
     }
 
     protected mapDatasetRow(r: SqliteRow): IEvaluationDataset {
-      // Legacy rows keep their embedded JSON until migrated — the count comes
-      // from parsing it, but the array itself is never surfaced.
-      const itemCount =
-        typeof r.itemCount === 'number'
-          ? (r.itemCount as number)
-          : this.parseJson<IEvaluationDatasetItem[]>(r.items, []).length;
+      const itemCount = typeof r.itemCount === 'number' ? (r.itemCount as number) : 0;
       return {
         _id: r.id as string,
         tenantId: r.tenantId as string,

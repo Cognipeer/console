@@ -47,20 +47,47 @@ export interface AgentSpendScope {
 }
 
 
+/** How long a tenant's licence type is reused between turns. A licence change is seen within this. */
+const LICENSE_TYPE_TTL_MS = 30_000;
+const LICENSE_TYPE_MEMO_MAX = 1_000;
+const licenseTypeMemo = new Map<string, { value: LicenseType; expiresAt: number }>();
+
+/** Empties the licence type memo (tests). */
+export function resetAgentSpendLicenseMemo(): void {
+  licenseTypeMemo.clear();
+}
+
+/**
+ * The tenant's licence type, memoised per tenant for `LICENSE_TYPE_TTL_MS`:
+ * a turn only needs it to pick the quota tier, so it does not read the tenant
+ * on every turn. An unreadable tenant is answered `FREE` and not remembered.
+ */
+async function tenantLicenseType(tenantId: string): Promise<LicenseType> {
+  const now = Date.now();
+  const hit = licenseTypeMemo.get(tenantId);
+  if (hit && hit.expiresAt > now) return hit.value;
+  const db = await getDatabase();
+  const tenant = await db.findTenantById(tenantId).catch(() => null);
+  const value = (tenant?.licenseType ?? 'FREE') as LicenseType;
+  if (tenant) {
+    if (licenseTypeMemo.size >= LICENSE_TYPE_MEMO_MAX) licenseTypeMemo.clear();
+    licenseTypeMemo.set(tenantId, { value, expiresAt: now + LICENSE_TYPE_TTL_MS });
+  }
+  return value;
+}
+
 export async function resolveAgentSpendScope(input: {
   tenantDbName: string;
   tenantId: string;
   projectId: string;
   userId?: string;
 }): Promise<AgentSpendScope> {
-  const db = await getDatabase();
-  const tenant = await db.findTenantById(input.tenantId).catch(() => null);
   return {
     tenantDbName: input.tenantDbName,
     tenantId: input.tenantId,
     projectId: input.projectId,
     ...(input.userId && !isSyntheticActor(input.userId) ? { userId: input.userId } : {}),
-    licenseType: (tenant?.licenseType ?? 'FREE') as LicenseType,
+    licenseType: await tenantLicenseType(input.tenantId),
   };
 }
 
@@ -108,7 +135,13 @@ export async function assertAgentTurnSpendAllowed(
   const keys = new Set<string>();
   if (config.modelKey) keys.add(config.modelKey);
   for (const key of await subagentModelKeys(spend.tenantDbName, spend.projectId, config)) keys.add(key);
-  for (const key of keys) await assertAgentSpendAllowed(spend, key);
+  // The checks are read-only, so they run together; the results are read in
+  // key order, so the first refusal (or error) in that order still wins.
+  const results = await Promise.allSettled([...keys].map((key) => checkBudget(quotaContext(spend, key))));
+  for (const result of results) {
+    if (result.status === 'rejected') throw result.reason;
+    if (!result.value.allowed) throw new AgentSpendLimitError(result.value.reason || 'Budget exceeded');
+  }
 }
 
 /**

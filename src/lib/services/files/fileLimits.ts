@@ -7,7 +7,7 @@
  * opening the dialog costs the caller nothing.
  */
 
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import { getConfig } from '@/lib/core/config';
 import { resolveEffectiveLimits, type QuotaContext } from '@/lib/quota/quotaGuard';
 import { requireBucketRecord } from './fileService';
@@ -43,26 +43,26 @@ export async function getFileLimits(input: FileLimitsInput): Promise<FileLimits>
     };
     const effective = await resolveEffectiveLimits(context);
 
-    const db = await getDatabase();
-    await db.switchToTenant(input.tenantDbName);
-    const [usedBytes, filesUsed] = await Promise.all([
-        db.sumFileRecordBytes({ projectId: input.projectId }),
-        db.countFileRecords({ projectId: input.projectId }),
-    ]);
+    return runWithTenantScope(input.tenantDbName, async (db) => {
+        const [usedBytes, filesUsed] = await Promise.all([
+            db.sumFileRecordBytes({ projectId: input.projectId }),
+            db.countFileRecords({ projectId: input.projectId }),
+        ]);
 
-    const maxRequestBytes = uploadBodyLimit();
-    const perFile = limitOrNull(effective.perRequest?.maxFileSize);
-    const allowed = getConfig().limits.fileUploadAllowedMimeTypes;
+        const maxRequestBytes = uploadBodyLimit();
+        const perFile = limitOrNull(effective.perRequest?.maxFileSize);
+        const allowed = getConfig().limits.fileUploadAllowedMimeTypes;
 
-    return {
-        maxFileBytes: Math.min(uploadMaxBytes(), fileBytesFitting(maxRequestBytes), ...(perFile === null ? [] : [perFile])),
-        maxRequestBytes,
-        allowedMimeTypes: allowed.length > 0 ? [...allowed] : null,
-        quota: {
-            usedBytes,
-            limitBytes: limitOrNull(effective.quotas?.maxStorageBytes),
-            filesUsed,
-            filesLimit: limitOrNull(effective.quotas?.maxFilesTotal),
-        },
-    };
+        return {
+            maxFileBytes: Math.min(uploadMaxBytes(), fileBytesFitting(maxRequestBytes), ...(perFile === null ? [] : [perFile])),
+            maxRequestBytes,
+            allowedMimeTypes: allowed.length > 0 ? [...allowed] : null,
+            quota: {
+                usedBytes,
+                limitBytes: limitOrNull(effective.quotas?.maxStorageBytes),
+                filesUsed,
+                filesLimit: limitOrNull(effective.quotas?.maxFilesTotal),
+            },
+        };
+    });
 }

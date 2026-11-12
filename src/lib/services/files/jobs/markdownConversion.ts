@@ -16,7 +16,7 @@
  * to do; across nodes that read is what decides, and only the time between it and the write of the record is open.
  */
 
-import { getDatabase, type DatabaseProvider, type FileRecordPatch, type IFileBucketRecord, type IFileRecord } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider, type FileRecordPatch, type IFileBucketRecord, type IFileRecord } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   applyMarkdownConversion,
@@ -42,12 +42,6 @@ import type { FileExtractionRequest, FileRecordView, UpdateFileConversionPayload
 import { publishConvertMarkdownJob, type ConvertMarkdownJobPayload } from './filesQueue';
 
 const logger = createLogger('files:markdown-job');
-
-async function tenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
-}
 
 /** The record's conversion fields for a finished run: only what the run decided, an error cleared when there is none. */
 function conversionPatch(conversion: UpdateFileConversionPayload, actor: string): FileRecordPatch {
@@ -92,37 +86,38 @@ export async function queueMarkdownConversion(input: {
   if (!recordId) throw new FileServiceError('file_not_found', 404, 'File record not found.');
 
   // The status moves first: the answer shows the file as waiting, and the job only runs a record that is.
-  const db = await tenantDb(input.tenantDbName);
-  // The settings the run will use are on the record before the job is queued; what an earlier run found is not true any more.
-  const hadExtraction = Boolean(record.markdownExtraction);
-  const pending = await db.updateFileRecord(recordId, {
-    markdownStatus: 'pending',
-    markdownError: null,
-    ...(settings ? { markdownExtraction: settings } : hadExtraction ? { markdownExtraction: null } : {}),
-    updatedBy: input.actor,
-  });
-  if (!pending) throw new FileServiceError('file_not_found', 404, 'File record not found.');
-
-  try {
-    await publishConvertMarkdownJob({
-      tenantDbName: input.tenantDbName,
-      tenantId: input.tenantId,
-      projectId: input.projectId,
-      bucketKey: bucket.key,
-      key: record.key,
-      recordId,
-      actor: input.actor,
-    });
-  } catch (error) {
-    await db.updateFileRecord(recordId, {
-      markdownStatus: 'failed',
-      markdownError: describeFailure(error),
+  return runWithTenantScope(input.tenantDbName, async (db) => {
+    // The settings the run will use are on the record before the job is queued; what an earlier run found is not true any more.
+    const hadExtraction = Boolean(record.markdownExtraction);
+    const pending = await db.updateFileRecord(recordId, {
+      markdownStatus: 'pending',
+      markdownError: null,
+      ...(settings ? { markdownExtraction: settings } : hadExtraction ? { markdownExtraction: null } : {}),
       updatedBy: input.actor,
-    }).catch(() => undefined);
-    throw error;
-  }
+    });
+    if (!pending) throw new FileServiceError('file_not_found', 404, 'File record not found.');
 
-  return serializeFileRecord(pending);
+    try {
+      await publishConvertMarkdownJob({
+        tenantDbName: input.tenantDbName,
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        bucketKey: bucket.key,
+        key: record.key,
+        recordId,
+        actor: input.actor,
+      });
+    } catch (error) {
+      await db.updateFileRecord(recordId, {
+        markdownStatus: 'failed',
+        markdownError: describeFailure(error),
+        updatedBy: input.actor,
+      }).catch(() => undefined);
+      throw error;
+    }
+
+    return serializeFileRecord(pending);
+  });
 }
 
 /**
@@ -206,7 +201,7 @@ async function convertWaitingRecord(
 
   // A long OCR run touches the record, so the screens do not take it for a lost job (they wait five quiet minutes).
   const heartbeat = compactExtraction(record.markdownExtraction)?.ocr
-    ? startHeartbeat(() => db.updateFileRecord(recordId, {}))
+    ? startHeartbeat(() => runWithTenantScope(tenantDbName, (scoped) => scoped.updateFileRecord(recordId, {})))
     : undefined;
   let conversion: UpdateFileConversionPayload;
   try {
@@ -270,15 +265,16 @@ async function convertWaitingRecord(
 async function recordFailedRun(payload: ConvertMarkdownJobPayload, error: unknown): Promise<void> {
   const { tenantDbName, tenantId, projectId, bucketKey, actor } = payload;
   try {
-    const db = await tenantDb(tenantDbName);
-    const bucket = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
-    const record = bucket ? await recordOfJob(db, bucket, payload) : null;
-    const recordId = record?._id?.toString();
-    if (!record || !recordId || record.markdownStatus !== 'pending') return;
-    await db.updateFileRecord(
-      recordId,
-      conversionPatch({ markdownStatus: 'failed', markdownError: describeFailure(error) }, actor),
-    );
+    await runWithTenantScope(tenantDbName, async (db) => {
+      const bucket = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
+      const record = bucket ? await recordOfJob(db, bucket, payload) : null;
+      const recordId = record?._id?.toString();
+      if (!record || !recordId || record.markdownStatus !== 'pending') return;
+      await db.updateFileRecord(
+        recordId,
+        conversionPatch({ markdownStatus: 'failed', markdownError: describeFailure(error) }, actor),
+      );
+    });
   } catch (writeError) {
     logger.error('Could not record a failed Markdown conversion', {
       bucketKey,
@@ -302,15 +298,16 @@ export async function runMarkdownConversionJob(payload: ConvertMarkdownJobPayloa
   const lane = `convert:${tenantId}:${projectId}:${bucketKey}:${payload.recordId ?? key}`;
   await oneAtATime(lane, async () => {
     try {
-      const db = await tenantDb(tenantDbName);
-      const bucket = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
-      if (!bucket) return;
-      const record = await recordOfJob(db, bucket, payload);
-      const recordId = record?._id?.toString();
-      // Deleted since, or converted by an earlier run of the same request: nothing is waiting.
-      if (!record || !recordId || record.markdownStatus !== 'pending') return;
+      await runWithTenantScope(tenantDbName, async (db) => {
+        const bucket = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
+        if (!bucket) return;
+        const record = await recordOfJob(db, bucket, payload);
+        const recordId = record?._id?.toString();
+        // Deleted since, or converted by an earlier run of the same request: nothing is waiting.
+        if (!record || !recordId || record.markdownStatus !== 'pending') return;
 
-      await convertWaitingRecord(db, bucket, record, recordId, payload);
+        await convertWaitingRecord(db, bucket, record, recordId, payload);
+      });
     } catch (error) {
       logger.warn('Markdown conversion could not run', {
         bucketKey,

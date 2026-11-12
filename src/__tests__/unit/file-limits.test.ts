@@ -5,9 +5,10 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return { getDatabase, runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(await getDatabase())) };
+});
 vi.mock('@/lib/quota/quotaGuard', () => ({
   resolveEffectiveLimits: vi.fn(),
   // None of these may be called by a read of the limits: they spend rate-limit counters.
@@ -16,7 +17,7 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkResourceQuota: vi.fn(),
 }));
 
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { getConfigSource, setConfigSource, type ConfigSource } from '@/lib/core/config';
 import { checkPerRequestLimits, checkRateLimit, checkResourceQuota, resolveEffectiveLimits } from '@/lib/quota/quotaGuard';
 import { getFileLimits } from '@/lib/services/files/fileLimits';
@@ -113,7 +114,7 @@ describe('getFileLimits', () => {
     await getFileLimits(input);
     expect(db.sumFileRecordBytes).toHaveBeenCalledWith({ projectId: 'proj-1' });
     expect(db.countFileRecords).toHaveBeenCalledWith({ projectId: 'proj-1' });
-    expect(db.switchToTenant).toHaveBeenCalledWith('tenant_acme');
+    expect(runWithTenantScope).toHaveBeenCalledWith('tenant_acme', expect.any(Function));
   });
 
   it('follows the configured file limit', async () => {

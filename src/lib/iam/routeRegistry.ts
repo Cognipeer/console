@@ -8,6 +8,7 @@
  */
 
 import { resolveRouteAuthz, type RouteAuthzLevel } from './routeAuthz';
+import { UNDECLARED_ROUTE_EXCEPTIONS } from './routeDeclarationRules';
 
 export interface RegisteredRoute {
   method: string;
@@ -41,6 +42,42 @@ export function classifyRoute(url: string, config: unknown): Omit<RegisteredRout
   }
   if (effective.kind === 'undeclared') return { kind: 'undeclared', declared: false };
   return { kind: effective.kind, declared: true };
+}
+
+export interface RouteDeclarationCheckInput {
+  method: string | readonly string[];
+  /** The route pattern as registered (with the /api prefix). */
+  url: string;
+  config?: unknown;
+}
+
+export interface RouteDeclarationCheckOptions {
+  /** Throw instead of reporting (see isStrictRouteRegistration). */
+  strict: boolean;
+  /** Called with the problem when `strict` is off. */
+  report: (message: string, route: { method: string; url: string }) => void;
+  /** Extra paths the caller knows never reach the gate (public / self-auth), on top of UNDECLARED_ROUTE_EXCEPTIONS. */
+  isExempt?: (concretePath: string) => boolean;
+}
+
+/**
+ * The registration-time check: an /api route that resolves to nothing (no explicit
+ * `config.authz`, no ROUTE_PREFIXES / resolver mapping) is refused at request time
+ * with 403 `route_not_declared`, so it is a defect. Throws when `strict`, otherwise
+ * reports it once and lets the server register the route (the gate keeps refusing it).
+ * Returns the problem text, or null when the route is fine or out of scope.
+ */
+export function assertRouteDeclared(route: RouteDeclarationCheckInput, options: RouteDeclarationCheckOptions): string | null {
+  if (!route.url.startsWith('/api')) return null;
+  const path = concretePath(route.url);
+  const { effective } = resolveRouteAuthz(route.config, path);
+  if (effective.kind !== 'undeclared') return null;
+  if (UNDECLARED_ROUTE_EXCEPTIONS.some((entry) => entry.match.test(path)) || options.isExempt?.(path)) return null;
+  const method = Array.isArray(route.method) ? route.method.join(',') : String(route.method);
+  const message = `${method} ${route.url} is not declared: add config: authz.<kind>(...) to the route or map its prefix in ROUTE_PREFIXES (until then the gate refuses it with 403 route_not_declared)`;
+  if (options.strict) throw new Error(message);
+  options.report(message, { method, url: route.url });
+  return message;
 }
 
 export function recordRegisteredRoute(method: string | readonly string[], url: string, config: unknown): void {

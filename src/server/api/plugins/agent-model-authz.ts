@@ -14,7 +14,7 @@ import {
   type AdvertisedAgentModel,
   type AgentModelChoice,
 } from '@/lib/services/agents/agentModelSelection';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import { invalidRequestErrorBody } from '@/lib/services/agents/agentRunService';
 
 type AgentRef = Pick<IAgent, '_id' | 'key'> & { config: IAgent['config'] };
@@ -55,12 +55,10 @@ export async function advertisedModelsForRequest(
 ): Promise<AdvertisedAgentModel[] | undefined> {
   const config = input.agent.config;
   if (!config?.additionalModels?.length) return undefined;
-  const db = await getDatabase();
-  await db.switchToTenant(input.tenantDbName);
-  return advertisedAgentModels({
+  return runWithTenantScope(input.tenantDbName, (db) => advertisedAgentModels({
     config,
     nameOf: async (key) => (await db.findModelByKey(key, input.projectId).catch(() => null))?.name,
-  });
+  }));
 }
 
 /** Records the session's choice (`conversation.metadata.activeModel`) when it changed; best effort. */
@@ -70,14 +68,14 @@ export async function rememberSessionModel(
   choice: AgentModelChoice,
 ): Promise<void> {
   try {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    // A bare id: read the session's current metadata first (the write replaces the column).
-    const current = typeof conversation === 'string' ? await db.findAgentConversationById(conversation) : conversation;
-    const id = typeof conversation === 'string' ? conversation : String(conversation._id);
-    const stored = current?.metadata?.activeModel as { modelKey?: unknown; reason?: unknown } | undefined;
-    if (stored?.modelKey === choice.modelKey && stored?.reason === choice.reason) return;
-    await db.updateAgentConversation(id, { metadata: { ...(current?.metadata ?? {}), activeModel: choice } });
+    await runWithTenantScope(tenantDbName, async (db) => {
+      // A bare id: read the session's current metadata first (the write replaces the column).
+      const current = typeof conversation === 'string' ? await db.findAgentConversationById(conversation) : conversation;
+      const id = typeof conversation === 'string' ? conversation : String(conversation._id);
+      const stored = current?.metadata?.activeModel as { modelKey?: unknown; reason?: unknown } | undefined;
+      if (stored?.modelKey === choice.modelKey && stored?.reason === choice.reason) return;
+      await db.updateAgentConversation(id, { metadata: { ...(current?.metadata ?? {}), activeModel: choice } });
+    });
   } catch {
     // The run itself carries the choice; the session record is a convenience for the next message.
   }

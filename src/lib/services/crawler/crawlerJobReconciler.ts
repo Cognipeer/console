@@ -31,7 +31,7 @@
  */
 
 import { getConfig } from '@/lib/core/config';
-import { getDatabase, getTenantDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
@@ -83,57 +83,58 @@ export async function reconcileOrphanedCrawlJobs(): Promise<{
     const tenantId = String(tenant._id);
 
     try {
-      const tenantDb = await getTenantDatabase(tenant.dbName);
-
-      const runningJobs = await tenantDb.listCrawlJobs(tenantId, { status: 'running' });
-      for (const job of runningJobs) {
-        const jobId = String(job._id);
-        const priorRestarts = Number(
-          (job.metadata as Record<string, unknown> | undefined)?.orphanRestarts ?? 0,
-        );
-        const canRestart = autoRestart && priorRestarts < MAX_ORPHAN_RESTARTS;
-        if (canRestart) {
-          // Restart from scratch: drop the partial results the dead run wrote
-          // (so the fresh run doesn't append duplicates), reset counters to
-          // `queued`, bump the restart tally, and re-publish. Idempotent claim
-          // (claimCrawlJob) still guards against a redelivered message
-          // double-running it.
-          await tenantDb.deleteCrawlResultsByJob(jobId);
-          const reset = await tenantDb.updateCrawlJob(jobId, {
-            status: 'queued',
-            startedAt: undefined,
-            endedAt: undefined,
-            durationMs: undefined,
-            pagesProcessed: 0,
-            filesProcessed: 0,
-            errorsCount: 0,
-            limitReached: false,
-            errorMessage: undefined,
-            metadata: { ...(job.metadata ?? {}), orphanRestarts: priorRestarts + 1 },
-          });
-          if (reset) {
-            await republish(tenant.dbName, tenantId, job);
-            restartedRunningJobs += 1;
+      const dbName = tenant.dbName;
+      await runWithTenantScope(dbName, async (tenantDb) => {
+        const runningJobs = await tenantDb.listCrawlJobs(tenantId, { status: 'running' });
+        for (const job of runningJobs) {
+          const jobId = String(job._id);
+          const priorRestarts = Number(
+            (job.metadata as Record<string, unknown> | undefined)?.orphanRestarts ?? 0,
+          );
+          const canRestart = autoRestart && priorRestarts < MAX_ORPHAN_RESTARTS;
+          if (canRestart) {
+            // Restart from scratch: drop the partial results the dead run wrote
+            // (so the fresh run doesn't append duplicates), reset counters to
+            // `queued`, bump the restart tally, and re-publish. Idempotent claim
+            // (claimCrawlJob) still guards against a redelivered message
+            // double-running it.
+            await tenantDb.deleteCrawlResultsByJob(jobId);
+            const reset = await tenantDb.updateCrawlJob(jobId, {
+              status: 'queued',
+              startedAt: undefined,
+              endedAt: undefined,
+              durationMs: undefined,
+              pagesProcessed: 0,
+              filesProcessed: 0,
+              errorsCount: 0,
+              limitReached: false,
+              errorMessage: undefined,
+              metadata: { ...(job.metadata ?? {}), orphanRestarts: priorRestarts + 1 },
+            });
+            if (reset) {
+              await republish(dbName, tenantId, job);
+              restartedRunningJobs += 1;
+            }
+          } else {
+            const endedAt = new Date();
+            const finalized = await tenantDb.finalizeCrawlJob(jobId, tenantId, {
+              status: 'failed',
+              endedAt,
+              durationMs: job.startedAt ? endedAt.getTime() - job.startedAt.getTime() : undefined,
+              errorMessage: autoRestart
+                ? `${ORPHANED_RUNNING_MESSAGE} (gave up after ${MAX_ORPHAN_RESTARTS} auto-restarts)`
+                : ORPHANED_RUNNING_MESSAGE,
+            });
+            if (finalized) failedRunningJobs += 1;
           }
-        } else {
-          const endedAt = new Date();
-          const finalized = await tenantDb.finalizeCrawlJob(jobId, tenantId, {
-            status: 'failed',
-            endedAt,
-            durationMs: job.startedAt ? endedAt.getTime() - job.startedAt.getTime() : undefined,
-            errorMessage: autoRestart
-              ? `${ORPHANED_RUNNING_MESSAGE} (gave up after ${MAX_ORPHAN_RESTARTS} auto-restarts)`
-              : ORPHANED_RUNNING_MESSAGE,
-          });
-          if (finalized) failedRunningJobs += 1;
         }
-      }
 
-      const queuedJobs = await tenantDb.listCrawlJobs(tenantId, { status: 'queued' });
-      for (const job of queuedJobs) {
-        await republish(tenant.dbName, tenantId, job);
-        requeuedJobs += 1;
-      }
+        const queuedJobs = await tenantDb.listCrawlJobs(tenantId, { status: 'queued' });
+        for (const job of queuedJobs) {
+          await republish(dbName, tenantId, job);
+          requeuedJobs += 1;
+        }
+      });
     } catch (error) {
       logger.warn('Failed to reconcile tenant crawl jobs', {
         error: error instanceof Error ? error.message : String(error),

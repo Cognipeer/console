@@ -9,7 +9,7 @@
 
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase, type DatabaseProvider } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type { BatchJobEndpoint, IBatchJob, IBatchJobItem } from '@/lib/database';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
@@ -33,12 +33,6 @@ export class BatchValidationError extends Error {
   }
 }
 
-async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
-}
-
 /**
  * Load a batch job and verify it belongs to BOTH the caller's tenant AND
  * project. `tenantId` alone is not enough: the tenant database is shared by
@@ -48,14 +42,16 @@ async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
  * already fixed for agent conversations, see `previous_response_id` handling
  * in `client-agents.ts`.
  */
-async function resolveOwnedBatchJob(
+async function withOwnedBatchJob<T>(
   ctx: Pick<BatchContext, 'tenantDbName' | 'tenantId' | 'projectId'>,
   batchId: string,
-): Promise<{ db: DatabaseProvider; job: IBatchJob } | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const job = await db.findBatchJobById(batchId);
-  if (!job || job.tenantId !== ctx.tenantId || job.projectId !== ctx.projectId) return null;
-  return { db, job };
+  fn: (db: DatabaseProvider, job: IBatchJob) => Promise<T>,
+): Promise<T | null> {
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const job = await db.findBatchJobById(batchId);
+    if (!job || job.tenantId !== ctx.tenantId || job.projectId !== ctx.projectId) return null;
+    return fn(db, job);
+  });
 }
 
 export function isSupportedBatchEndpoint(value: unknown): value is BatchJobEndpoint {
@@ -206,75 +202,76 @@ export async function createBatch(ctx: BatchContext, input: CreateBatchInput): P
 
   await checkBatchRateLimit(ctx, input.endpoint, requests);
 
-  const db = await withTenantDb(ctx.tenantDbName);
-  // Attribution is stamped at creation (request ALS in scope); the rollup
-  // event is emitted at finalize by the runner.
-  const attribution = resolveUsageAttribution();
-  const job = await db.createBatchJob({
-    userId: attribution.userId,
-    apiTokenId: attribution.apiTokenId,
-    actorType: attribution.actorType,
-    tenantId: ctx.tenantId,
-    projectId: ctx.projectId,
-    endpoint: input.endpoint,
-    status: 'in_progress',
-    completionWindow: input.completionWindow ?? '24h',
-    inputFile: input.inputFile,
-    outputFile: input.outputBucketKey ? { bucketKey: input.outputBucketKey, objectKey: undefined } : undefined,
-    itemsTotal: requests.length,
-    itemsSucceeded: 0,
-    itemsFailed: 0,
-    itemsCancelled: 0,
-    usageInputTokens: 0,
-    usageOutputTokens: 0,
-    usageTotalTokens: 0,
-    metadata: input.metadata,
-    createdBy: ctx.userId ?? 'api-token',
-    startedAt: new Date(),
-  });
-  const batchId = String(job._id);
-
-  const items = await db.createBatchJobItems(
-    requests.map((line, index) => ({
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    // Attribution is stamped at creation (request ALS in scope); the rollup
+    // event is emitted at finalize by the runner.
+    const attribution = resolveUsageAttribution();
+    const job = await db.createBatchJob({
+      userId: attribution.userId,
+      apiTokenId: attribution.apiTokenId,
+      actorType: attribution.actorType,
       tenantId: ctx.tenantId,
-      batchId,
-      index,
-      customId: line.customId,
-      requestBody: line.body,
-      status: 'pending' as const,
-    })),
-  );
-
-  const queue = await getQueue();
-  for (const item of items) {
-    const payload = { ctx, itemId: String(item._id) } as unknown as QueuePayload;
-    await queue.publish(queueNameFor('batch'), 'batch.item', payload, {
-      attempts: 3,
-      backoffMs: 2000,
+      projectId: ctx.projectId,
+      endpoint: input.endpoint,
+      status: 'in_progress',
+      completionWindow: input.completionWindow ?? '24h',
+      inputFile: input.inputFile,
+      outputFile: input.outputBucketKey ? { bucketKey: input.outputBucketKey, objectKey: undefined } : undefined,
+      itemsTotal: requests.length,
+      itemsSucceeded: 0,
+      itemsFailed: 0,
+      itemsCancelled: 0,
+      usageInputTokens: 0,
+      usageOutputTokens: 0,
+      usageTotalTokens: 0,
+      metadata: input.metadata,
+      createdBy: ctx.userId ?? 'api-token',
+      startedAt: new Date(),
     });
-  }
+    const batchId = String(job._id);
 
-  logger.info('Batch created', { batchId, endpoint: input.endpoint, items: items.length });
-  return job;
+    const items = await db.createBatchJobItems(
+      requests.map((line, index) => ({
+        tenantId: ctx.tenantId,
+        batchId,
+        index,
+        customId: line.customId,
+        requestBody: line.body,
+        status: 'pending' as const,
+      })),
+    );
+
+    const queue = await getQueue();
+    for (const item of items) {
+      const payload = { ctx, itemId: String(item._id) } as unknown as QueuePayload;
+      await queue.publish(queueNameFor('batch'), 'batch.item', payload, {
+        attempts: 3,
+        backoffMs: 2000,
+      });
+    }
+
+    logger.info('Batch created', { batchId, endpoint: input.endpoint, items: items.length });
+    return job;
+  });
 }
 
 export async function getBatch(
   ctx: Pick<BatchContext, 'tenantDbName' | 'tenantId' | 'projectId'>,
   batchId: string,
 ): Promise<IBatchJob | null> {
-  const owned = await resolveOwnedBatchJob(ctx, batchId);
-  return owned?.job ?? null;
+  return withOwnedBatchJob(ctx, batchId, async (_db, job) => job);
 }
 
 export async function listBatches(
   ctx: BatchContext,
   filters?: { status?: string; limit?: number },
 ): Promise<IBatchJob[]> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  return db.listBatchJobs(ctx.tenantId, {
-    projectId: ctx.projectId,
-    status: filters?.status,
-    limit: filters?.limit,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    return db.listBatchJobs(ctx.tenantId, {
+      projectId: ctx.projectId,
+      status: filters?.status,
+      limit: filters?.limit,
+    });
   });
 }
 
@@ -288,13 +285,12 @@ export async function cancelBatch(
   ctx: Pick<BatchContext, 'tenantDbName' | 'tenantId' | 'projectId'>,
   batchId: string,
 ): Promise<IBatchJob | null> {
-  const owned = await resolveOwnedBatchJob(ctx, batchId);
-  if (!owned) return null;
-  const { db, job } = owned;
-  if (job.status !== 'in_progress' && job.status !== 'validating') {
-    throw new BatchValidationError(`Batch is ${job.status}; only in-progress batches can be cancelled`);
-  }
-  return db.updateBatchJob(batchId, { status: 'cancelling', cancelledAt: new Date() });
+  return withOwnedBatchJob(ctx, batchId, async (db, job) => {
+    if (job.status !== 'in_progress' && job.status !== 'validating') {
+      throw new BatchValidationError(`Batch is ${job.status}; only in-progress batches can be cancelled`);
+    }
+    return db.updateBatchJob(batchId, { status: 'cancelling', cancelledAt: new Date() });
+  });
 }
 
 export async function getBatchItems(
@@ -302,9 +298,7 @@ export async function getBatchItems(
   batchId: string,
   options?: { limit?: number; skip?: number; status?: string },
 ): Promise<IBatchJobItem[] | null> {
-  const owned = await resolveOwnedBatchJob(ctx, batchId);
-  if (!owned) return null;
-  return owned.db.listBatchJobItems(batchId, options);
+  return withOwnedBatchJob(ctx, batchId, (db) => db.listBatchJobItems(batchId, options));
 }
 
 /** Shape one finished item as an OpenAI batch-output JSONL line. */

@@ -36,7 +36,6 @@ import {
   connectorDeliveryKeyBase,
   deliveryAttemptKeys,
   deliveryKeyBase,
-  isRetiredWebhook,
   type DeliveryIdentity,
 } from './agentTriggerWebhookAuth';
 import {
@@ -452,8 +451,8 @@ export async function dispatchTriggerEvent(
 
   try {
     const expectedType = envelope.source === 'connector' ? 'connector' : 'webhook';
-    // A retired vendor webhook never receives events; neither does a trigger of another type.
-    if (!settings || trigger.type !== expectedType || (trigger.type === 'webhook' && isRetiredWebhook(trigger.webhook))) {
+    // A trigger of another type never receives these events.
+    if (!settings || trigger.type !== expectedType) {
       return { status: 200, body: { accepted: false, reason: 'disabled' }, outcome: 'ignored' };
     }
     const connector = trigger.type === 'connector' ? trigger.connector : null;

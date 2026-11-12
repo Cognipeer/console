@@ -34,6 +34,7 @@ const db = {
 
 vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(async () => db),
+  runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(db)),
 }));
 
 import { OCR_ITEM_HELD_WHILE_PAUSED, processOcrItem } from '@/lib/services/ocrJobs/ocrJobRunner';

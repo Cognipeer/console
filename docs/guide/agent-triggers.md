@@ -111,7 +111,7 @@ curl -X POST "$BASE/api/client/v1/agents/incident-bot/triggers" \
   "webhook": {
     "url": "https://console.example.com/api/public/hooks/<tenantId>/wh_…", "preset": "generic", "auth": "bearer",
     "header_name": null, "secret": "whsec_…", "secret_hint": "…", "secret_source": "generated",
-    "previous_secret_valid_until": null, "retired": false, "events": ["ticket.created"], "filter": [ … ], "include_payload": true
+    "previous_secret_valid_until": null, "events": ["ticket.created"], "filter": [ … ], "include_payload": true
   },
   …
 }
@@ -140,7 +140,6 @@ The event name is the payload's `event` or `type`, else the `X-Cognipeer-Event` 
 | Disabled, event not selected, filtered, duplicate | `200 { "accepted": false, "reason": … }` |
 | Bad or missing credentials | `401` (before the body is read for header modes) |
 | Unknown or switched-off URL | `404` |
-| Retired vendor preset ([below](#vendor-presets-were-retired)) | `410 webhook_preset_retired`, before authentication |
 | Body too large, not JSON | `413` (above `AGENT_WEBHOOK_BODY_LIMIT_BYTES`, 5 MiB), `415`, `400 invalid_json` |
 | Run rate, run cap, spend limit, quota | `429` with `Retry-After` |
 | Variables or template do not resolve | `400` |
@@ -163,14 +162,9 @@ Studio's trigger editor guides the same setup (authentication, events and filter
 
 Earlier releases had `github`, `gitlab` and `azure_devops` presets with their own signature checks. They are gone: the only preset is `generic`, and a vendor is reached through its [connector](#connector-triggers) instead, which also registers the hook at the vendor.
 
-A trigger saved with one of the old presets stays in the list, read-only, so nothing is lost:
+A write that names another `preset`, or an `auth` the generic preset does not offer (`github_signature`, `gitlab_token`, `basic`), is refused (`400`).
 
-- It is marked `webhook.retired: true` (Studio shows a **Retired** badge) and receives nothing: its URL answers `410` `{ "error": { "type": "gone", "code": "webhook_preset_retired", … } }` before authentication, and **Run now** and **rotate-secret** answer `410` too.
-- A write that names a retired `preset` or `auth` (`github_signature`, `gitlab_token`, `basic`) is `400`.
-- **Migrate it** by changing its type: PATCH it to `type: "connector"` with the `connector` object (keep `prompt`, `variables`, `filter` and `include_payload`: they carry over as they are, but rewrite the filter paths and the template tags for the connector's event: its `payload` is the package's flat data (`payload.draft`, not the vendor's `payload.pull_request.draft`) and a connector event has no vendor `headers` or `preset`). Studio does this with **Convert to connector trigger**, which opens the editor with those fields filled in and marks the carried-over filter rows that read `headers` or `preset`: a rule that can never match a connector event, and a rule that matches every connector event and so filters nothing (for example a header that must not exist, or `preset` equal to `connector`). Or PATCH it to `type: "webhook"` with `webhook: { "preset": "generic", … }` to turn it into a generic webhook with a new URL and secret (the old URL stops existing).
-- Delete it when it is no longer wanted.
-
-**Which events the connectors cover.** A retired preset took any event its vendor sent; a connector trigger takes the events its package declares, and the events are picked again from that list when you convert. The packages that replace the presets offer these triggers (`name.{a, b}` stands for the event types `name.a` and `name.b`; the Studio **Test** tab of a saved connector trigger shows its sample event, with the fields):
+**Which events the connectors cover.** A vendor preset took any event its vendor sent; a connector trigger takes the events its package declares, picked from that list. The packages that replace the presets offer these triggers (`name.{a, b}` stands for the event types `name.a` and `name.b`; the Studio **Test** tab of a saved connector trigger shows its sample event, with the fields):
 
 | Retired preset | Package | Triggers and their event types |
 | --- | --- | --- |

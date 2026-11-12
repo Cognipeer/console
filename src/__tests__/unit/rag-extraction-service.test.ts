@@ -13,10 +13,7 @@ const hoisted = vi.hoisted(() => ({ extract: vi.fn() }));
 
 vi.mock('@/lib/database', () => {
   const getDatabase = vi.fn();
-  return {
-    getDatabase,
-    runWithTenantScope: vi.fn(async (_tenant: string, fn: (db: unknown) => unknown) => fn(await getDatabase())),
-  };
+  return { getDatabase, runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(await getDatabase()) };
 });
 vi.mock('@cognipeer/to-markdown', () => ({
   convertToMarkdown: vi.fn().mockResolvedValue('## Converted markdown content'),

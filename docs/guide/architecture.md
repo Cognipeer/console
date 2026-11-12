@@ -30,8 +30,8 @@ Client Request
        │
        ▼
 ┌─────────────────┐
-│ withRequestContext│  ← Establishes AsyncLocalStorage context
-│  (Route wrapper) │     Checks isShuttingDown → 503
+│ Request context │  ← withApiRequestContext: AsyncLocalStorage
+│ (Route wrapper) │     Checks isShuttingDown → 503
 └──────┬──────────┘
        │
        ▼

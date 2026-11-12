@@ -24,7 +24,15 @@
  * the run already has.
  */
 
-import { brotliCompressSync, brotliDecompressSync, constants as zlibConstants } from 'node:zlib';
+import { promisify } from 'node:util';
+import {
+    brotliCompress,
+    brotliCompressSync,
+    brotliDecompress,
+    brotliDecompressSync,
+    constants as zlibConstants,
+    type BrotliOptions,
+} from 'node:zlib';
 
 import {
     isOutputLimitNoticeMessage,
@@ -62,6 +70,9 @@ import {
 
 const logger = createLogger('agent-turn-state');
 
+const brotliCompressAsync = promisify(brotliCompress) as (buf: Buffer, options: BrotliOptions) => Promise<Buffer>;
+const brotliDecompressAsync = promisify(brotliDecompress) as (buf: Buffer) => Promise<Buffer>;
+
 // ── Persistence ─────────────────────────────────────────────────────────────
 
 /**
@@ -93,12 +104,26 @@ const STORED_STATE_PREFIX = 'br64:';
  * holds plain JSON and still reads back (`decodeStoredState`).
  */
 export function encodeStoredState(json: string): string {
-    const compressed = brotliCompressSync(Buffer.from(json, 'utf8'), {
+    const compressed = brotliCompressSync(Buffer.from(json, 'utf8'), brotliOptions(json));
+    return `${STORED_STATE_PREFIX}${compressed.toString('base64')}`;
+}
+
+function brotliOptions(json: string): BrotliOptions {
+    return {
         params: {
             [zlibConstants.BROTLI_PARAM_QUALITY]: 5,
             [zlibConstants.BROTLI_PARAM_SIZE_HINT]: Buffer.byteLength(json, 'utf8'),
         },
-    });
+    };
+}
+
+/**
+ * `encodeStoredState` on the libuv threadpool: the same bytes and prefix, but
+ * the compression of a long conversation does not block the event loop (and
+ * every other in-flight stream with it). Use it wherever the caller can wait.
+ */
+export async function encodeStoredStateAsync(json: string): Promise<string> {
+    const compressed = await brotliCompressAsync(Buffer.from(json, 'utf8'), brotliOptions(json));
     return `${STORED_STATE_PREFIX}${compressed.toString('base64')}`;
 }
 
@@ -106,6 +131,13 @@ export function encodeStoredState(json: string): string {
 export function decodeStoredState(stored: string): string {
     if (!stored.startsWith(STORED_STATE_PREFIX)) return stored;
     return brotliDecompressSync(Buffer.from(stored.slice(STORED_STATE_PREFIX.length), 'base64')).toString('utf8');
+}
+
+/** `decodeStoredState` on the libuv threadpool. */
+export async function decodeStoredStateAsync(stored: string): Promise<string> {
+    if (!stored.startsWith(STORED_STATE_PREFIX)) return stored;
+    const buffer = await brotliDecompressAsync(Buffer.from(stored.slice(STORED_STATE_PREFIX.length), 'base64'));
+    return buffer.toString('utf8');
 }
 
 /**
@@ -312,9 +344,34 @@ function dropDuplicateRawOutput(carried: CarriedState): CarriedState {
  */
 export function serializeForStorage(carried: CarriedState): string | null {
     const cap = maxStateBytes();
+    for (const json of storageCandidates(carried)) {
+        const stored = encodeStoredState(json);
+        if (stored.length <= cap) return stored;
+    }
+    return null;
+}
+
+/** `serializeForStorage` with the compression off the event loop. Same result. */
+export async function serializeForStorageAsync(carried: CarriedState): Promise<string | null> {
+    const cap = maxStateBytes();
+    for (const json of storageCandidates(carried)) {
+        const stored = await encodeStoredStateAsync(json);
+        if (stored.length <= cap) return stored;
+    }
+    return null;
+}
+
+/**
+ * The JSON a state is stored as, one candidate per shrink step and built only
+ * when the step before it did not fit: the caller encodes each and keeps the
+ * first that fits the cap. A step that changed nothing (no `rawOutput`, no
+ * long output) yields no candidate: compressing the same JSON again could not
+ * come out smaller.
+ */
+function* storageCandidates(carried: CarriedState): Generator<string> {
     const deduped = dropDuplicateRawOutput(carried);
-    let stored = encodeStoredState(JSON.stringify(deduped));
-    if (stored.length <= cap) return stored;
+    let last = JSON.stringify(deduped);
+    yield last;
 
     const shrunk: CarriedState = { ...deduped };
     const eachToolEntry = (fn: (entry: Record<string, unknown>) => Record<string, unknown>) => {
@@ -326,23 +383,30 @@ export function serializeForStorage(carried: CarriedState): string | null {
                 : entry);
         }
     };
+    /** The shrunk state's JSON, or undefined when the step left it as it was. */
+    const changed = (): string | undefined => {
+        const json = JSON.stringify(shrunk);
+        if (json === last) return undefined;
+        last = json;
+        return json;
+    };
 
     eachToolEntry((entry) => {
         delete entry.rawOutput;
         return entry;
     });
-    stored = encodeStoredState(JSON.stringify(shrunk));
-    if (stored.length <= cap) return stored;
+    const withoutRawOutput = changed();
+    if (withoutRawOutput !== undefined) yield withoutRawOutput;
 
     eachToolEntry((entry) => ({ ...entry, output: truncateText(entry.output, TRIMMED_TOOL_TEXT_CHARS) }));
-    stored = encodeStoredState(JSON.stringify(shrunk));
-    if (stored.length <= cap) return stored;
+    const withShortOutputs = changed();
+    if (withShortOutputs !== undefined) yield withShortOutputs;
 
     shrunk.messages = (shrunk.messages ?? []).map((message) => message.role === 'tool'
         ? { ...message, content: truncateText(message.content, TRIMMED_TOOL_TEXT_CHARS) as string }
         : message);
-    stored = encodeStoredState(JSON.stringify(shrunk));
-    return stored.length <= cap ? stored : null;
+    const withShortResults = changed();
+    if (withShortResults !== undefined) yield withShortResults;
 }
 
 type StateStore = Pick<DatabaseProvider, 'findAgentConversationState' | 'saveAgentConversationState' | 'deleteAgentConversationState'>;
@@ -369,7 +433,7 @@ export async function loadConversationState(
             });
             return null;
         }
-        const parsed = JSON.parse(decodeStoredState(stored.snapshot)) as CarriedState;
+        const parsed = JSON.parse(await decodeStoredStateAsync(stored.snapshot)) as CarriedState;
         return pickCarried(parsed as AgentSdkSmartState);
     } catch (error) {
         logger.warn('Stored agent state could not be read; replaying the transcript instead', {
@@ -387,6 +451,11 @@ export async function loadConversationState(
  */
 export function serializeCarriedState(state: AgentSdkSmartState | undefined): string | null {
     return state ? serializeForStorage(pickCarried(state)) : null;
+}
+
+/** `serializeCarriedState` with the compression off the event loop; the pause path keeps the sync one. */
+export async function serializeCarriedStateAsync(state: AgentSdkSmartState | undefined): Promise<string | null> {
+    return state ? serializeForStorageAsync(pickCarried(state)) : null;
 }
 
 /**
@@ -414,7 +483,7 @@ export async function saveConversationState(
 ): Promise<void> {
     try {
         if (!input.state) return;
-        const snapshot = serializeCarriedState(input.state);
+        const snapshot = await serializeCarriedStateAsync(input.state);
         if (snapshot === null) {
             logger.warn('Agent state is too large to store even trimmed; the next turn replays the transcript', {
                 conversationId: input.conversationId,

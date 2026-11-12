@@ -26,6 +26,7 @@ const db = {
 };
 vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(async () => db),
+  runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(db),
 }));
 
 import { answerWithRag } from '@/lib/services/rag/ragAnswerService';

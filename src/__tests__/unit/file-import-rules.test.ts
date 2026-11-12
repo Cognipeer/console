@@ -6,7 +6,10 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return { getDatabase, runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(await getDatabase())) };
+});
 vi.mock('@/lib/core/resilience', () => ({ withResilience: (run: () => unknown) => run() }));
 vi.mock('@/lib/quota/quotaGuard', () => ({ checkResourceQuota: vi.fn(), resolveEffectiveLimits: vi.fn() }));
 vi.mock('@/lib/services/files/fileService', () => ({
@@ -16,7 +19,7 @@ vi.mock('@/lib/services/files/fileService', () => ({
   fileResilience: vi.fn(() => ({})),
 }));
 
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { checkResourceQuota, resolveEffectiveLimits } from '@/lib/quota/quotaGuard';
 import { bucketInactiveError, FileServiceError } from '@/lib/services/files/errors';
 import { fileResilience, findBucketsSharingStorage, requireBucketContext, resolveBucketPrefix } from '@/lib/services/files/fileService';
@@ -207,7 +210,7 @@ describe('which objects become files', () => {
     const base = { providerKey: 'disk', bucketKey: 'docs', projectId: 'p1', keys: ['a.txt', 'b.txt'] };
     expect(db.listFileRecordsByKeys).toHaveBeenCalledWith(base);
     expect(db.listFileRecordsByKeys).toHaveBeenCalledWith({ ...base, field: 'markdownKey' });
-    expect(db.switchToTenant).toHaveBeenCalledWith('tenant_acme');
+    expect(runWithTenantScope).toHaveBeenCalledWith('tenant_acme', expect.any(Function));
   });
 
   it('does not ask who the files are for a page that has nothing to register', async () => {

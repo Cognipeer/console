@@ -8,7 +8,6 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { messages } from '@/lib/i18n/messages';
-import type { IAgentTrigger } from '@/lib/database';
 import {
   CONNECTOR_TEMPLATE_VARIABLES,
   TRIGGER_TYPES,
@@ -19,25 +18,18 @@ import {
   WEBHOOK_PRESETS,
   WEBHOOK_SAMPLES,
   WEBHOOK_TEMPLATE_VARIABLES,
-  connectorFormFromRetired,
   connectorTriggerLabel,
   emptyTriggerForm,
   formFromTrigger,
-  isRetiredWebhook,
   parseMetadataLines,
-  rowsOnWebhookOnlyData,
   triggerBodyFromForm,
   toLocalInputValue,
   webhookVariableValue,
   withTriggerLocale,
   type TriggerRow,
-  type WebhookFilterOp,
-  type WebhookFilterRow,
 } from '@/components/agents/studio/triggerForm';
-import { eventView } from '@/lib/services/agents/agentTriggerEventDispatch';
 import { DEFAULT_WEBHOOK_HEADER_NAME, WEBHOOK_PRESET_AUTH as SERVER_PRESET_AUTH, WEBHOOK_PRESETS as SERVER_PRESETS } from '@/lib/services/agents/agentTriggerWebhookAuth';
-import { RETIRED_WEBHOOK_AUTH, RETIRED_WEBHOOK_PRESETS } from '@/lib/services/agents/agentTriggerWebhookAuth';
-import { WEBHOOK_CONTEXT_ROOTS, boundedView, filterRuleMatches, firstFilterMiss, parseFilterRules, renderWebhookTemplate } from '@/lib/services/agents/agentTriggerWebhookView';
+import { WEBHOOK_CONTEXT_ROOTS, boundedView, firstFilterMiss, parseFilterRules, renderWebhookTemplate } from '@/lib/services/agents/agentTriggerWebhookView';
 
 const now = new Date('2026-10-18T10:00:00Z');
 const base = () => ({ ...emptyTriggerForm('Europe/Istanbul', now), name: 'Digest', prompt: 'Summarise.' });
@@ -125,8 +117,6 @@ describe('webhook trigger', () => {
 
   it('the auth select offers the generic modes only and the tags are roots the server knows', () => {
     expect([...WEBHOOK_PRESET_AUTH.generic].sort()).toEqual(['bearer', 'header', 'signature', 'standard_webhooks']);
-    for (const retired of RETIRED_WEBHOOK_AUTH) expect(WEBHOOK_PRESET_AUTH.generic).not.toContain(retired);
-    for (const retired of RETIRED_WEBHOOK_PRESETS) expect(WEBHOOK_PRESETS).not.toContain(retired);
   });
 
   it('sends preset, auth, events, then the filter rows', () => {
@@ -185,14 +175,6 @@ describe('webhook trigger', () => {
       type: 'webhook', webhookPreset: 'generic', webhookAuth: 'bearer', webhookEvents: ['merge_request'], webhookIncludePayload: false,
       webhookFilter: [{ path: 'payload.user.username', op: 'in', value: 'jane, joe' }], webhookSecret: '',
     });
-  });
-
-  it('a retired vendor webhook opens as a generic one and is told apart from a live one', () => {
-    const retired = storedWebhook({ preset: 'github', auth: 'github_signature', events: ['pull_request'], retired: true });
-    expect(isRetiredWebhook(retired)).toBe(true);
-    expect(isRetiredWebhook(storedWebhook({ preset: 'generic', auth: 'bearer', retired: false }))).toBe(false);
-    expect(isRetiredWebhook(stored())).toBe(false);
-    expect(formFromTrigger(retired, 'UTC')).toMatchObject({ type: 'webhook', webhookPreset: 'generic', webhookAuth: 'bearer' });
   });
 
   it('a mapping field keeps a template as text and brings a literal to the declared type', () => {
@@ -300,9 +282,6 @@ describe('connector trigger', () => {
       // The person moved the trigger to another trigger, or to another connector: nothing of the stored schedule is theirs any more.
       expect(scheduleOf(triggerBodyFromForm(emptied({ trigger: 'pull_request' }), [], row, now))).not.toHaveProperty('schedule');
       expect(scheduleOf(triggerBodyFromForm(emptied({ connectorId: 'c2', trigger: 'issues' }), [], row, now))).not.toHaveProperty('schedule');
-      // A retired vendor webhook converted into a connector trigger.
-      const retired = { ...rest, type: 'webhook', webhook: { url: 'https://console.example.com/api/public/hooks/t/wh_x', preset: 'github', auth: 'github_signature', retired: true } } as unknown as TriggerRow;
-      expect(scheduleOf(triggerBodyFromForm({ ...connectorFormFromRetired(retired, 'UTC'), connector: picked({ scheduleCron: '' }) }, [], retired, now))).not.toHaveProperty('schedule');
     });
   });
 
@@ -322,128 +301,6 @@ describe('connector trigger', () => {
 
   it('a stored webhook connector trigger has no schedule in its form', () => {
     expect(formFromTrigger(connectorRow(), 'UTC').connector).toMatchObject({ scheduleCron: '', scheduleTimezone: 'UTC' });
-  });
-
-  it('converting a retired vendor trigger carries the prompt, variables, filter and payload choice, and leaves the connector to pick', () => {
-    const retired: TriggerRow = {
-      ...rest, type: 'webhook', prompt: 'Review {{payload.number}}', variables: { region: 'eu' },
-      webhook: {
-        url: 'https://console.example.com/api/public/hooks/t/wh_x', preset: 'github', auth: 'github_signature', retired: true, events: ['pull_request'],
-        filter: [{ path: 'payload.sender.type', op: 'eq', value: 'User' }], include_payload: false,
-      },
-    } as unknown as TriggerRow;
-    const form = connectorFormFromRetired(retired, 'UTC');
-    expect(form).toMatchObject({
-      type: 'connector', name: 'Digest', prompt: 'Review {{payload.number}}', variables: { region: 'eu' }, connector: null, webhookEvents: [],
-      webhookFilter: [{ path: 'payload.sender.type', op: 'eq', value: 'User' }], webhookIncludePayload: false,
-    });
-    // Once the connector is picked, the save turns the same row into a connector trigger.
-    const built = triggerBodyFromForm({ ...form, connector: picked() }, [{ name: 'region', type: 'string' }], retired, now);
-    expect(built.ok && built.body).toMatchObject({
-      type: 'connector', prompt: 'Review {{payload.number}}', variables: { region: 'eu' },
-      connector: { connector_id: 'c1', filter: [{ path: 'payload.sender.type', op: 'eq', value: 'User' }], include_payload: false },
-    });
-    expect(built.ok && 'webhook' in built.body).toBe(false);
-  });
-
-  it('keeps the rows that read the vendor\'s headers or preset as they were, and points them out', () => {
-    const retired = {
-      ...rest, id: 'r1', type: 'webhook',
-      webhook: {
-        url: 'https://console.example.com/api/public/hooks/t/wh_x', preset: 'github', auth: 'github_signature', retired: true, events: ['pull_request'],
-        filter: [
-          { path: 'headers.x-github-event', op: 'eq', value: 'pull_request' },
-          { path: 'payload.pull_request.draft', op: 'eq', value: false },
-          { path: 'preset', op: 'eq', value: 'github' },
-        ],
-        include_payload: true,
-      },
-    } as unknown as TriggerRow;
-    const form = connectorFormFromRetired(retired, 'UTC');
-    // Nothing is dropped behind the user's back ...
-    expect(form.webhookFilter.map((row) => row.path)).toEqual(['headers.x-github-event', 'payload.pull_request.draft', 'preset']);
-    // ... but the two rules a connector event can never meet are found.
-    expect(rowsOnWebhookOnlyData(form.webhookFilter)).toEqual({ never: [0, 2], always: [] });
-  });
-
-  it('flags only paths that start at headers or preset', () => {
-    const rows = (...paths: string[]) => paths.map((path) => ({ path, op: 'eq' as const, value: 'x' }));
-    expect(rowsOnWebhookOnlyData(rows('headers', 'headers.x-github-event', 'preset', 'preset.name'))).toEqual({ never: [0, 1, 2, 3], always: [] });
-    expect(rowsOnWebhookOnlyData(rows('  headers.x-a  ', ' preset '))).toEqual({ never: [0, 1], always: [] });
-    // Data the connector event does carry, or that only looks alike.
-    expect(rowsOnWebhookOnlyData(rows('payload.headers.x', 'payload.preset', 'event', 'delivery_id', 'headersx', 'presets', 'connector.name', 'trigger.name', 'agent.key', 'payload.'))).toEqual({ never: [], always: [] });
-    expect(rowsOnWebhookOnlyData([])).toEqual({ never: [], always: [] });
-  });
-
-  describe('a row on headers or preset is judged by what it does on a connector event', () => {
-    const row = (path: string, op: WebhookFilterOp, value = ''): WebhookFilterRow => ({ path, op, value });
-
-    it('a rule on a header holds only when it asks for the header to be absent', () => {
-      expect(rowsOnWebhookOnlyData([
-        row('headers.x-github-event', 'eq', 'pull_request'),
-        row('headers.x-github-event', 'neq', 'pull_request'),
-        row('headers.x-github-event', 'exists'),
-        row('headers.x-github-event', 'not_exists'),
-        row('headers.x-github-event', 'contains', 'pull'),
-        row('headers.x-github-event', 'in', 'push, pull_request'),
-        row('headers.x-github-event', 'not_in', 'push, pull_request'),
-        row('headers.x-github-event', 'starts_with', 'pull'),
-        row('headers.x-github-event', 'glob', '*'),
-      ])).toEqual({ never: [0, 1, 2, 4, 5, 6, 7, 8], always: [3] });
-    });
-
-    it('a rule on the preset is judged against the text connector', () => {
-      expect(rowsOnWebhookOnlyData([
-        row('preset', 'eq', 'connector'),
-        row('preset', 'eq', 'github'),
-        row('preset', 'neq', 'github'),
-        row('preset', 'neq', 'connector'),
-        row('preset', 'in', 'github, connector'),
-        row('preset', 'not_in', 'github, gitlab'),
-        row('preset', 'contains', 'nect'),
-        row('preset', 'glob', 'git*'),
-        row('preset', 'exists'),
-        row('preset', 'not_exists'),
-        row('preset.name', 'not_exists'),
-        row('preset.name', 'eq', 'connector'),
-      ])).toEqual({ never: [1, 3, 7, 9, 11], always: [0, 2, 4, 5, 6, 8, 10] });
-    });
-
-    it('does not judge a row that cannot be sent yet (a save refuses it first)', () => {
-      expect(rowsOnWebhookOnlyData([row('headers.x', 'eq', ''), row('preset', 'in', ' , '), row('preset', 'neq', ''), row('headers.x', 'not_exists')]))
-        .toEqual({ never: [], always: [3] });
-    });
-
-    it('judges the row over the very view a connector event has', () => {
-      // The view the server builds for a connector event (the Connectors module hands it no headers).
-      const view = eventView({
-        trigger: { _id: 't1', name: 'Example', agentKey: 'agent' } as unknown as IAgentTrigger,
-        preset: 'connector',
-        payload: { number: 7 },
-        headers: {},
-        identity: { event: 'pull_request.opened', deliveryId: 'delivery-1' },
-        receivedAt: new Date(now),
-        connector: { id: 'c1', key: 'github', name: 'GitHub', packageId: 'cognipeer.github', trigger: 'pull_request' },
-      });
-      const rows: WebhookFilterRow[] = [];
-      for (const path of ['headers', 'headers.x-github-event', 'headers.*', 'preset', 'preset.name', ' preset ']) {
-        for (const op of WEBHOOK_FILTER_OPS) {
-          for (const value of op === 'exists' || op === 'not_exists' ? [''] : ['connector', 'github', 'conn*', 'github, connector']) rows.push(row(path, op, value));
-        }
-      }
-      const ruleOf = (item: WebhookFilterRow) => ({
-        path: item.path.trim(),
-        op: item.op,
-        ...(item.op === 'exists' || item.op === 'not_exists' ? {} : { value: item.op === 'in' || item.op === 'not_in' ? item.value.split(',').map((part) => part.trim()) : item.value }),
-      });
-      const found = rowsOnWebhookOnlyData(rows);
-      const always = rows.flatMap((item, index) => (filterRuleMatches(view, ruleOf(item)) ? [index] : []));
-      expect(found.always).toEqual(always);
-      expect(found.never).toEqual(rows.flatMap((_, index) => (always.includes(index) ? [] : [index])));
-      // Both kinds are there, so the comparison says something.
-      expect(found.always.length).toBeGreaterThan(10);
-      expect(found.never.length).toBeGreaterThan(10);
-    });
   });
 
   it('the tags offered are roots the server knows, and a connector event has no headers', () => {
@@ -492,9 +349,8 @@ describe('strings', () => {
     const keys = [
       ...WEBHOOK_FILTER_OPS.map((op) => `op_${op}`),
       ...['accepted', 'duplicate', 'filtered', 'ignored', 'unauthorized', 'rejected', 'failed'].map((outcome) => `outcome_${outcome}`),
-      // The names of the retired presets stay: a stored trigger of one is still listed under its name.
-      'presetGeneric', 'presetGithub', 'presetGitlab', 'presetAzureDevops',
-      ...['kindConnectorWebhook', 'kindConnectorPoll', 'summaryConnector', 'summaryConnectorAny', 'retired', 'retiredHint', 'retiredNotice', 'convert'],
+      'presetGeneric',
+      ...['kindConnectorWebhook', 'kindConnectorPoll', 'summaryConnector', 'summaryConnectorAny'],
       ...['connectorUnavailable', 'connectorForbidden', 'connectorUnavailableBadge', 'connectorCatalogFailed', 'connectorRequired', 'connectorUnattendedHint', 'deliveriesHintConnector'],
       ...['connectorTestHint', 'connectorTestEvent', 'connectorTestEventPlaceholder', 'connectorTestEventInvalid', 'connectorTestPayloadHint'],
       ...WEBHOOK_PRESETS.flatMap((preset) => WEBHOOK_FILTER_EXAMPLES[preset].map((example) => example.key)),
@@ -506,23 +362,6 @@ describe('strings', () => {
     }
   });
 
-  it('the hint under a rule that never matches names what a connector event does carry, in both languages: no headers, and the preset “connector”', () => {
-    // `preset eq github` is in the group of rules that match nothing: a connector event has a preset, and it is not github.
-    expect(rowsOnWebhookOnlyData([{ path: 'preset', op: 'eq', value: 'github' }])).toEqual({ never: [0], always: [] });
-    const en = at(messages.en, 'agents.triggers');
-    const tr = at(messages.tr, 'agents.triggers');
-    expect(en.convertRowHint).toBe('A connector event has no headers and its preset is always “connector”: this rule never matches.');
-    expect(tr.convertRowHint).toBe('Bağlayıcı olayında başlık (header) yoktur ve hazır ayarı (preset) her zaman “connector”dır: bu kural hiçbir zaman eşleşmez.');
-    // It does not say the event has no preset (it has one), nor does its twin for the rules that match everything.
-    expect(en.convertRowHint).not.toMatch(/no headers or preset/);
-    expect(tr.convertRowHint).not.toMatch(/ve hazır ayar yoktur/);
-    for (const strings of [en, tr]) {
-      expect(strings.convertRowHint).toContain('“connector”');
-      expect(strings.convertRowAlwaysHint).toContain('“connector”');
-      expect(strings.convertRowHint).not.toBe(strings.convertRowAlwaysHint);
-    }
-  });
-
   it('the sentence for a person who may not read the connectors differs from the one for a module that is not there', () => {
     for (const locale of ['en', 'tr'] as const) {
       const strings = at(messages[locale], 'agents.triggers');
@@ -531,10 +370,10 @@ describe('strings', () => {
     }
   });
 
-  it('the editor’s strings no longer carry the vendor presets, except the names a retired trigger is listed under', () => {
+  it('the editor’s strings no longer carry the vendor presets', () => {
     for (const locale of ['en', 'tr'] as const) {
       const vendor = Object.keys(at(messages[locale], 'agents.triggers')).filter((key) => /github|gitlab|azure|ado/i.test(key));
-      expect(vendor.sort(), locale).toEqual(['presetAzureDevops', 'presetGithub', 'presetGitlab']);
+      expect(vendor, locale).toEqual([]);
     }
   });
 

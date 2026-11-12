@@ -18,7 +18,7 @@ This document defines the general development rules for `cognipeer-console` (gat
 - `src/middleware.ts`: UI-only auth/header propagation for Next-rendered screens
 - `src/server/*`: Node runtime, Fastify bootstrap, Next delegation
 - `src/server/api/plugins/*`: native Fastify endpoint registrations for dashboard/internal + client APIs
-- `src/server/api/fastify-utils.ts`: shared Fastify auth, request-context, parsing, cookie helpers
+- `src/server/api/fastify-utils.ts`: facade for shared Fastify auth, request-context, parsing, cookie helpers (implemented in `src/server/api/utils/`)
 - `src/server/api/plugin.ts`: API auth, CORS, security headers, request-context hooks
 - `src/server/api/plugins/*`: every live route is a Fastify plugin registered in `plugin.ts`
 

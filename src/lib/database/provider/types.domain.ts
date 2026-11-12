@@ -969,13 +969,10 @@ export interface IEvaluationDataset {
   description?: string;
   source: EvaluationDatasetSource;
   /**
-   * LEGACY embedded storage. Live items are rows in the separate
-   * `evaluation_dataset_items` collection/table (see
-   * IEvaluationDatasetItemRecord); this field survives only on documents
-   * created before the split and is migrated (then cleared) on the first
-   * item write. Writers may still PASS `items` to create/update — the
-   * provider routes them to the item collection — but readers must use the
-   * item methods, never this field.
+   * Write-only input: items passed to create/update are routed by the provider
+   * to the item collection/table (create inserts, update replaces). Never
+   * persisted on the dataset itself and never returned by reads — readers use
+   * the item methods (see IEvaluationDatasetItemRecord).
    */
   items?: IEvaluationDatasetItem[];
   /** Denormalised item count, maintained by the provider's item methods. */
@@ -989,10 +986,9 @@ export interface IEvaluationDataset {
 
 /**
  * One dataset item as persisted in the dedicated `evaluation_dataset_items`
- * collection/table. Items used to live embedded on the dataset document,
- * which capped a whole dataset at one Mongo document (16MB) and forced every
- * read/write to ship the full array; each item is now its own row keyed by
- * (datasetId, itemId) with a stable `position` for ordering.
+ * collection/table: each item is its own row keyed by (datasetId, itemId)
+ * with a stable `position` for ordering, so a dataset is not bounded by a
+ * single document.
  */
 export interface IEvaluationDatasetItemRecord extends IEvaluationDatasetItem {
   _id?: ObjectId | string;
@@ -3744,13 +3740,6 @@ export interface IAgentToolBinding {
 export type AgentTriggerWebhookPreset = 'generic';
 
 /**
- * Vendor presets that older triggers were stored with. Read-only legacy: such a
- * trigger no longer receives deliveries (its URL answers 410), can not be
- * written, and can be converted to a connector or a generic webhook trigger.
- */
-export type RetiredAgentTriggerWebhookPreset = 'github' | 'gitlab' | 'azure_devops';
-
-/**
  * How a delivery proves it knows the trigger's secret. The first two sign
  * the raw body (checked once the body is read); the rest carry the secret in a
  * header (checked before the body is read).
@@ -3764,9 +3753,6 @@ export type AgentTriggerWebhookAuth =
   | 'bearer'
   /** `<headerName>: <secret>`. */
   | 'header';
-
-/** Auth modes of retired vendor presets; stored on old triggers only (see `RetiredAgentTriggerWebhookPreset`). */
-export type RetiredAgentTriggerWebhookAuth = 'github_signature' | 'gitlab_token' | 'basic';
 
 /** One filter rule over the delivery (all rules must match). */
 export interface AgentTriggerWebhookFilterRule {
@@ -3783,8 +3769,8 @@ export interface AgentTriggerWebhookFilterRule {
 export interface AgentTriggerWebhook {
   /** `wh_` + 18 random bytes (base64url): the URL's locator. Kept while the trigger stays a webhook one; never reused. */
   hookId: string;
-  preset: AgentTriggerWebhookPreset | RetiredAgentTriggerWebhookPreset;
-  auth: AgentTriggerWebhookAuth | RetiredAgentTriggerWebhookAuth;
+  preset: AgentTriggerWebhookPreset;
+  auth: AgentTriggerWebhookAuth;
   /** Auth `header` only; lower-case. */
   headerName?: string | null;
   /** `encryptObject(secret)`; never serialized. */

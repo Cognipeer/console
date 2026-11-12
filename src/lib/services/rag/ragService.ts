@@ -23,7 +23,7 @@ import {
   collectFilterOperators,
   parseVectorFilter,
 } from '@/lib/providers';
-import { getDatabase, type DatabaseProvider } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 
 const logger = createLogger('rag');
 import type {
@@ -595,48 +595,47 @@ export async function createRagModule(
   projectId: string | undefined,
   request: CreateRagModuleRequest,
 ): Promise<RagModule> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const key = generateKey(request.name, request.key);
 
-  const key = generateKey(request.name, request.key);
+    validateFilterDocument(request.defaultFilter, 'Invalid defaultFilter');
 
-  validateFilterDocument(request.defaultFilter, 'Invalid defaultFilter');
+    // Check uniqueness
+    const existing = await db.findRagModuleByKey(key, projectId);
+    if (existing) {
+      throw new Error(`Knowledge Engine module with key "${key}" already exists`);
+    }
 
-  // Check uniqueness
-  const existing = await db.findRagModuleByKey(key, projectId);
-  if (existing) {
-    throw new Error(`Knowledge Engine module with key "${key}" already exists`);
-  }
-
-  return db.createRagModule({
-    tenantId,
-    projectId,
-    key,
-    name: request.name,
-    description: request.description,
-    embeddingModelKey: request.embeddingModelKey,
-    vectorProviderKey: request.vectorProviderKey,
-    vectorIndexKey: request.vectorIndexKey,
-    fileBucketKey: request.fileBucketKey,
-    fileProviderKey: request.fileProviderKey,
-    chunkConfig: request.chunkConfig,
-    ...(request.extraction ? { extraction: request.extraction } : {}),
-    status: 'active',
-    rerankerKey: request.rerankerKey,
-    rerankerOversample: request.rerankerOversample,
-    defaultTopK: request.defaultTopK,
-    defaultMinScore: request.defaultMinScore,
-    defaultFilter: request.defaultFilter,
-    filterableFields: request.filterableFields,
-    responseDetail: request.responseDetail,
-    hybrid: request.hybrid,
-    // Our own ingest stamps `_ragModule` on every vector, so isolation is free
-    // and stops a shared index from ever answering with another module's text.
-    isolateByModule: request.isolateByModule ?? true,
-    totalDocuments: 0,
-    totalChunks: 0,
-    metadata: request.metadata,
-    createdBy: request.createdBy,
+    return db.createRagModule({
+      tenantId,
+      projectId,
+      key,
+      name: request.name,
+      description: request.description,
+      embeddingModelKey: request.embeddingModelKey,
+      vectorProviderKey: request.vectorProviderKey,
+      vectorIndexKey: request.vectorIndexKey,
+      fileBucketKey: request.fileBucketKey,
+      fileProviderKey: request.fileProviderKey,
+      chunkConfig: request.chunkConfig,
+      ...(request.extraction ? { extraction: request.extraction } : {}),
+      status: 'active',
+      rerankerKey: request.rerankerKey,
+      rerankerOversample: request.rerankerOversample,
+      defaultTopK: request.defaultTopK,
+      defaultMinScore: request.defaultMinScore,
+      defaultFilter: request.defaultFilter,
+      filterableFields: request.filterableFields,
+      responseDetail: request.responseDetail,
+      hybrid: request.hybrid,
+      // Our own ingest stamps `_ragModule` on every vector, so isolation is free
+      // and stops a shared index from ever answering with another module's text.
+      isolateByModule: request.isolateByModule ?? true,
+      totalDocuments: 0,
+      totalChunks: 0,
+      metadata: request.metadata,
+      createdBy: request.createdBy,
+    });
   });
 }
 
@@ -645,65 +644,65 @@ export async function updateRagModule(
   moduleId: string,
   request: UpdateRagModuleRequest,
 ): Promise<RagModule | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const current = await db.findRagModuleById(moduleId);
-  const updates: Record<string, unknown> = {};
-  if (request.name !== undefined) updates.name = request.name;
-  if (request.description !== undefined) updates.description = request.description;
-  if (request.embeddingModelKey !== undefined) updates.embeddingModelKey = request.embeddingModelKey;
-  if (request.vectorProviderKey !== undefined) updates.vectorProviderKey = request.vectorProviderKey;
-  if (request.vectorIndexKey !== undefined) updates.vectorIndexKey = request.vectorIndexKey;
-  if (request.chunkConfig !== undefined) updates.chunkConfig = request.chunkConfig;
-  // `null` clears. Changing the OCR settings never flags a re-index: they only apply to what is uploaded or
-  // re-extracted from now on, and a re-index does not OCR.
-  if (request.extraction !== undefined) updates.extraction = request.extraction ?? undefined;
-  if (request.status !== undefined) updates.status = request.status;
-  if (request.metadata !== undefined) updates.metadata = request.metadata;
-  if (request.rerankerKey !== undefined) updates.rerankerKey = request.rerankerKey ?? undefined;
-  if (request.rerankerOversample !== undefined) updates.rerankerOversample = request.rerankerOversample ?? undefined;
-  if (request.defaultTopK !== undefined) updates.defaultTopK = request.defaultTopK ?? undefined;
-  if (request.defaultMinScore !== undefined) updates.defaultMinScore = request.defaultMinScore ?? undefined;
-  if (request.defaultFilter !== undefined) {
-    validateFilterDocument(request.defaultFilter, 'Invalid defaultFilter');
-    updates.defaultFilter = request.defaultFilter ?? undefined;
-  }
-  if (request.filterableFields !== undefined) {
-    updates.filterableFields = request.filterableFields ?? undefined;
-  }
-  if (request.responseDetail !== undefined) updates.responseDetail = request.responseDetail ?? undefined;
-  if (request.hybrid !== undefined) updates.hybrid = request.hybrid ?? undefined;
-  if (request.isolateByModule !== undefined) updates.isolateByModule = request.isolateByModule ?? undefined;
-  if (request.access === null) {
-    updates.access = undefined;
-  } else if (request.access !== undefined) {
-    // Merged into the stored setting: what the request leaves out stays, so switching access control off and on
-    // again does not give the admin exception back to a module that removed it.
-    const adminBypass = request.access.adminBypass ?? current?.access?.adminBypass;
-    updates.access = {
-      enabled: request.access.enabled === true,
-      ...(adminBypass === false ? { adminBypass: false } : {}),
-    };
-  }
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const current = await db.findRagModuleById(moduleId);
+    const updates: Record<string, unknown> = {};
+    if (request.name !== undefined) updates.name = request.name;
+    if (request.description !== undefined) updates.description = request.description;
+    if (request.embeddingModelKey !== undefined) updates.embeddingModelKey = request.embeddingModelKey;
+    if (request.vectorProviderKey !== undefined) updates.vectorProviderKey = request.vectorProviderKey;
+    if (request.vectorIndexKey !== undefined) updates.vectorIndexKey = request.vectorIndexKey;
+    if (request.chunkConfig !== undefined) updates.chunkConfig = request.chunkConfig;
+    // `null` clears. Changing the OCR settings never flags a re-index: they only apply to what is uploaded or
+    // re-extracted from now on, and a re-index does not OCR.
+    if (request.extraction !== undefined) updates.extraction = request.extraction ?? undefined;
+    if (request.status !== undefined) updates.status = request.status;
+    if (request.metadata !== undefined) updates.metadata = request.metadata;
+    if (request.rerankerKey !== undefined) updates.rerankerKey = request.rerankerKey ?? undefined;
+    if (request.rerankerOversample !== undefined) updates.rerankerOversample = request.rerankerOversample ?? undefined;
+    if (request.defaultTopK !== undefined) updates.defaultTopK = request.defaultTopK ?? undefined;
+    if (request.defaultMinScore !== undefined) updates.defaultMinScore = request.defaultMinScore ?? undefined;
+    if (request.defaultFilter !== undefined) {
+      validateFilterDocument(request.defaultFilter, 'Invalid defaultFilter');
+      updates.defaultFilter = request.defaultFilter ?? undefined;
+    }
+    if (request.filterableFields !== undefined) {
+      updates.filterableFields = request.filterableFields ?? undefined;
+    }
+    if (request.responseDetail !== undefined) updates.responseDetail = request.responseDetail ?? undefined;
+    if (request.hybrid !== undefined) updates.hybrid = request.hybrid ?? undefined;
+    if (request.isolateByModule !== undefined) updates.isolateByModule = request.isolateByModule ?? undefined;
+    if (request.access === null) {
+      updates.access = undefined;
+    } else if (request.access !== undefined) {
+      // Merged into the stored setting: what the request leaves out stays, so switching access control off and on
+      // again does not give the admin exception back to a module that removed it.
+      const adminBypass = request.access.adminBypass ?? current?.access?.adminBypass;
+      updates.access = {
+        enabled: request.access.enabled === true,
+        ...(adminBypass === false ? { adminBypass: false } : {}),
+      };
+    }
 
-  // The stored vectors keep answering queries against the old settings until a
-  // re-index run rebuilds them, so the flag is what tells anyone they are stale.
-  const reindexReason = current ? reindexReasonForUpdate(current, request) : undefined;
-  if (reindexReason) {
-    updates.reindexRequired = true;
-    logger.warn('Knowledge Engine module change requires a re-index', {
-      moduleId,
-      ragModuleKey: current?.key,
-      reason: reindexReason,
-    });
-  }
+    // The stored vectors keep answering queries against the old settings until a
+    // re-index run rebuilds them, so the flag is what tells anyone they are stale.
+    const reindexReason = current ? reindexReasonForUpdate(current, request) : undefined;
+    if (reindexReason) {
+      updates.reindexRequired = true;
+      logger.warn('Knowledge Engine module change requires a re-index', {
+        moduleId,
+        ragModuleKey: current?.key,
+        reason: reindexReason,
+      });
+    }
 
-  updates.updatedBy = request.updatedBy;
-  const updated = await db.updateRagModule(moduleId, updates as Partial<IRagModule>);
-  if (current && updated && (current.access?.enabled === true) !== (updated.access?.enabled === true)) {
-    tellModuleChanged(tenantDbName, current, 'access', request.updatedBy);
-  }
-  return updated;
+    updates.updatedBy = request.updatedBy;
+    const updated = await db.updateRagModule(moduleId, updates as Partial<IRagModule>);
+    if (current && updated && (current.access?.enabled === true) !== (updated.access?.enabled === true)) {
+      tellModuleChanged(tenantDbName, current, 'access', request.updatedBy);
+    }
+    return updated;
+  });
 }
 
 /** Tells the registered listener (enterprise connectors) that a module's access control changed or the module is gone; in the background. */
@@ -762,67 +761,66 @@ export async function deleteRagModule(
   projectId: string | undefined,
   moduleId: string,
 ): Promise<boolean> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const ragModule = await db.findRagModuleById(moduleId);
+    if (!ragModule) return false;
 
-  const ragModule = await db.findRagModuleById(moduleId);
-  if (!ragModule) return false;
+    const siblings = (await db.listRagModules())
+      .filter((m) => m.key === ragModule.key && String(m._id) !== String(ragModule._id));
+    const keyIsUnambiguous = siblings.length === 0;
 
-  const siblings = (await db.listRagModules())
-    .filter((m) => m.key === ragModule.key && String(m._id) !== String(ragModule._id));
-  const keyIsUnambiguous = siblings.length === 0;
+    const candidates = await db.listRagDocuments(ragModule.key);
+    const documents = keyIsUnambiguous
+      ? candidates
+      : candidates.filter((doc) => sameProject(doc.projectId, ragModule.projectId));
 
-  const candidates = await db.listRagDocuments(ragModule.key);
-  const documents = keyIsUnambiguous
-    ? candidates
-    : candidates.filter((doc) => sameProject(doc.projectId, ragModule.projectId));
-
-  if (!keyIsUnambiguous) {
-    logger.warn('Another project owns a module with this key; tearing down only this one', {
-      ragModuleKey: ragModule.key,
-      siblingCount: siblings.length,
-      documentCount: documents.length,
-      unattributableCount: candidates.length - documents.length,
-    });
-  }
-
-  const vectorIds = documents.flatMap((doc) => documentVectorIds(
-    ragModule.key,
-    String(doc._id),
-    doc.chunkCount ?? 0,
-  ));
-  await removeVectors(
-    tenantDbName, tenantId, projectId, ragModule, vectorIds, `teardown of module ${ragModule.key}`,
-  );
-
-  await Promise.all(documents.map((doc) => discardDocumentSource(
-    tenantDbName, tenantId, projectId, doc, CASCADE_ACTOR,
-  )));
-
-  if (keyIsUnambiguous) {
-    // Also sweeps chunk rows whose document row is already gone, which the
-    // per-document path below cannot reach.
-    await db.deleteRagChunksByModuleKey(ragModule.key);
-    await db.deleteRagDocumentsByModuleKey(ragModule.key);
-  } else {
-    for (let i = 0; i < documents.length; i += CASCADE_DELETE_BATCH_SIZE) {
-      await Promise.all(documents.slice(i, i + CASCADE_DELETE_BATCH_SIZE).map(async (doc) => {
-        await db.deleteRagChunksByDocumentId(String(doc._id));
-        await db.deleteRagDocument(String(doc._id));
-      }));
+    if (!keyIsUnambiguous) {
+      logger.warn('Another project owns a module with this key; tearing down only this one', {
+        ragModuleKey: ragModule.key,
+        siblingCount: siblings.length,
+        documentCount: documents.length,
+        unattributableCount: candidates.length - documents.length,
+      });
     }
-  }
 
-  // Folders and permissions are keyed by module key and project; a module
-  // without a project that shares its key with another one cannot tell its own
-  // apart, so those are left (they match nothing once the module is gone).
-  if (keyIsUnambiguous || ragModule.projectId) {
-    await deleteRagModuleAccessData(db, tenantDbName, ragModule);
-  }
+    const vectorIds = documents.flatMap((doc) => documentVectorIds(
+      ragModule.key,
+      String(doc._id),
+      doc.chunkCount ?? 0,
+    ));
+    await removeVectors(
+      tenantDbName, tenantId, projectId, ragModule, vectorIds, `teardown of module ${ragModule.key}`,
+    );
 
-  const deleted = await db.deleteRagModule(moduleId);
-  if (deleted) tellModuleChanged(tenantDbName, { ...ragModule, tenantId: ragModule.tenantId ?? tenantId }, 'deleted');
-  return deleted;
+    await Promise.all(documents.map((doc) => discardDocumentSource(
+      tenantDbName, tenantId, projectId, doc, CASCADE_ACTOR,
+    )));
+
+    if (keyIsUnambiguous) {
+      // Also sweeps chunk rows whose document row is already gone, which the
+      // per-document path below cannot reach.
+      await db.deleteRagChunksByModuleKey(ragModule.key);
+      await db.deleteRagDocumentsByModuleKey(ragModule.key);
+    } else {
+      for (let i = 0; i < documents.length; i += CASCADE_DELETE_BATCH_SIZE) {
+        await Promise.all(documents.slice(i, i + CASCADE_DELETE_BATCH_SIZE).map(async (doc) => {
+          await db.deleteRagChunksByDocumentId(String(doc._id));
+          await db.deleteRagDocument(String(doc._id));
+        }));
+      }
+    }
+
+    // Folders and permissions are keyed by module key and project; a module
+    // without a project that shares its key with another one cannot tell its own
+    // apart, so those are left (they match nothing once the module is gone).
+    if (keyIsUnambiguous || ragModule.projectId) {
+      await deleteRagModuleAccessData(db, tenantDbName, ragModule);
+    }
+
+    const deleted = await db.deleteRagModule(moduleId);
+    if (deleted) tellModuleChanged(tenantDbName, { ...ragModule, tenantId: ragModule.tenantId ?? tenantId }, 'deleted');
+    return deleted;
+  });
 }
 
 export async function getRagModule(
@@ -830,27 +828,27 @@ export async function getRagModule(
   key: string,
   projectId?: string,
 ): Promise<RagModule | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.findRagModuleByKey(key, projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.findRagModuleByKey(key, projectId);
+  });
 }
 
 export async function getRagModuleById(
   tenantDbName: string,
   id: string,
 ): Promise<RagModule | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.findRagModuleById(id);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.findRagModuleById(id);
+  });
 }
 
 export async function listRagModules(
   tenantDbName: string,
   filters?: { projectId?: string; status?: 'active' | 'disabled'; search?: string },
 ): Promise<RagModule[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.listRagModules(filters);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.listRagModules(filters);
+  });
 }
 
 /* ── Document CRUD ───────────────────────────────────────────────────── */
@@ -874,18 +872,18 @@ export async function listRagDocuments(
   ragModuleKey: string,
   filters?: { projectId?: string; search?: string; access?: RagDocumentAccessFilter },
 ): Promise<RagDocument[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const documents = await db.listRagDocuments(ragModuleKey, filters);
-  // Trimmed in place rather than mapped into a second array. Each row carries
-  // up to INLINE_SOURCE_MAX_CHARS of sourceText and the DB contract has no
-  // projection, so a module's whole corpus arrives in memory whichever way this
-  // is written; replacing each row as we go at least keeps ONE copy of it
-  // reachable instead of the trimmed set and the untrimmed set at once.
-  for (let i = 0; i < documents.length; i += 1) {
-    documents[i] = withoutInlineSource(documents[i]);
-  }
-  return documents;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const documents = await db.listRagDocuments(ragModuleKey, filters);
+    // Trimmed in place rather than mapped into a second array. Each row carries
+    // up to INLINE_SOURCE_MAX_CHARS of sourceText and the DB contract has no
+    // projection, so a module's whole corpus arrives in memory whichever way this
+    // is written; replacing each row as we go at least keeps ONE copy of it
+    // reachable instead of the trimmed set and the untrimmed set at once.
+    for (let i = 0; i < documents.length; i += 1) {
+      documents[i] = withoutInlineSource(documents[i]);
+    }
+    return documents;
+  });
 }
 
 export interface RagDocumentPage {
@@ -923,32 +921,32 @@ export async function listRagDocumentsPage(
     RAG_DOCUMENT_PAGE_MAX,
   );
   const offset = Math.max(0, Math.floor(page.offset ?? 0));
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const [rows, total] = await Promise.all([
-    db.listRagDocuments(ragModuleKey, { ...filters, limit, offset }),
-    db.countRagDocuments(ragModuleKey, filters.projectId, {
-      status: filters.status,
-      search: filters.search,
-      ...(filters.folderId !== undefined ? { folderId: filters.folderId } : {}),
-      ...(filters.access ? { access: filters.access } : {}),
-    }),
-  ]);
-  return {
-    documents: rows.map((row) => withoutInlineSource(row)),
-    total,
-    limit,
-    offset,
-  };
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const [rows, total] = await Promise.all([
+      db.listRagDocuments(ragModuleKey, { ...filters, limit, offset }),
+      db.countRagDocuments(ragModuleKey, filters.projectId, {
+        status: filters.status,
+        search: filters.search,
+        ...(filters.folderId !== undefined ? { folderId: filters.folderId } : {}),
+        ...(filters.access ? { access: filters.access } : {}),
+      }),
+    ]);
+    return {
+      documents: rows.map((row) => withoutInlineSource(row)),
+      total,
+      limit,
+      offset,
+    };
+  });
 }
 
 export async function getRagDocument(
   tenantDbName: string,
   documentId: string,
 ): Promise<RagDocument | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.findRagDocumentById(documentId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.findRagDocumentById(documentId);
+  });
 }
 
 /* ── Full-text read (two modes: whole document, or a line range) ──────── */
@@ -1081,147 +1079,146 @@ export async function ingestDocumentUnchecked(
   request: RagIngestInput,
 ): Promise<RagDocument> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
+    if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
+    if (ragModule.status !== 'active') throw new Error('Knowledge Engine module is not active');
+    // A document whose extraction is still to run is persisted by the deferred path whatever the caller asked for.
+    if (request.extraction?.stage === 'queued' && !request.deferIndexing) request = { ...request, deferIndexing: true };
 
-  const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
-  if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
-  if (ragModule.status !== 'active') throw new Error('Knowledge Engine module is not active');
-  // A document whose extraction is still to run is persisted by the deferred path whatever the caller asked for.
-  if (request.extraction?.stage === 'queued' && !request.deferIndexing) request = { ...request, deferIndexing: true };
+    // Only the crawler's own ingest marks a document as its page; the mark in anyone's metadata is dropped.
+    const metadata = metadataWithCrawlerMark(request.metadata, request.sentByCrawler);
 
-  // Only the crawler's own ingest marks a document as its page; the mark in anyone's metadata is dropped.
-  const metadata = metadataWithCrawlerMark(request.metadata, request.sentByCrawler);
+    // A bad folder or permission entry fails the ingest before anything is stored.
+    const placementCtx = { tenantDbName, tenantId, projectId, actor: request.createdBy };
+    const callerScope = request.access ?? request.placement?.scope;
+    const placement: PreparedRagPlacement | undefined = hasRagPlacement(request.placement)
+      ? await prepareRagDocumentPlacement(db, placementCtx, ragModule, request.placement!, callerScope)
+      : undefined;
 
-  // A bad folder or permission entry fails the ingest before anything is stored.
-  const placementCtx = { tenantDbName, tenantId, projectId, actor: request.createdBy };
-  const callerScope = request.access ?? request.placement?.scope;
-  const placement: PreparedRagPlacement | undefined = hasRagPlacement(request.placement)
-    ? await prepareRagDocumentPlacement(db, placementCtx, ragModule, request.placement!, callerScope)
-    : undefined;
-
-  // Uploading the same file twice used to embed it twice, so every query then
-  // answered out of two identical copies and paid for both. The crawler already
-  // de-dupes by URL; this covers every other way content arrives.
-  const sourceHash = hashSourceText(request.content);
-  // (A queued extraction has an empty placeholder as content: its hash says nothing.)
-  if (!request.force && request.extraction?.stage !== 'queued') {
-    const existing = await db.findRagDocumentByFileName(
-      request.ragModuleKey,
-      request.fileName,
-      projectId,
-    );
-    // A document the caller may not read is not theirs to be handed back (or re-placed): theirs is a new one. Nothing
-    // stops a second document of the same name (stored objects and vector ids are per document), and answering
-    // "already there" would tell the caller that a document with this name and text exists.
-    const hiddenFromCaller = Boolean(existing && callerScope?.enforced && !callerScope.manage
-      && !callerScope.canReadDocument(existing));
-    if (existing && !hiddenFromCaller && existing.status === 'indexed' && existing.sourceHash === sourceHash) {
-      logger.info('Skipping ingest of unchanged content', {
-        ragModuleKey: request.ragModuleKey,
-        fileName: request.fileName,
-        documentId: String(existing._id),
-      });
-      if (placement) {
-        await commitRagDocumentPlacement(db, placementCtx, ragModule, existing, placement);
-        return withoutInlineSource((await db.findRagDocumentById(String(existing._id))) ?? existing);
+    // Uploading the same file twice used to embed it twice, so every query then
+    // answered out of two identical copies and paid for both. The crawler already
+    // de-dupes by URL; this covers every other way content arrives.
+    const sourceHash = hashSourceText(request.content);
+    // (A queued extraction has an empty placeholder as content: its hash says nothing.)
+    if (!request.force && request.extraction?.stage !== 'queued') {
+      const existing = await db.findRagDocumentByFileName(
+        request.ragModuleKey,
+        request.fileName,
+        projectId,
+      );
+      // A document the caller may not read is not theirs to be handed back (or re-placed): theirs is a new one. Nothing
+      // stops a second document of the same name (stored objects and vector ids are per document), and answering
+      // "already there" would tell the caller that a document with this name and text exists.
+      const hiddenFromCaller = Boolean(existing && callerScope?.enforced && !callerScope.manage
+        && !callerScope.canReadDocument(existing));
+      if (existing && !hiddenFromCaller && existing.status === 'indexed' && existing.sourceHash === sourceHash) {
+        logger.info('Skipping ingest of unchanged content', {
+          ragModuleKey: request.ragModuleKey,
+          fileName: request.fileName,
+          documentId: String(existing._id),
+        });
+        if (placement) {
+          await commitRagDocumentPlacement(db, placementCtx, ragModule, existing, placement);
+          return withoutInlineSource((await db.findRagDocumentById(String(existing._id))) ?? existing);
+        }
+        return withoutInlineSource(existing);
       }
-      return withoutInlineSource(existing);
     }
-  }
 
-  // Stored before the row is written so a single insert carries the result.
-  const source = await storeDocumentSource({
-    tenantDbName,
-    tenantId,
-    projectId,
-    ragModule,
-    fileName: request.fileName,
-    contentType: request.contentType,
-    text: request.content,
-    fileData: request.fileData,
-    createdBy: request.createdBy,
-  });
-  // A queued extraction reads the original in the job: without a stored copy there is nothing for the job to read.
-  if (request.extraction?.stage === 'queued' && !source.fileKey) throw new RagOriginalMissingError();
-
-  const docRecord = await db.createRagDocument({
-    tenantId,
-    projectId,
-    ragModuleKey: request.ragModuleKey,
-    fileName: request.fileName,
-    contentType: request.contentType,
-    size: Buffer.byteLength(request.content, 'utf-8'),
-    status: request.deferIndexing ? 'pending' : 'processing',
-    chunkConfig: request.chunkConfig,
-    ...(request.extraction ? { extraction: request.extraction } : {}),
-    metadata,
-    createdBy: request.createdBy,
-    ...source,
-    // An own ACL starts closed: nobody reads the row until its entries are written just below.
-    ...(placement ? ragPlacementRowFields(placement) : {}),
-  });
-
-  const documentId = String(docRecord._id);
-  if (placement) {
-    try {
-      await commitRagDocumentPlacement(db, placementCtx, ragModule, docRecord, placement);
-    } catch (error) {
-      await db.updateRagDocument(documentId, {
-        status: 'failed',
-        errorMessage: error instanceof Error ? error.message : 'Could not store the document permissions',
-        // A queued extraction will not run: the row must not keep saying it waits to be read.
-        ...(request.extraction?.stage ? { extraction: settledExtraction(request.extraction) } : {}),
-      });
-      throw error;
-    }
-  }
-
-  // The source is committed above, so publishing after it means a crash in
-  // between costs the indexing (recovered by the boot sweep), never the content.
-  if (request.deferIndexing) {
-    await publishRagIngestJob({
-      tenantDbName,
-      tenantId,
-      projectId,
-      ragModuleKey: request.ragModuleKey,
-      documentId,
-    });
-    return withoutInlineSource(docRecord);
-  }
-
-  try {
-    const chunkCount = await indexDocumentContent({
-      db,
+    // Stored before the row is written so a single insert carries the result.
+    const source = await storeDocumentSource({
       tenantDbName,
       tenantId,
       projectId,
       ragModule,
-      chunkConfig: chunkConfigFor(ragModule, { chunkConfig: request.chunkConfig }),
-      documentId,
       fileName: request.fileName,
+      contentType: request.contentType,
       text: request.content,
+      fileData: request.fileData,
+      createdBy: request.createdBy,
+    });
+    // A queued extraction reads the original in the job: without a stored copy there is nothing for the job to read.
+    if (request.extraction?.stage === 'queued' && !source.fileKey) throw new RagOriginalMissingError();
+
+    const docRecord = await db.createRagDocument({
+      tenantId,
+      projectId,
+      ragModuleKey: request.ragModuleKey,
+      fileName: request.fileName,
+      contentType: request.contentType,
+      size: Buffer.byteLength(request.content, 'utf-8'),
+      status: request.deferIndexing ? 'pending' : 'processing',
+      chunkConfig: request.chunkConfig,
+      ...(request.extraction ? { extraction: request.extraction } : {}),
       metadata,
+      createdBy: request.createdBy,
+      ...source,
+      // An own ACL starts closed: nobody reads the row until its entries are written just below.
+      ...(placement ? ragPlacementRowFields(placement) : {}),
     });
 
-    const lastIndexedAt = new Date();
-    await db.updateRagDocument(documentId, {
-      status: 'indexed',
-      chunkCount,
-      lastIndexedAt,
-    });
+    const documentId = String(docRecord._id);
+    if (placement) {
+      try {
+        await commitRagDocumentPlacement(db, placementCtx, ragModule, docRecord, placement);
+      } catch (error) {
+        await db.updateRagDocument(documentId, {
+          status: 'failed',
+          errorMessage: error instanceof Error ? error.message : 'Could not store the document permissions',
+          // A queued extraction will not run: the row must not keep saying it waits to be read.
+          ...(request.extraction?.stage ? { extraction: settledExtraction(request.extraction) } : {}),
+        });
+        throw error;
+      }
+    }
 
-    await db.incrementRagModuleTotals(String(ragModule._id), { documents: 1, chunks: chunkCount });
+    // The source is committed above, so publishing after it means a crash in
+    // between costs the indexing (recovered by the boot sweep), never the content.
+    if (request.deferIndexing) {
+      await publishRagIngestJob({
+        tenantDbName,
+        tenantId,
+        projectId,
+        ragModuleKey: request.ragModuleKey,
+        documentId,
+      });
+      return withoutInlineSource(docRecord);
+    }
 
-    return withoutInlineSource({ ...docRecord, status: 'indexed' as const, chunkCount, lastIndexedAt });
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : 'Ingestion failed';
-    await db.updateRagDocument(documentId, {
-      status: 'failed',
-      errorMessage: msg,
-    });
-    throw error;
-  }
+    try {
+      const chunkCount = await indexDocumentContent({
+        db,
+        tenantDbName,
+        tenantId,
+        projectId,
+        ragModule,
+        chunkConfig: chunkConfigFor(ragModule, { chunkConfig: request.chunkConfig }),
+        documentId,
+        fileName: request.fileName,
+        text: request.content,
+        metadata,
+      });
+
+      const lastIndexedAt = new Date();
+      await db.updateRagDocument(documentId, {
+        status: 'indexed',
+        chunkCount,
+        lastIndexedAt,
+      });
+
+      await db.incrementRagModuleTotals(String(ragModule._id), { documents: 1, chunks: chunkCount });
+
+      return withoutInlineSource({ ...docRecord, status: 'indexed' as const, chunkCount, lastIndexedAt });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Ingestion failed';
+      await db.updateRagDocument(documentId, {
+        status: 'failed',
+        errorMessage: msg,
+      });
+      throw error;
+    }
+  });
 }
 
 /**
@@ -1239,103 +1236,102 @@ export async function indexPendingRagDocument(
   ragModuleKey: string,
   documentId: string,
 ): Promise<void> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const doc = await db.findRagDocumentById(documentId);
+    if (!doc) {
+      logger.warn('Skipping ingest job for a document that no longer exists', {
+        documentId,
+        ragModuleKey,
+      });
+      return;
+    }
+    if (doc.status === 'indexed') return;
 
-  const doc = await db.findRagDocumentById(documentId);
-  if (!doc) {
-    logger.warn('Skipping ingest job for a document that no longer exists', {
-      documentId,
-      ragModuleKey,
-    });
-    return;
-  }
-  if (doc.status === 'indexed') return;
+    // A queued document whose service has been switched off is failed, not
+    // retried: the job is acknowledged and re-ingesting is the operator's call
+    // once the service is back.
+    // A queued extraction that will not run must not keep saying it waits to be read.
+    const settled = doc.extraction?.stage ? { extraction: settledExtraction(doc.extraction) } : {};
+    const off = await serviceOffReason({ tenantDbName, tenantId }, 'rag');
+    if (off) {
+      const refusal = new ServiceDisabledError(off);
+      await db.updateRagDocument(documentId, { status: 'failed', errorMessage: `${refusal.code}: ${refusal.message}`, ...settled });
+      logger.warn('Deferred Knowledge Engine ingest refused: service is off', { documentId, ragModuleKey, code: refusal.code });
+      return;
+    }
 
-  // A queued document whose service has been switched off is failed, not
-  // retried: the job is acknowledged and re-ingesting is the operator's call
-  // once the service is back.
-  // A queued extraction that will not run must not keep saying it waits to be read.
-  const settled = doc.extraction?.stage ? { extraction: settledExtraction(doc.extraction) } : {};
-  const off = await serviceOffReason({ tenantDbName, tenantId }, 'rag');
-  if (off) {
-    const refusal = new ServiceDisabledError(off);
-    await db.updateRagDocument(documentId, { status: 'failed', errorMessage: `${refusal.code}: ${refusal.message}`, ...settled });
-    logger.warn('Deferred Knowledge Engine ingest refused: service is off', { documentId, ragModuleKey, code: refusal.code });
-    return;
-  }
-
-  const ragModule = await db.findRagModuleByKey(ragModuleKey, projectId);
-  if (!ragModule) {
-    await db.updateRagDocument(documentId, {
-      status: 'failed',
-      errorMessage: `Knowledge Engine module "${ragModuleKey}" not found`,
-      ...settled,
-    });
-    return;
-  }
-
-  // A document stored before its text exists (a scanned file whose OCR runs here, not in the upload request).
-  const extractionPending = doc.extraction?.stage === 'queued' || doc.extraction?.stage === 'running';
-  const text = extractionPending
-    ? await extractQueuedDocument(db, tenantDbName, tenantId, projectId, ragModule, doc)
-    : await loadSourceText(tenantDbName, tenantId, projectId, doc);
-  // Nothing more to do for a queued extraction that failed: its row says why.
-  if (extractionPending && text === undefined) return;
-  if (!text) {
-    await db.updateRagDocument(documentId, {
-      status: 'failed',
-      errorMessage: 'Stored source text is unavailable for this document',
-    });
-    return;
-  }
-
-  // Deleted since the job started (its pages can take minutes to read): nothing is indexed for a row that is gone.
-  if (!(await db.updateRagDocument(documentId, { status: 'processing' }))) return;
-
-  try {
-    const chunkCount = await indexDocumentContent({
-      db,
-      tenantDbName,
-      tenantId,
-      projectId,
-      ragModule,
-      chunkConfig: chunkConfigFor(ragModule, { chunkConfig: doc.chunkConfig }),
-      documentId,
-      fileName: doc.fileName,
-      text,
-      metadata: doc.metadata,
-    });
-
-    const indexed = await db.updateRagDocument(documentId, {
-      status: 'indexed',
-      chunkCount,
-      lastIndexedAt: new Date(),
-    });
-    if (!indexed) {
-      // Deleted while it was being indexed: what this run wrote must not outlive the row.
-      await removeVectors(
-        tenantDbName, tenantId, projectId, ragModule,
-        documentVectorIds(ragModuleKey, documentId, chunkCount),
-        `ingest of document ${documentId}, deleted meanwhile`,
-      );
-      await db.deleteRagChunksByDocumentId(documentId).catch((err) => {
-        logger.warn('Failed to delete the chunks of a document deleted during its ingest', { documentId, error: err });
+    const ragModule = await db.findRagModuleByKey(ragModuleKey, projectId);
+    if (!ragModule) {
+      await db.updateRagDocument(documentId, {
+        status: 'failed',
+        errorMessage: `Knowledge Engine module "${ragModuleKey}" not found`,
+        ...settled,
       });
       return;
     }
 
-    await db.incrementRagModuleTotals(String(ragModule._id), { documents: 1, chunks: chunkCount });
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : 'Ingestion failed';
-    await db.updateRagDocument(documentId, { status: 'failed', errorMessage: msg });
-    logger.error('Deferred Knowledge Engine ingest failed', {
-      documentId,
-      ragModuleKey,
-      error: msg,
-    });
-    throw error;
-  }
+    // A document stored before its text exists (a scanned file whose OCR runs here, not in the upload request).
+    const extractionPending = doc.extraction?.stage === 'queued' || doc.extraction?.stage === 'running';
+    const text = extractionPending
+      ? await extractQueuedDocument(db, tenantDbName, tenantId, projectId, ragModule, doc)
+      : await loadSourceText(tenantDbName, tenantId, projectId, doc);
+    // Nothing more to do for a queued extraction that failed: its row says why.
+    if (extractionPending && text === undefined) return;
+    if (!text) {
+      await db.updateRagDocument(documentId, {
+        status: 'failed',
+        errorMessage: 'Stored source text is unavailable for this document',
+      });
+      return;
+    }
+
+    // Deleted since the job started (its pages can take minutes to read): nothing is indexed for a row that is gone.
+    if (!(await db.updateRagDocument(documentId, { status: 'processing' }))) return;
+
+    try {
+      const chunkCount = await indexDocumentContent({
+        db,
+        tenantDbName,
+        tenantId,
+        projectId,
+        ragModule,
+        chunkConfig: chunkConfigFor(ragModule, { chunkConfig: doc.chunkConfig }),
+        documentId,
+        fileName: doc.fileName,
+        text,
+        metadata: doc.metadata,
+      });
+
+      const indexed = await db.updateRagDocument(documentId, {
+        status: 'indexed',
+        chunkCount,
+        lastIndexedAt: new Date(),
+      });
+      if (!indexed) {
+        // Deleted while it was being indexed: what this run wrote must not outlive the row.
+        await removeVectors(
+          tenantDbName, tenantId, projectId, ragModule,
+          documentVectorIds(ragModuleKey, documentId, chunkCount),
+          `ingest of document ${documentId}, deleted meanwhile`,
+        );
+        await db.deleteRagChunksByDocumentId(documentId).catch((err) => {
+          logger.warn('Failed to delete the chunks of a document deleted during its ingest', { documentId, error: err });
+        });
+        return;
+      }
+
+      await db.incrementRagModuleTotals(String(ragModule._id), { documents: 1, chunks: chunkCount });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Ingestion failed';
+      await db.updateRagDocument(documentId, { status: 'failed', errorMessage: msg });
+      logger.error('Deferred Knowledge Engine ingest failed', {
+        documentId,
+        ragModuleKey,
+        error: msg,
+      });
+      throw error;
+    }
+  });
 }
 
 /* ── File-based ingestion (file → markdown → chunk → embed → upsert) ── */
@@ -1384,9 +1380,8 @@ export async function convertFileToTextDetailed(
   if (ocr === undefined && scope) {
     let ragModule = ctx?.ragModule;
     if (!ragModule && ctx?.ragModuleKey) {
-      const db = await getDatabase();
-      await db.switchToTenant(scope.tenantDbName);
-      ragModule = (await db.findRagModuleByKey(ctx.ragModuleKey, scope.projectId)) ?? undefined;
+      const moduleKey = ctx.ragModuleKey;
+      ragModule = (await runWithTenantScope(scope.tenantDbName, (db) => db.findRagModuleByKey(moduleKey, scope.projectId))) ?? undefined;
     }
     ocr = ragModule?.extraction?.ocr;
   }
@@ -1448,7 +1443,10 @@ async function extractQueuedDocument(
 
   await db.updateRagDocument(documentId, { extraction: { ...base, stage: 'running' } });
 
-  // Progress is written at most every few seconds, one write at a time, and never after the run is over.
+  // Progress is written at most every few seconds, one write at a time, and never after the run is over. A write
+  // fires from a timer or a progress callback, long after this call went into an await: each one opens its own scope.
+  const writeExtraction = (extraction: IRagDocumentExtraction) =>
+    runWithTenantScope(tenantDbName, (scoped) => scoped.updateRagDocument(documentId, { extraction }));
   let closed = false;
   let lastWrite = 0;
   let latest: { completed: number; total: number } | undefined;
@@ -1461,7 +1459,7 @@ async function extractQueuedDocument(
     writes = writes
       .then(() => (closed
         ? undefined
-        : db.updateRagDocument(documentId, { extraction: { ...base, stage: 'running', progress } })))
+        : writeExtraction({ ...base, stage: 'running', progress })))
       .catch(() => undefined);
   };
 
@@ -1469,7 +1467,7 @@ async function extractQueuedDocument(
     writes = writes
       .then(() => (closed
         ? undefined
-        : db.updateRagDocument(documentId, { extraction: { ...base, stage: 'running', ...(latest ? { progress: latest } : {}) } })))
+        : writeExtraction({ ...base, stage: 'running', ...(latest ? { progress: latest } : {}) })))
       .catch(() => undefined);
   }, EXTRACTION_HEARTBEAT_MS);
   heartbeat.unref?.();
@@ -1554,17 +1552,17 @@ async function planFileExtraction(
   // The widest setting there is: is this the kind of file OCR can ever apply to?
   if (!isOcrCandidate(request.fileName, request.contentType, { mode: 'always', images: true })) return { deferred: false };
 
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
-  // No OCR is spent for a module that is missing or off: `ingestDocument` answers that with its own error.
-  if (!ragModule || ragModule.status !== 'active') return { deferred: false };
-  const ocr = effectiveOcr(override, ragModule.extraction?.ocr);
-  if (!isOcrActive(ocr) || !isOcrCandidate(request.fileName, request.contentType, ocr)) return { deferred: false };
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
+    // No OCR is spent for a module that is missing or off: `ingestDocument` answers that with its own error.
+    if (!ragModule || ragModule.status !== 'active') return { deferred: false };
+    const ocr = effectiveOcr(override, ragModule.extraction?.ocr);
+    if (!isOcrActive(ocr) || !isOcrCandidate(request.fileName, request.contentType, ocr)) return { deferred: false };
 
-  // The pending row needs the original to be kept: that is the module's bucket.
-  const deferred = Boolean(ragModule.fileBucketKey && (request.deferIndexing || request.deferExtraction));
-  return { ocr, deferred };
+    // The pending row needs the original to be kept: that is the module's bucket.
+    const deferred = Boolean(ragModule.fileBucketKey && (request.deferIndexing || request.deferExtraction));
+    return { ocr, deferred };
+  });
 }
 
 /**
@@ -1686,18 +1684,18 @@ export async function ingestFile(
   // A refused folder or permission entry fails before the pages are read, as on the deferred path (ingestDocument
   // checks it again; a path's folders already exist by then).
   if (plan.ocr && hasRagPlacement(request.placement)) {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
-    if (ragModule) {
-      await prepareRagDocumentPlacement(
-        db,
-        { tenantDbName, tenantId, projectId, actor: request.createdBy },
-        ragModule,
-        request.placement!,
-        request.access ?? request.placement!.scope,
-      );
-    }
+    await runWithTenantScope(tenantDbName, async (db) => {
+      const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
+      if (ragModule) {
+        await prepareRagDocumentPlacement(
+          db,
+          { tenantDbName, tenantId, projectId, actor: request.createdBy },
+          ragModule,
+          request.placement!,
+          request.access ?? request.placement!.scope,
+        );
+      }
+    });
   }
 
   const inline = await extractInline();
@@ -1974,375 +1972,374 @@ async function runRagQuery(
 ): Promise<RagQueryResult> {
   const signal = options?.signal;
   const startTime = Date.now();
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
+    if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
+    // A switched-off module is not queried. Checked before moduleFound is set so
+    // the refusal is not recorded as a health fault of the knowledge base.
+    if (ragModule.status !== 'active') throw new RagModuleInactiveError();
+    state.moduleFound = true;
+    state.key = ragModule.key;
+    state.projectId = ragModule.projectId;
 
-  const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
-  if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
-  // A switched-off module is not queried. Checked before moduleFound is set so
-  // the refusal is not recorded as a health fault of the knowledge base.
-  if (ragModule.status !== 'active') throw new RagModuleInactiveError();
-  state.moduleFound = true;
-  state.key = ragModule.key;
-  state.projectId = ragModule.projectId;
-
-  // 1. Embed the query — and, when the module has access control, work out
-  //    meanwhile what the caller may read.
-  const embeddingStartedAt = Date.now();
-  let embeddingMs = 0;
-  const [[queryEmbedding], access] = await Promise.all([
-    getEmbeddings(
-      tenantDbName,
-      projectId ?? '',
-      ragModule.embeddingModelKey,
-      [request.query],
-      signal,
-    ).then((embeddings) => {
-      embeddingMs = Date.now() - embeddingStartedAt;
-      return embeddings;
-    }),
-    resolveQueryAccess(tenantDbName, tenantId, ragModule, options),
-  ]);
-
-  // 2. Build the metadata filter: the module's standing filter ANDed with the
-  //    caller's and, when the module is isolated, with its own key — after
-  //    validating the request filter and checking it only touches fields the
-  //    module exposes.
-  validateFilterDocument(request.filter, 'Invalid filter');
-  if (request.filterSource === 'untrusted') {
-    assertUntrustedFilterAllowed(request.filter, ragModule.filterableFields);
-  }
-  assertFilterFieldsAllowed(request.filter, ragModule.filterableFields);
-  const isolated = await resolveModuleIsolation(db, ragModule);
-  const filter = mergeFilters(
-    ragModule.defaultFilter,
-    request.filter,
-    isolated ? { _ragModule: ragModule.key } : undefined,
-  );
-
-  // 3. Query vector store. If reranker is configured, oversample candidates
-  //    so the reranker has more to work with.
-  const topK = normalizeRagTopK(request.topK, normalizeRagTopK(ragModule.defaultTopK, 5));
-  const minScore = request.minScore ?? ragModule.defaultMinScore;
-  const useReranker = Boolean(ragModule.rerankerKey);
-  const oversampleMultiplier = ragModule.rerankerOversample ?? 3;
-  const fetchTopK = useReranker ? Math.max(topK, topK * oversampleMultiplier) : topK;
-  const hybrid = ragModule.hybrid?.enabled === true;
-
-  const searchStore = (fetch: number, aclFilter?: Record<string, unknown>) => queryVectorIndex(tenantDbName, tenantId, projectId ?? '', {
-    providerKey: ragModule.vectorProviderKey,
-    indexKey: ragModule.vectorIndexKey,
-    query: {
-      vector: queryEmbedding,
-      topK: fetch,
-      // The access part is a system guard: ANDed after the caller's filter was checked against filterableFields.
-      filter: aclFilter ? (filter ? { $and: [filter, aclFilter] } : aclFilter) : filter,
-      // The keyword half needs the words themselves — an embedding carries no
-      // signal for an error code, a SKU or a part number.
-      ...(hybrid ? {
-        text: request.query,
-        hybrid: {
-          mode: ragModule.hybrid?.mode,
-          alpha: ragModule.hybrid?.alpha,
-          k: ragModule.hybrid?.k,
-        },
-      } : {}),
-    },
-  }, ...(signal ? [{ signal }] as const : []));
-
-  const vectorStartedAt = Date.now();
-  let vectorMatches: VectorQueryMatch[];
-  // Keyed by vectorId and holding the whole row, because a parent window needs
-  // the chunk's charStart/charEnd as well as its text.
-  let chunkByVectorId: Map<string, IRagChunk> = new Map();
-  let aclStats: RagAclSearchStats | undefined;
-  if (access?.enforced) {
-    // Access control: only documents the caller may read reach anything below
-    // (hydration, the reranker, the threshold, the logs). See ragAclSearch.ts.
-    const driver = await vectorDriverOf(db, tenantId, ragModule.vectorProviderKey, projectId);
-    const acl = await runRagAclSearch({
-      db,
-      scope: access,
-      moduleKey: ragModule.key,
-      moduleProjectId: ragModule.projectId,
-      driver,
-      operators: driver ? vectorFilterOperatorsOf(driver) : [],
-      pushdownBroken: isAclPushdownBroken(tenantDbName, ragModule.vectorProviderKey),
-      fetchTopK,
-      topK,
-      hybrid,
-      search: async (fetch, aclFilter) => searchStore(fetch, aclFilter),
-      onPushdownRefused: (error) => {
-        markAclPushdownBroken(tenantDbName, ragModule.vectorProviderKey);
-        logger.warn('Vector store refused the document-id filter; filtering after the search instead', {
-          ragModuleKey: ragModule.key,
-          driver,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      },
-      signal,
-    });
-    vectorMatches = acl.matches;
-    chunkByVectorId = acl.chunks;
-    aclStats = acl.stats;
-  } else {
-    vectorMatches = (await searchStore(fetchTopK)).matches;
-  }
-
-  // Time spent in the vector store alone (with access control: plus the
-  // document checks around it). This used to be measured from the very start
-  // of the request, which hid where the time actually went.
-  const vectorLatencyMs = Date.now() - vectorStartedAt;
-
-  // 4. Hydrate chunk content from MongoDB (done above, and verified, when access control applied)
-  const hydrateStartedAt = Date.now();
-  const vectorIds = vectorMatches.map((m) => m.id).filter(Boolean);
-  if (!aclStats && vectorIds.length > 0) {
-    try {
-      const storedChunks = await db.findRagChunksByVectorIds(vectorIds);
-      chunkByVectorId = new Map(storedChunks.map((c) => [c.vectorId, c]));
-    } catch (err) {
-      logger.warn('Failed to hydrate chunk content from MongoDB', { error: err });
-    }
-  }
-  const hydrateLatencyMs = Date.now() - hydrateStartedAt;
-
-  // A search that did not check access (the checks above keep to this module's own documents) must not hand on what
-  // another module with access control keeps on the same index. Before anything reads the matches: the reranker, the
-  // parent windows and the response all work from what is left.
-  if (!aclStats) vectorMatches = await withoutControlledOtherModules(db, ragModule, vectorMatches, chunkByVectorId);
-
-  // 5. Map results
-  let matches: RagQueryMatch[] = vectorMatches.map((m) => ({
-    id: m.id,
-    score: m.score,
-    denseScore: m.denseScore,
-    lexicalScore: m.lexicalScore,
-    content: chunkByVectorId.get(m.id)?.content ?? resolveMetadataContent(m.metadata),
-    metadata: m.metadata,
-    documentId: typeof m.metadata?._documentId === 'string'
-      ? m.metadata._documentId
-      // with access control every match was verified against its stored chunk, which names the document
-      : (aclStats ? chunkByVectorId.get(m.id)?.documentId : undefined),
-    fileName: typeof m.metadata?._fileName === 'string' ? m.metadata._fileName : undefined,
-    chunkIndex: typeof m.metadata?._chunkIndex === 'number' ? m.metadata._chunkIndex : undefined,
-  }));
-
-  // Vectors written outside our ingest pipeline have no rag_chunks row, so their
-  // text can only come from vector metadata. Without this warning the empty
-  // passages reach the LLM silently and it answers from nothing.
-  const contentlessCount = matches.filter((m) => !(m.content ?? '').trim()).length;
-  if (contentlessCount > 0) {
-    logger.warn('RAG matches resolved with no content', {
-      ragModuleKey: request.ragModuleKey,
-      contentlessCount,
-      totalMatches: matches.length,
-      hint: 'Vectors not ingested through this product must carry their text in vector metadata '
-        + `(one of: ${CONTENT_METADATA_KEYS.join(', ')}).`,
-    });
-  }
-
-  // 5a. Passages of documents not open to everyone go on from here: the work this query is part of (an agent turn, an
-  //     evaluation item...) is marked before anything below - the reranker's model calls included - can copy them.
-  let restricted = false;
-  if (ragModule.access?.enabled === true) {
-    const handedOn = matches.filter((m) => (m.content ?? '').trim());
-    if (handedOn.length > 0) {
-      const ids = [...new Set(handedOn.map((m) => m.documentId).filter((id): id is string => typeof id === 'string' && id.length > 0))];
-      const rows = ids.length > 0 ? await db.findRagDocumentsByIds(ids) : [];
-      const byId = new Map(rows.map((row) => [String(row._id), row]));
-      restricted = (await noteRestrictedDocuments({
+    // 1. Embed the query — and, when the module has access control, work out
+    //    meanwhile what the caller may read.
+    const embeddingStartedAt = Date.now();
+    let embeddingMs = 0;
+    const [[queryEmbedding], access] = await Promise.all([
+      getEmbeddings(
         tenantDbName,
-        tenantId,
-        module: ragModule,
-        // A passage that names no document cannot be judged: it counts as closed.
-        documents: handedOn.map((m) => (m.documentId ? byId.get(m.documentId) : undefined)),
-      })) !== null;
-    }
-  }
+        projectId ?? '',
+        ragModule.embeddingModelKey,
+        [request.query],
+        signal,
+      ).then((embeddings) => {
+        embeddingMs = Date.now() - embeddingStartedAt;
+        return embeddings;
+      }),
+      resolveQueryAccess(tenantDbName, tenantId, ragModule, options),
+    ]);
 
-  // 5b. Optional reranker pass.
-  let rerankLatencyMs: number | undefined;
-  if (useReranker && matches.length > 0 && ragModule.rerankerKey) {
-    try {
-      const rerankerInput = matches
-        .map((m) => ({
-          id: m.id,
-          content: m.content ?? '',
-          score: m.score,
-          metadata: m.metadata,
-        }))
-        .filter((d) => d.content.length > 0);
-      if (rerankerInput.length > 0) {
-        const rerankResult = await runReranker(
+    // 2. Build the metadata filter: the module's standing filter ANDed with the
+    //    caller's and, when the module is isolated, with its own key — after
+    //    validating the request filter and checking it only touches fields the
+    //    module exposes.
+    validateFilterDocument(request.filter, 'Invalid filter');
+    if (request.filterSource === 'untrusted') {
+      assertUntrustedFilterAllowed(request.filter, ragModule.filterableFields);
+    }
+    assertFilterFieldsAllowed(request.filter, ragModule.filterableFields);
+    const isolated = await resolveModuleIsolation(db, ragModule);
+    const filter = mergeFilters(
+      ragModule.defaultFilter,
+      request.filter,
+      isolated ? { _ragModule: ragModule.key } : undefined,
+    );
+
+    // 3. Query vector store. If reranker is configured, oversample candidates
+    //    so the reranker has more to work with.
+    const topK = normalizeRagTopK(request.topK, normalizeRagTopK(ragModule.defaultTopK, 5));
+    const minScore = request.minScore ?? ragModule.defaultMinScore;
+    const useReranker = Boolean(ragModule.rerankerKey);
+    const oversampleMultiplier = ragModule.rerankerOversample ?? 3;
+    const fetchTopK = useReranker ? Math.max(topK, topK * oversampleMultiplier) : topK;
+    const hybrid = ragModule.hybrid?.enabled === true;
+
+    const searchStore = (fetch: number, aclFilter?: Record<string, unknown>) => queryVectorIndex(tenantDbName, tenantId, projectId ?? '', {
+      providerKey: ragModule.vectorProviderKey,
+      indexKey: ragModule.vectorIndexKey,
+      query: {
+        vector: queryEmbedding,
+        topK: fetch,
+        // The access part is a system guard: ANDed after the caller's filter was checked against filterableFields.
+        filter: aclFilter ? (filter ? { $and: [filter, aclFilter] } : aclFilter) : filter,
+        // The keyword half needs the words themselves — an embedding carries no
+        // signal for an error code, a SKU or a part number.
+        ...(hybrid ? {
+          text: request.query,
+          hybrid: {
+            mode: ragModule.hybrid?.mode,
+            alpha: ragModule.hybrid?.alpha,
+            k: ragModule.hybrid?.k,
+          },
+        } : {}),
+      },
+    }, ...(signal ? [{ signal }] as const : []));
+
+    const vectorStartedAt = Date.now();
+    let vectorMatches: VectorQueryMatch[];
+    // Keyed by vectorId and holding the whole row, because a parent window needs
+    // the chunk's charStart/charEnd as well as its text.
+    let chunkByVectorId: Map<string, IRagChunk> = new Map();
+    let aclStats: RagAclSearchStats | undefined;
+    if (access?.enforced) {
+      // Access control: only documents the caller may read reach anything below
+      // (hydration, the reranker, the threshold, the logs). See ragAclSearch.ts.
+      const driver = await vectorDriverOf(db, tenantId, ragModule.vectorProviderKey, projectId);
+      const acl = await runRagAclSearch({
+        db,
+        scope: access,
+        moduleKey: ragModule.key,
+        moduleProjectId: ragModule.projectId,
+        driver,
+        operators: driver ? vectorFilterOperatorsOf(driver) : [],
+        pushdownBroken: isAclPushdownBroken(tenantDbName, ragModule.vectorProviderKey),
+        fetchTopK,
+        topK,
+        hybrid,
+        search: async (fetch, aclFilter) => searchStore(fetch, aclFilter),
+        onPushdownRefused: (error) => {
+          markAclPushdownBroken(tenantDbName, ragModule.vectorProviderKey);
+          logger.warn('Vector store refused the document-id filter; filtering after the search instead', {
+            ragModuleKey: ragModule.key,
+            driver,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        },
+        signal,
+      });
+      vectorMatches = acl.matches;
+      chunkByVectorId = acl.chunks;
+      aclStats = acl.stats;
+    } else {
+      vectorMatches = (await searchStore(fetchTopK)).matches;
+    }
+
+    // Time spent in the vector store alone (with access control: plus the
+    // document checks around it). This used to be measured from the very start
+    // of the request, which hid where the time actually went.
+    const vectorLatencyMs = Date.now() - vectorStartedAt;
+
+    // 4. Hydrate chunk content from MongoDB (done above, and verified, when access control applied)
+    const hydrateStartedAt = Date.now();
+    const vectorIds = vectorMatches.map((m) => m.id).filter(Boolean);
+    if (!aclStats && vectorIds.length > 0) {
+      try {
+        const storedChunks = await db.findRagChunksByVectorIds(vectorIds);
+        chunkByVectorId = new Map(storedChunks.map((c) => [c.vectorId, c]));
+      } catch (err) {
+        logger.warn('Failed to hydrate chunk content from MongoDB', { error: err });
+      }
+    }
+    const hydrateLatencyMs = Date.now() - hydrateStartedAt;
+
+    // A search that did not check access (the checks above keep to this module's own documents) must not hand on what
+    // another module with access control keeps on the same index. Before anything reads the matches: the reranker, the
+    // parent windows and the response all work from what is left.
+    if (!aclStats) vectorMatches = await withoutControlledOtherModules(db, ragModule, vectorMatches, chunkByVectorId);
+
+    // 5. Map results
+    let matches: RagQueryMatch[] = vectorMatches.map((m) => ({
+      id: m.id,
+      score: m.score,
+      denseScore: m.denseScore,
+      lexicalScore: m.lexicalScore,
+      content: chunkByVectorId.get(m.id)?.content ?? resolveMetadataContent(m.metadata),
+      metadata: m.metadata,
+      documentId: typeof m.metadata?._documentId === 'string'
+        ? m.metadata._documentId
+        // with access control every match was verified against its stored chunk, which names the document
+        : (aclStats ? chunkByVectorId.get(m.id)?.documentId : undefined),
+      fileName: typeof m.metadata?._fileName === 'string' ? m.metadata._fileName : undefined,
+      chunkIndex: typeof m.metadata?._chunkIndex === 'number' ? m.metadata._chunkIndex : undefined,
+    }));
+
+    // Vectors written outside our ingest pipeline have no rag_chunks row, so their
+    // text can only come from vector metadata. Without this warning the empty
+    // passages reach the LLM silently and it answers from nothing.
+    const contentlessCount = matches.filter((m) => !(m.content ?? '').trim()).length;
+    if (contentlessCount > 0) {
+      logger.warn('RAG matches resolved with no content', {
+        ragModuleKey: request.ragModuleKey,
+        contentlessCount,
+        totalMatches: matches.length,
+        hint: 'Vectors not ingested through this product must carry their text in vector metadata '
+          + `(one of: ${CONTENT_METADATA_KEYS.join(', ')}).`,
+      });
+    }
+
+    // 5a. Passages of documents not open to everyone go on from here: the work this query is part of (an agent turn, an
+    //     evaluation item...) is marked before anything below - the reranker's model calls included - can copy them.
+    let restricted = false;
+    if (ragModule.access?.enabled === true) {
+      const handedOn = matches.filter((m) => (m.content ?? '').trim());
+      if (handedOn.length > 0) {
+        const ids = [...new Set(handedOn.map((m) => m.documentId).filter((id): id is string => typeof id === 'string' && id.length > 0))];
+        const rows = ids.length > 0 ? await db.findRagDocumentsByIds(ids) : [];
+        const byId = new Map(rows.map((row) => [String(row._id), row]));
+        restricted = (await noteRestrictedDocuments({
           tenantDbName,
           tenantId,
-          projectId,
-          ragModule.rerankerKey,
-          {
-            query: request.query,
-            documents: rerankerInput,
-            topN: topK,
-            source: 'rag',
-            ragModuleKey: request.ragModuleKey,
-          },
-          // Part of the query, which the `rag` limits already counted.
-          { quota: false },
-        );
-        rerankLatencyMs = rerankResult.latencyMs;
-        // Re-build matches in reranker-determined order. Preserve original
-        // vector score under `vectorScore` for inspection.
-        const byId = new Map(matches.map((m) => [m.id, m]));
-        matches = rerankResult.results
-          .map((r) => {
-            const original = r.id ? byId.get(r.id) : undefined;
-            if (!original) return null;
-            return {
-              ...original,
-              score: r.score,
-              vectorScore: r.originalScore,
-            } as RagQueryMatch;
-          })
-          .filter((v): v is RagQueryMatch => v !== null);
+          module: ragModule,
+          // A passage that names no document cannot be judged: it counts as closed.
+          documents: handedOn.map((m) => (m.documentId ? byId.get(m.documentId) : undefined)),
+        })) !== null;
       }
-    } catch (err) {
-      logger.warn('Reranker failed, falling back to vector order', { error: err });
     }
-  }
 
-  // What the store actually returned. Recorded because "nothing was retrieved"
-  // and "the threshold discarded everything" look identical in matchCount alone
-  // and want opposite fixes.
-  const preFilterMatchCount = matches.length;
-  // The best score BEFORE the threshold ran. Taken here rather than from the
-  // survivors because a query the threshold emptied would otherwise be logged
-  // with topScore 0 — and the zero-result panel and the score histogram exist
-  // precisely to explain those queries and to re-tune the threshold that
-  // emptied them, so a zero is the one value that tells them nothing.
-  const bestRetrievedScore = matches.length > 0
-    ? Math.max(...matches.map(rankedScoreOf))
-    : 0;
+    // 5b. Optional reranker pass.
+    let rerankLatencyMs: number | undefined;
+    if (useReranker && matches.length > 0 && ragModule.rerankerKey) {
+      try {
+        const rerankerInput = matches
+          .map((m) => ({
+            id: m.id,
+            content: m.content ?? '',
+            score: m.score,
+            metadata: m.metadata,
+          }))
+          .filter((d) => d.content.length > 0);
+        if (rerankerInput.length > 0) {
+          const rerankResult = await runReranker(
+            tenantDbName,
+            tenantId,
+            projectId,
+            ragModule.rerankerKey,
+            {
+              query: request.query,
+              documents: rerankerInput,
+              topN: topK,
+              source: 'rag',
+              ragModuleKey: request.ragModuleKey,
+            },
+            // Part of the query, which the `rag` limits already counted.
+            { quota: false },
+          );
+          rerankLatencyMs = rerankResult.latencyMs;
+          // Re-build matches in reranker-determined order. Preserve original
+          // vector score under `vectorScore` for inspection.
+          const byId = new Map(matches.map((m) => [m.id, m]));
+          matches = rerankResult.results
+            .map((r) => {
+              const original = r.id ? byId.get(r.id) : undefined;
+              if (!original) return null;
+              return {
+                ...original,
+                score: r.score,
+                vectorScore: r.originalScore,
+              } as RagQueryMatch;
+            })
+            .filter((v): v is RagQueryMatch => v !== null);
+        }
+      } catch (err) {
+        logger.warn('Reranker failed, falling back to vector order', { error: err });
+      }
+    }
 
-  // 5c. Apply the minimum score threshold, if configured. See rankedScoreOf for
-  //     why the threshold is compared against the pipeline's final score and
-  //     never against a preserved retrieval-time similarity.
-  if (typeof minScore === 'number' && minScore > 0) {
-    matches = matches.filter((m) => rankedScoreOf(m) >= minScore);
-  }
+    // What the store actually returned. Recorded because "nothing was retrieved"
+    // and "the threshold discarded everything" look identical in matchCount alone
+    // and want opposite fixes.
+    const preFilterMatchCount = matches.length;
+    // The best score BEFORE the threshold ran. Taken here rather than from the
+    // survivors because a query the threshold emptied would otherwise be logged
+    // with topScore 0 — and the zero-result panel and the score histogram exist
+    // precisely to explain those queries and to re-tune the threshold that
+    // emptied them, so a zero is the one value that tells them nothing.
+    const bestRetrievedScore = matches.length > 0
+      ? Math.max(...matches.map(rankedScoreOf))
+      : 0;
 
-  // 5d. Apply final topK (in case reranker skipped or returned more).
-  matches = matches.slice(0, topK);
+    // 5c. Apply the minimum score threshold, if configured. See rankedScoreOf for
+    //     why the threshold is compared against the pipeline's final score and
+    //     never against a preserved retrieval-time similarity.
+    if (typeof minScore === 'number' && minScore > 0) {
+      matches = matches.filter((m) => rankedScoreOf(m) >= minScore);
+    }
 
-  // 5e. Small-to-big: swap each match's text for the window around it in the
-  //     document's source. Deliberately after the slice — the reranker has to
-  //     score the passage that was actually retrieved, and only the surviving
-  //     matches are worth the source read.
-  matches = await applyParentWindows({
-    db,
-    tenantDbName,
-    tenantId,
-    projectId,
-    ragModule,
-    matches,
-    chunkByVectorId,
-  });
+    // 5d. Apply final topK (in case reranker skipped or returned more).
+    matches = matches.slice(0, topK);
 
-  const scores = matches.map((m) => rankedScoreOf(m));
-  const latencyMs = Date.now() - startTime;
-
-  // 6. Log the query.
-  // No tokens — query embedding flows through the models service.
-  const attribution = recordUsageEvent({
-    tenantDbName,
-    tenantId,
-    projectId,
-    service: 'rag',
-    refKey: request.ragModuleKey,
-    status: 'success',
-    latencyMs,
-    units: { matches: matches.length },
-  });
-  recordEntityMetric({
-    tenantDbName,
-    tenantId,
-    projectId: ragModule.projectId ?? projectId,
-    entityType: 'kb',
-    entityKey: ragModule.key,
-    source: 'service',
-    outcome: 'ok',
-    latencyMs,
-    emptyResults: matches.length === 0 ? 1 : 0,
-  });
-  // Where the time actually went. vectorLatencyMs used to be computed and then
-  // thrown away unless a reranker ran, which made slow searches undiagnosable.
-  logger.debug('RAG query timing', {
-    ragModuleKey: request.ragModuleKey,
-    totalMs: latencyMs,
-    embeddingMs,
-    vectorMs: vectorLatencyMs,
-    rerankMs: rerankLatencyMs,
-    hydrateMs: hydrateLatencyMs,
-    matches: matches.length,
-  });
-
-  // Telemetry off the critical path — this insert was adding a full DB round
-  // trip to every search.
-  fireAndForget('rag-query-log', async () => {
-    await db.createRagQueryLog({
-      userId: attribution.userId,
-      apiTokenId: attribution.apiTokenId,
-      actorType: attribution.actorType,
+    // 5e. Small-to-big: swap each match's text for the window around it in the
+    //     document's source. Deliberately after the slice — the reranker has to
+    //     score the passage that was actually retrieved, and only the surviving
+    //     matches are worth the source read.
+    matches = await applyParentWindows({
+      db,
+      tenantDbName,
       tenantId,
       projectId,
-      ragModuleKey: request.ragModuleKey,
-      query: request.query,
-      topK,
-      matchCount: matches.length,
-      preFilterMatchCount,
-      // topScore describes RETRIEVAL — the best thing the store had, threshold
-      // or no threshold — because that is what the histogram tunes the
-      // threshold against. avgScore describes the ANSWER: how good the passages
-      // that actually reached the caller were. Both on the scale rankedScoreOf
-      // defines, so neither can mix rank confidence with similarity.
-      topScore: bestRetrievedScore,
-      avgScore: scores.length > 0 ? scores.reduce((sum, s) => sum + s, 0) / scores.length : 0,
-      ...(typeof minScore === 'number' ? { minScoreApplied: minScore } : {}),
-      hybrid,
-      latencyMs,
-      metadata: {
-        embeddingMs,
-        vectorLatencyMs,
-        // an application's token acted for the person in `userId` (the token is `apiTokenId`)
-        ...(attribution.via ? { via: attribution.via } : {}),
-        // counts only: which plan ran and how many candidates the checks removed
-        ...(aclStats ? {
-          acl: {
-            mode: aclStats.mode,
-            dropped: aclStats.dropped,
-            ...(aclStats.retried ? { retried: true } : {}),
-            ...(aclStats.fellBack ? { fellBack: true } : {}),
-          },
-        } : {}),
-        ...(useReranker ? {
-          reranked: true,
-          rerankerKey: ragModule.rerankerKey,
-          rerankLatencyMs,
-        } : {}),
-      },
+      ragModule,
+      matches,
+      chunkByVectorId,
     });
-  });
 
-  return {
-    matches,
-    query: request.query,
-    ragModuleKey: request.ragModuleKey,
-    latencyMs,
-    // Echoed so the API layer can shape the payload. Internal consumers
-    // (answer service, agents, MCP tool) keep the full match set regardless —
-    // they need documentId/fileName for citations and grouping.
-    responseDetail: ragModule.responseDetail ?? 'full',
-    ...(restricted ? { restricted: true } : {}),
-  };
+    const scores = matches.map((m) => rankedScoreOf(m));
+    const latencyMs = Date.now() - startTime;
+
+    // 6. Log the query.
+    // No tokens — query embedding flows through the models service.
+    const attribution = recordUsageEvent({
+      tenantDbName,
+      tenantId,
+      projectId,
+      service: 'rag',
+      refKey: request.ragModuleKey,
+      status: 'success',
+      latencyMs,
+      units: { matches: matches.length },
+    });
+    recordEntityMetric({
+      tenantDbName,
+      tenantId,
+      projectId: ragModule.projectId ?? projectId,
+      entityType: 'kb',
+      entityKey: ragModule.key,
+      source: 'service',
+      outcome: 'ok',
+      latencyMs,
+      emptyResults: matches.length === 0 ? 1 : 0,
+    });
+    // Where the time actually went. vectorLatencyMs used to be computed and then
+    // thrown away unless a reranker ran, which made slow searches undiagnosable.
+    logger.debug('RAG query timing', {
+      ragModuleKey: request.ragModuleKey,
+      totalMs: latencyMs,
+      embeddingMs,
+      vectorMs: vectorLatencyMs,
+      rerankMs: rerankLatencyMs,
+      hydrateMs: hydrateLatencyMs,
+      matches: matches.length,
+    });
+
+    // Telemetry off the critical path — this insert was adding a full DB round
+    // trip to every search.
+    fireAndForget('rag-query-log', async () => {
+      await db.createRagQueryLog({
+        userId: attribution.userId,
+        apiTokenId: attribution.apiTokenId,
+        actorType: attribution.actorType,
+        tenantId,
+        projectId,
+        ragModuleKey: request.ragModuleKey,
+        query: request.query,
+        topK,
+        matchCount: matches.length,
+        preFilterMatchCount,
+        // topScore describes RETRIEVAL — the best thing the store had, threshold
+        // or no threshold — because that is what the histogram tunes the
+        // threshold against. avgScore describes the ANSWER: how good the passages
+        // that actually reached the caller were. Both on the scale rankedScoreOf
+        // defines, so neither can mix rank confidence with similarity.
+        topScore: bestRetrievedScore,
+        avgScore: scores.length > 0 ? scores.reduce((sum, s) => sum + s, 0) / scores.length : 0,
+        ...(typeof minScore === 'number' ? { minScoreApplied: minScore } : {}),
+        hybrid,
+        latencyMs,
+        metadata: {
+          embeddingMs,
+          vectorLatencyMs,
+          // an application's token acted for the person in `userId` (the token is `apiTokenId`)
+          ...(attribution.via ? { via: attribution.via } : {}),
+          // counts only: which plan ran and how many candidates the checks removed
+          ...(aclStats ? {
+            acl: {
+              mode: aclStats.mode,
+              dropped: aclStats.dropped,
+              ...(aclStats.retried ? { retried: true } : {}),
+              ...(aclStats.fellBack ? { fellBack: true } : {}),
+            },
+          } : {}),
+          ...(useReranker ? {
+            reranked: true,
+            rerankerKey: ragModule.rerankerKey,
+            rerankLatencyMs,
+          } : {}),
+        },
+      });
+    });
+
+    return {
+      matches,
+      query: request.query,
+      ragModuleKey: request.ragModuleKey,
+      latencyMs,
+      // Echoed so the API layer can shape the payload. Internal consumers
+      // (answer service, agents, MCP tool) keep the full match set regardless —
+      // they need documentId/fileName for citations and grouping.
+      responseDetail: ragModule.responseDetail ?? 'full',
+      ...(restricted ? { restricted: true } : {}),
+    };
+  });
 }
 
 /**
@@ -2369,38 +2366,37 @@ export async function deleteRagDocument(
   projectId: string | undefined,
   request: RagDocumentDeleteRequest,
 ): Promise<boolean> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
+    if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
 
-  const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
-  if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
+    const doc = await db.findRagDocumentById(request.documentId);
+    if (!doc) throw new Error('Document not found');
 
-  const doc = await db.findRagDocumentById(request.documentId);
-  if (!doc) throw new Error('Document not found');
+    const chunkCount = doc.chunkCount ?? 0;
+    await removeVectors(
+      tenantDbName, tenantId, projectId, ragModule,
+      documentVectorIds(request.ragModuleKey, request.documentId, chunkCount),
+      `deletion of document ${request.documentId}`,
+    );
 
-  const chunkCount = doc.chunkCount ?? 0;
-  await removeVectors(
-    tenantDbName, tenantId, projectId, ragModule,
-    documentVectorIds(request.ragModuleKey, request.documentId, chunkCount),
-    `deletion of document ${request.documentId}`,
-  );
+    // Delete chunk content from MongoDB
+    try {
+      await db.deleteRagChunksByDocumentId(request.documentId);
+    } catch (err) {
+      logger.warn('Failed to delete MongoDB chunks for document', { error: err });
+    }
 
-  // Delete chunk content from MongoDB
-  try {
-    await db.deleteRagChunksByDocumentId(request.documentId);
-  } catch (err) {
-    logger.warn('Failed to delete MongoDB chunks for document', { error: err });
-  }
+    // The stored source outlives the row unless it is deleted here.
+    await discardDocumentSource(tenantDbName, tenantId, projectId, doc, CASCADE_ACTOR);
 
-  // The stored source outlives the row unless it is deleted here.
-  await discardDocumentSource(tenantDbName, tenantId, projectId, doc, CASCADE_ACTOR);
+    // Update module stats
+    await db.incrementRagModuleTotals(String(ragModule._id), { documents: -1, chunks: -chunkCount });
 
-  // Update module stats
-  await db.incrementRagModuleTotals(String(ragModule._id), { documents: -1, chunks: -chunkCount });
-
-  const deleted = await db.deleteRagDocument(request.documentId);
-  await deleteRagDocumentAcl(db, ragModule, request.documentId);
-  return deleted;
+    const deleted = await db.deleteRagDocument(request.documentId);
+    await deleteRagDocumentAcl(db, ragModule, request.documentId);
+    return deleted;
+  });
 }
 
 /**
@@ -2597,204 +2593,203 @@ export async function reingestDocument(
   },
 ): Promise<RagDocument> {
   await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
+    if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
+    if (ragModule.status !== 'active') throw new Error('Knowledge Engine module is not active');
 
-  const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
-  if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
-  if (ragModule.status !== 'active') throw new Error('Knowledge Engine module is not active');
+    let doc = await db.findRagDocumentById(request.documentId);
+    if (!doc) throw new RagDocumentGoneError();
 
-  let doc = await db.findRagDocumentById(request.documentId);
-  if (!doc) throw new RagDocumentGoneError();
+    const placementCtx = { tenantDbName, tenantId, projectId, actor: request.updatedBy };
+    const prepared = hasRagPlacement(request.placement)
+      ? await prepareRagDocumentPlacement(db, placementCtx, ragModule, request.placement!, request.placement!.scope)
+      : undefined;
+    // A placement this caller may not make is refused before the document is read again.
+    if (prepared) assertRagDocumentPlacementAllowed(ragModule, doc, prepared);
 
-  const placementCtx = { tenantDbName, tenantId, projectId, actor: request.updatedBy };
-  const prepared = hasRagPlacement(request.placement)
-    ? await prepareRagDocumentPlacement(db, placementCtx, ragModule, request.placement!, request.placement!.scope)
-    : undefined;
-  // A placement this caller may not make is refused before the document is read again.
-  if (prepared) assertRagDocumentPlacementAllowed(ragModule, doc, prepared);
+    // Read before the placement is written: a re-extract that is refused (409) leaves the folder and permissions as they were.
+    const source = await resolveReingestSource(db, tenantDbName, tenantId, projectId, doc, request, ragModule);
 
-  // Read before the placement is written: a re-extract that is refused (409) leaves the folder and permissions as they were.
-  const source = await resolveReingestSource(db, tenantDbName, tenantId, projectId, doc, request, ragModule);
+    // Reading the pages again can take minutes. From here on the row is the one as it is now (an admin may have moved it
+    // or changed its permissions meanwhile), and a row deleted meanwhile is not written again.
+    doc = await db.findRagDocumentById(request.documentId);
+    if (!doc) throw new RagDocumentGoneError();
+    if (prepared) await commitRagDocumentPlacement(db, placementCtx, ragModule, doc, prepared);
+    const textContent = source.text;
 
-  // Reading the pages again can take minutes. From here on the row is the one as it is now (an admin may have moved it
-  // or changed its permissions meanwhile), and a row deleted meanwhile is not written again.
-  doc = await db.findRagDocumentById(request.documentId);
-  if (!doc) throw new RagDocumentGoneError();
-  if (prepared) await commitRagDocumentPlacement(db, placementCtx, ragModule, doc, prepared);
-  const textContent = source.text;
+    // The re-index job calls this with no metadata at all. Writing
+    // `request.metadata` straight through therefore stripped every user- and
+    // crawler-supplied key from the rebuilt vectors and chunk rows — and those
+    // keys are exactly what defaultFilter/filterableFields filter on, so every
+    // filtered query went empty after a re-index. The document's own metadata is
+    // the floor; an explicit request only adds to and overrides it.
+    // The crawler mark is the document's: nobody's metadata sets or clears it, only the crawler's own re-ingest.
+    const requested = metadataWithCrawlerMark(request.metadata, request.sentByCrawler);
+    const metadata = requested
+      ? { ...doc.metadata, ...requested }
+      : doc.metadata;
 
-  // The re-index job calls this with no metadata at all. Writing
-  // `request.metadata` straight through therefore stripped every user- and
-  // crawler-supplied key from the rebuilt vectors and chunk rows — and those
-  // keys are exactly what defaultFilter/filterableFields filter on, so every
-  // filtered query went empty after a re-index. The document's own metadata is
-  // the floor; an explicit request only adds to and overrides it.
-  // The crawler mark is the document's: nobody's metadata sets or clears it, only the crawler's own re-ingest.
-  const requested = metadataWithCrawlerMark(request.metadata, request.sentByCrawler);
-  const metadata = requested
-    ? { ...doc.metadata, ...requested }
-    : doc.metadata;
-
-  // A chunk join is a lossy reconstruction — it repeats every overlap region —
-  // so it must never become the document's CANONICAL source: hashing it would
-  // make the corruption authoritative, and a later re-upload of the real
-  // original would be de-duplicated away against it.
-  //
-  // It must still be PERSISTED, though. The steps below delete this document's
-  // vectors and chunk rows, and for a document with no stored source those rows
-  // are the only copy of its text. Keeping the join only in a local variable
-  // means an embedding timeout or a SIGKILL between the delete and the rebuild
-  // destroys the document outright, with a failure counter as the only trace.
-  // So: store the text, withhold the hash, and record where it came from.
-  const sourceIsTrustworthy = source.origin !== 'chunk-join';
-
-  // Refresh the stored source so the NEXT re-index reads this run's input
-  // rather than the one before it. Unchanged text is left alone — a re-index
-  // triggered by a chunkConfig change must not rewrite the bucket.
-  const sourceHash = hashSourceText(textContent);
-  const sourceIsStored = Boolean(doc.sourceText || doc.sourceTextKey);
-  let storedSource: Awaited<ReturnType<typeof storeDocumentSource>> | undefined;
-  if (doc.sourceHash !== sourceHash || !sourceIsStored) {
-    storedSource = await storeDocumentSource({
-      tenantDbName,
-      tenantId,
-      projectId,
-      ragModule,
-      fileName: request.fileName ?? doc.fileName,
-      contentType: request.contentType ?? doc.contentType,
-      text: textContent,
-      fileData: source.fileData,
-      createdBy: request.updatedBy,
-    });
-
-    // COMMIT THE SOURCE BEFORE ANYTHING IS DESTROYED.
+    // A chunk join is a lossy reconstruction — it repeats every overlap region —
+    // so it must never become the document's CANONICAL source: hashing it would
+    // make the corruption authoritative, and a later re-upload of the real
+    // original would be de-duplicated away against it.
     //
-    // For text under the inline cap storeDocumentSource only builds an
-    // in-memory object — it performs no write at all — and the steps below
-    // delete this document's vectors and chunk rows, which for a document with
-    // no previously stored source are the ONLY copy of its text. Writing the
-    // source fields here rather than in the success branch is what makes a
-    // failed re-ingest recoverable instead of destructive.
-    await db.updateRagDocument(request.documentId, sourceRowFields(storedSource, doc, sourceIsTrustworthy));
+    // It must still be PERSISTED, though. The steps below delete this document's
+    // vectors and chunk rows, and for a document with no stored source those rows
+    // are the only copy of its text. Keeping the join only in a local variable
+    // means an embedding timeout or a SIGKILL between the delete and the rebuild
+    // destroys the document outright, with a failure counter as the only trace.
+    // So: store the text, withhold the hash, and record where it came from.
+    const sourceIsTrustworthy = source.origin !== 'chunk-join';
 
-    // Upload keys are random, so a replacement never overwrites what it
-    // supersedes — the old objects have to be dropped explicitly. Only drop the
-    // ones actually replaced: a failed upload must not take the last copy with
-    // it, and a RECONSTRUCTION never supersedes anything. A chunk join is what
-    // we fall back to when the real source could not be read — very often
-    // because reading it failed transiently — so deleting the object it failed
-    // to read would destroy the document's only faithful copy.
-    if (sourceIsTrustworthy) {
-      await discardDocumentSource(tenantDbName, tenantId, projectId, {
-        fileBucketKey: doc.fileBucketKey,
-        sourceTextKey: storedSource.sourceText || storedSource.sourceTextKey ? doc.sourceTextKey : undefined,
-        fileKey: storedSource.fileKey ? doc.fileKey : undefined,
-      }, request.updatedBy);
-    }
-  }
-
-  // This run extracted the text (a new upload with OCR, or a re-extract): the document records how.
-  if (source.extraction) await db.updateRagDocument(request.documentId, { extraction: source.extraction });
-
-  // 1. Delete old vectors
-  const oldChunkCount = doc.chunkCount ?? 0;
-  await removeVectors(
-    tenantDbName, tenantId, projectId, ragModule,
-    documentVectorIds(request.ragModuleKey, request.documentId, oldChunkCount),
-    `re-ingest of document ${request.documentId}`,
-  );
-
-  // 2. Delete old MongoDB chunks
-  try {
-    await db.deleteRagChunksByDocumentId(request.documentId);
-  } catch (err) {
-    logger.warn('Reingest: failed to delete old MongoDB chunks', { error: err });
-  }
-
-  // Mark document as processing
-  if (!(await db.updateRagDocument(request.documentId, { status: 'processing', errorMessage: undefined }))) {
-    throw new RagDocumentGoneError();
-  }
-
-  try {
-    const chunkCount = await indexDocumentContent({
-      db,
-      tenantDbName,
-      tenantId,
-      projectId,
-      ragModule,
-      chunkConfig: request.chunkConfig ?? chunkConfigFor(ragModule, doc),
-      documentId: request.documentId,
-      fileName: request.fileName ?? doc.fileName,
-      text: textContent,
-      metadata,
-    });
-
-    const now = new Date();
-    // The whole source block is rewritten, not merged: an inline source that
-    // outgrew the cap (or the reverse) has to leave the field it moved out of
-    // empty, or the document would carry two disagreeing copies of itself.
-    // Already committed above, before the destructive steps.
-    const sourceFields = {};
-
-    const indexed = await db.updateRagDocument(request.documentId, {
-      status: 'indexed',
-      chunkCount,
-      lastIndexedAt: now,
-      fileName: request.fileName ?? doc.fileName,
-      size: Buffer.byteLength(textContent, 'utf-8'),
-      updatedBy: request.updatedBy,
-      // Persisted so the next re-index reproduces these chunks rather than
-      // silently reverting to the module's config.
-      ...(request.chunkConfig ? { chunkConfig: request.chunkConfig } : {}),
-      // Only when the caller supplied keys: the row and the vectors have to
-      // agree on what this document is filterable by, and an untouched row
-      // already does.
-      ...(requested ? { metadata } : {}),
-      ...sourceFields,
-    });
-    if (!indexed) {
-      // Deleted while it was being indexed: what this run wrote must not outlive the row.
-      await removeVectors(
-        tenantDbName, tenantId, projectId, ragModule,
-        documentVectorIds(request.ragModuleKey, request.documentId, chunkCount),
-        `re-ingest of document ${request.documentId}, deleted meanwhile`,
-      );
-      await db.deleteRagChunksByDocumentId(request.documentId).catch((err) => {
-        logger.warn('Failed to delete the chunks of a document deleted during its re-ingest', { documentId: request.documentId, error: err });
+    // Refresh the stored source so the NEXT re-index reads this run's input
+    // rather than the one before it. Unchanged text is left alone — a re-index
+    // triggered by a chunkConfig change must not rewrite the bucket.
+    const sourceHash = hashSourceText(textContent);
+    const sourceIsStored = Boolean(doc.sourceText || doc.sourceTextKey);
+    let storedSource: Awaited<ReturnType<typeof storeDocumentSource>> | undefined;
+    if (doc.sourceHash !== sourceHash || !sourceIsStored) {
+      storedSource = await storeDocumentSource({
+        tenantDbName,
+        tenantId,
+        projectId,
+        ragModule,
+        fileName: request.fileName ?? doc.fileName,
+        contentType: request.contentType ?? doc.contentType,
+        text: textContent,
+        fileData: source.fileData,
+        createdBy: request.updatedBy,
       });
+
+      // COMMIT THE SOURCE BEFORE ANYTHING IS DESTROYED.
+      //
+      // For text under the inline cap storeDocumentSource only builds an
+      // in-memory object — it performs no write at all — and the steps below
+      // delete this document's vectors and chunk rows, which for a document with
+      // no previously stored source are the ONLY copy of its text. Writing the
+      // source fields here rather than in the success branch is what makes a
+      // failed re-ingest recoverable instead of destructive.
+      await db.updateRagDocument(request.documentId, sourceRowFields(storedSource, doc, sourceIsTrustworthy));
+
+      // Upload keys are random, so a replacement never overwrites what it
+      // supersedes — the old objects have to be dropped explicitly. Only drop the
+      // ones actually replaced: a failed upload must not take the last copy with
+      // it, and a RECONSTRUCTION never supersedes anything. A chunk join is what
+      // we fall back to when the real source could not be read — very often
+      // because reading it failed transiently — so deleting the object it failed
+      // to read would destroy the document's only faithful copy.
+      if (sourceIsTrustworthy) {
+        await discardDocumentSource(tenantDbName, tenantId, projectId, {
+          fileBucketKey: doc.fileBucketKey,
+          sourceTextKey: storedSource.sourceText || storedSource.sourceTextKey ? doc.sourceTextKey : undefined,
+          fileKey: storedSource.fileKey ? doc.fileKey : undefined,
+        }, request.updatedBy);
+      }
+    }
+
+    // This run extracted the text (a new upload with OCR, or a re-extract): the document records how.
+    if (source.extraction) await db.updateRagDocument(request.documentId, { extraction: source.extraction });
+
+    // 1. Delete old vectors
+    const oldChunkCount = doc.chunkCount ?? 0;
+    await removeVectors(
+      tenantDbName, tenantId, projectId, ragModule,
+      documentVectorIds(request.ragModuleKey, request.documentId, oldChunkCount),
+      `re-ingest of document ${request.documentId}`,
+    );
+
+    // 2. Delete old MongoDB chunks
+    try {
+      await db.deleteRagChunksByDocumentId(request.documentId);
+    } catch (err) {
+      logger.warn('Reingest: failed to delete old MongoDB chunks', { error: err });
+    }
+
+    // Mark document as processing
+    if (!(await db.updateRagDocument(request.documentId, { status: 'processing', errorMessage: undefined }))) {
       throw new RagDocumentGoneError();
     }
 
-    await db.incrementRagModuleTotals(String(ragModule._id), { chunks: chunkCount - oldChunkCount });
+    try {
+      const chunkCount = await indexDocumentContent({
+        db,
+        tenantDbName,
+        tenantId,
+        projectId,
+        ragModule,
+        chunkConfig: request.chunkConfig ?? chunkConfigFor(ragModule, doc),
+        documentId: request.documentId,
+        fileName: request.fileName ?? doc.fileName,
+        text: textContent,
+        metadata,
+      });
 
-    logger.debug('Re-indexed document', {
-      documentId: request.documentId,
-      ragModuleKey: request.ragModuleKey,
-      origin: source.origin,
-      chunkCount,
-    });
+      const now = new Date();
+      // The whole source block is rewritten, not merged: an inline source that
+      // outgrew the cap (or the reverse) has to leave the field it moved out of
+      // empty, or the document would carry two disagreeing copies of itself.
+      // Already committed above, before the destructive steps.
+      const sourceFields = {};
 
-    return withoutInlineSource({
-      ...doc,
-      ...sourceFields,
-      status: 'indexed' as const,
-      chunkCount,
-      lastIndexedAt: now,
-      fileName: request.fileName ?? doc.fileName,
-      ...(source.extraction ? { extraction: source.extraction } : {}),
-      ...(request.metadata ? { metadata } : {}),
-    });
-  } catch (error) {
-    if (error instanceof RagDocumentGoneError) throw error;
-    const msg = error instanceof Error ? error.message : 'Re-ingest failed';
-    await db.updateRagDocument(request.documentId, {
-      status: 'failed',
-      errorMessage: msg,
-    });
-    throw error;
-  }
+      const indexed = await db.updateRagDocument(request.documentId, {
+        status: 'indexed',
+        chunkCount,
+        lastIndexedAt: now,
+        fileName: request.fileName ?? doc.fileName,
+        size: Buffer.byteLength(textContent, 'utf-8'),
+        updatedBy: request.updatedBy,
+        // Persisted so the next re-index reproduces these chunks rather than
+        // silently reverting to the module's config.
+        ...(request.chunkConfig ? { chunkConfig: request.chunkConfig } : {}),
+        // Only when the caller supplied keys: the row and the vectors have to
+        // agree on what this document is filterable by, and an untouched row
+        // already does.
+        ...(requested ? { metadata } : {}),
+        ...sourceFields,
+      });
+      if (!indexed) {
+        // Deleted while it was being indexed: what this run wrote must not outlive the row.
+        await removeVectors(
+          tenantDbName, tenantId, projectId, ragModule,
+          documentVectorIds(request.ragModuleKey, request.documentId, chunkCount),
+          `re-ingest of document ${request.documentId}, deleted meanwhile`,
+        );
+        await db.deleteRagChunksByDocumentId(request.documentId).catch((err) => {
+          logger.warn('Failed to delete the chunks of a document deleted during its re-ingest', { documentId: request.documentId, error: err });
+        });
+        throw new RagDocumentGoneError();
+      }
+
+      await db.incrementRagModuleTotals(String(ragModule._id), { chunks: chunkCount - oldChunkCount });
+
+      logger.debug('Re-indexed document', {
+        documentId: request.documentId,
+        ragModuleKey: request.ragModuleKey,
+        origin: source.origin,
+        chunkCount,
+      });
+
+      return withoutInlineSource({
+        ...doc,
+        ...sourceFields,
+        status: 'indexed' as const,
+        chunkCount,
+        lastIndexedAt: now,
+        fileName: request.fileName ?? doc.fileName,
+        ...(source.extraction ? { extraction: source.extraction } : {}),
+        ...(request.metadata ? { metadata } : {}),
+      });
+    } catch (error) {
+      if (error instanceof RagDocumentGoneError) throw error;
+      const msg = error instanceof Error ? error.message : 'Re-ingest failed';
+      await db.updateRagDocument(request.documentId, {
+        status: 'failed',
+        errorMessage: msg,
+      });
+      throw error;
+    }
+  });
 }
 
 /* ── Query logs ──────────────────────────────────────────────────────── */
@@ -2804,9 +2799,9 @@ export async function listRagQueryLogs(
   ragModuleKey: string,
   options?: Parameters<DatabaseProvider['listRagQueryLogs']>[1],
 ): Promise<IRagQueryLog[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.listRagQueryLogs(ragModuleKey, options);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.listRagQueryLogs(ragModuleKey, options);
+  });
 }
 
 export async function countRagQueryLogs(
@@ -2814,9 +2809,9 @@ export async function countRagQueryLogs(
   ragModuleKey: string,
   options?: { from?: Date; to?: Date; projectId?: string },
 ): Promise<Awaited<ReturnType<DatabaseProvider['countRagQueryLogs']>>> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.countRagQueryLogs(ragModuleKey, options);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.countRagQueryLogs(ragModuleKey, options);
+  });
 }
 
 /**
@@ -2828,9 +2823,9 @@ export async function aggregateRagQueryScoreDistribution(
   ragModuleKey: string,
   options?: { from?: Date; to?: Date; projectId?: string },
 ): Promise<Array<{ bucket: string; count: number }>> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.aggregateRagQueryScoreDistribution(ragModuleKey, options);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.aggregateRagQueryScoreDistribution(ragModuleKey, options);
+  });
 }
 
 export { RagModuleInactiveError };

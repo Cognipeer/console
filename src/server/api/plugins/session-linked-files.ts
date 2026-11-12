@@ -12,7 +12,7 @@
  */
 
 import type { FastifyRequest } from 'fastify';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import { chooseRelativeFileKey } from '@/lib/services/files';
 import {
   pageOfVisibleRows,
@@ -117,14 +117,12 @@ export async function sessionRefusedForUpload(
   const { keyHint } = input;
   if (!keyHint || keyHint.endsWith('/')) return null;
   const key = chooseRelativeFileKey(keyHint, input.fileName);
-  const db = await getDatabase();
-  await db.switchToTenant(input.tenantDbName);
-  const occupants = await db.listFileRecordsByKeys({
+  const occupants = await runWithTenantScope(input.tenantDbName, (db) => db.listFileRecordsByKeys({
     providerKey: input.bucket.providerKey,
     bucketKey: input.bucket.key,
     projectId: input.projectId,
     keys: [key],
-  });
+  }));
   const sessions = [...new Set(occupants.map((record) => sessionOfFile(record)).filter((id): id is string => id !== null))];
   if (sessions.length === 0) return null;
 
