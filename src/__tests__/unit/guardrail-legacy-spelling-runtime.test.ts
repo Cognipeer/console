@@ -36,7 +36,7 @@
  * The default-guardrail check asks the question through `readPolicyList`.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { IGuardrail, IPiiPolicy } from '@/lib/database/provider/types.domain';
 
@@ -77,6 +77,7 @@ vi.mock('@/lib/services/usage/usageEvents', () => ({
   resolveUsageAttribution: vi.fn(async () => ({})),
 }));
 
+import { scanRegexRules } from '@/lib/services/guardrail/families/regex';
 import { readHooks, toolCallSubject } from '@/lib/services/guardrail/hooks/contract';
 import type { HookScope } from '@/lib/services/guardrail/hooks/contract';
 import {
@@ -337,6 +338,15 @@ describe('a per-policy message is not shared with the policy next to it', () => 
       },
     } as unknown as IGuardrail;
   }
+
+  // The regex family enforces a 50 ms wall-clock budget per policy, and its
+  // first sweep in a process pays for creating the V8 context and compiling the
+  // sweep script. On a loaded CI runner that cold start alone can overrun the
+  // budget, which degrades the policy and turns the expected block into a flag.
+  // Warming the sweep here keeps the test about the message, not about start-up.
+  beforeAll(() => {
+    scanRegexRules('warm-up', [rule('r-warm', 'WARM')], { budgetMs: 5_000 });
+  });
 
   async function blockBodyFor(text: string): Promise<string | undefined> {
     hoisted.findGuardrailByKey.mockResolvedValue(twoCustomPolicies());
