@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import type { ProviderDomain } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import { providerRegistry } from '@/lib/providers';
 import type { VectorUpsertItem } from '@/lib/providers';
 import {
@@ -438,27 +438,27 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const maxVectorsTotal = quotaResult.effectiveLimits.quotas?.maxVectorsTotal;
-      const db = await getDatabase();
-      await db.switchToTenant(ctx.tenantDbName);
-      if (maxVectorsTotal !== undefined && maxVectorsTotal !== -1) {
-        const currentApprox = await db.getProjectVectorCountApprox(ctx.projectId);
-        const projected = currentApprox + vectorCount;
-        if (projected > maxVectorsTotal) {
-          return reply.code(429).send({
-            error: `vectorsTotal limit exceeded (${projected}/${maxVectorsTotal})`,
-          });
+      return await runWithTenantScope(ctx.tenantDbName, async (db) => {
+        if (maxVectorsTotal !== undefined && maxVectorsTotal !== -1) {
+          const currentApprox = await db.getProjectVectorCountApprox(ctx.projectId);
+          const projected = currentApprox + vectorCount;
+          if (projected > maxVectorsTotal) {
+            return reply.code(429).send({
+              error: `vectorsTotal limit exceeded (${projected}/${maxVectorsTotal})`,
+            });
+          }
         }
-      }
 
-      await upsertVectors(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
-        indexKey: externalId,
-        providerKey,
-        updatedBy: ctx.tokenRecord.userId,
-        vectors: body.vectors as VectorUpsertItem[],
+        await upsertVectors(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
+          indexKey: externalId,
+          providerKey,
+          updatedBy: ctx.tokenRecord.userId,
+          vectors: body.vectors as VectorUpsertItem[],
+        });
+
+        await db.incrementProjectVectorCountApprox(ctx.projectId, vectorCount);
+        return reply.code(200).send({ success: true });
       });
-
-      await db.incrementProjectVectorCountApprox(ctx.projectId, vectorCount);
-      return reply.code(200).send({ success: true });
     } catch (error) {
       logger.error('Upsert client vector entries error', { error });
       // A storage limit refusal (a platform provider's upsert) answers with its own status and envelope.
@@ -512,11 +512,11 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
         updatedBy: ctx.tokenRecord.userId,
       });
 
-      const db = await getDatabase();
-      await db.switchToTenant(ctx.tenantDbName);
-      await db.incrementProjectVectorCountApprox(ctx.projectId, -ids.length);
+      return await runWithTenantScope(ctx.tenantDbName, async (db) => {
+        await db.incrementProjectVectorCountApprox(ctx.projectId, -ids.length);
 
-      return reply.code(200).send({ success: true });
+        return reply.code(200).send({ success: true });
+      });
     } catch (error) {
       if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be valid JSON' });
       logger.error('Delete client vector entries error', { error });
