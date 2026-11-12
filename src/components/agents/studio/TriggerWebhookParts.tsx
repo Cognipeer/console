@@ -53,11 +53,8 @@ import {
     type WebhookPreset,
 } from './triggerForm';
 
-/** The names of the presets, including the retired vendor ones a stored trigger may still carry. */
-export const WEBHOOK_PRESET_LABEL_KEY: Record<WebhookPreset | 'github' | 'gitlab' | 'azure_devops', string> = {
-    github: 'presetGithub',
-    gitlab: 'presetGitlab',
-    azure_devops: 'presetAzureDevops',
+/** The names of the presets. */
+export const WEBHOOK_PRESET_LABEL_KEY: Record<WebhookPreset, string> = {
     generic: 'presetGeneric',
 };
 
@@ -142,12 +139,10 @@ export interface WebhookFilterEditorProps {
     form: TriggerForm;
     set: <K extends keyof TriggerForm>(key: K, value: TriggerForm[K]) => void;
     errorOf: (field: keyof TriggerForm) => string | undefined;
-    /** Rows (by index) to point out, each group with the reason shown under the path of its rows. */
-    flagged?: ReadonlyArray<{ rows: readonly number[]; reason: string }>;
 }
 
 /** The filter rows: every rule must match the event. Shared by webhook and connector triggers (both match over `payload.`). */
-export function WebhookFilterEditor({ form, set, errorOf, flagged }: WebhookFilterEditorProps) {
+export function WebhookFilterEditor({ form, set, errorOf }: WebhookFilterEditorProps) {
     const t = useTranslations('agents.triggers');
     const ops = WEBHOOK_FILTER_OPS.map((op) => ({ value: op, label: t(`op_${op}`) }));
     const examples = WEBHOOK_FILTER_EXAMPLES[form.webhookPreset];
@@ -170,7 +165,6 @@ export function WebhookFilterEditor({ form, set, errorOf, flagged }: WebhookFilt
                         style={{ flex: 2 }}
                         value={row.path}
                         aria-label={t('webhookFilterPath')}
-                        error={flagged?.find((group) => group.rows.includes(index))?.reason}
                         onChange={(event) => setRow(index, { path: event.currentTarget.value })}
                     />
                     <Select style={{ flex: '0 0 190px' }} comboboxProps={{ width: 'max-content' }} allowDeselect={false} data={ops} value={row.op} aria-label={t('webhookFilterOp')} onChange={(value) => value && setRow(index, { op: value as WebhookFilterOp })} />

@@ -10,8 +10,7 @@
  * a vendor failure never fails a write, a subscription shared by several
  * triggers survives until the last one is gone, the answers carry
  * `connector_subscription`, retry / rotate / Run now behave the same on both
- * mounts, the community edition (no host) refuses connector writes, and a
- * trigger stored with a retired vendor preset is read-only except to convert.
+ * mounts, and the community edition (no host) refuses connector writes.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -59,11 +58,8 @@ vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
 });
 
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
-import type { IAgentTrigger } from '@/lib/database';
 import { __resetConnectorTriggerHostForTests, registerConnectorTriggerHost } from '@/enterprise/connector-triggers';
-import { createAgentTrigger } from '@/lib/services/agents/agentTriggers';
 import { persistConnectorSettings } from '@/lib/services/agents/agentTriggerConnectorHost';
-import { parseWebhookWrite } from '@/lib/services/agents/agentTriggerWebhookIntake';
 import { deleteAgentRecord } from '@/lib/services/agents/agentService';
 import { agentTriggersApiPlugin } from '@/server/api/plugins/agent-triggers';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -762,70 +758,12 @@ describe.each([
   });
 });
 
-describe('retired vendor presets through the API', () => {
-  /** A trigger stored the way the removed vendor presets left it. */
-  async function retired(preset: 'github' | 'gitlab' | 'azure_devops' = 'github', auth: 'github_signature' | 'gitlab_token' | 'basic' = 'github_signature'): Promise<IAgentTrigger> {
-    const parsed = parseWebhookWrite({ preset: 'generic' }, null);
-    if (!parsed.ok) throw new Error(JSON.stringify(parsed.errors));
-    return createAgentTrigger({ tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID }, AGENT_KEY, {
-      name: 'legacy', type: 'webhook', webhook: { ...parsed.webhook, preset, auth }, prompt: 'Review.',
-    }, 'user-1');
-  }
-
-  it('reads with webhook.retired true; the old preset and auth are still shown', async () => {
-    const row = await retired('gitlab', 'gitlab_token');
-    const read = json(await client('GET', `/${String(row._id)}`));
-    expect(read).toMatchObject({ type: 'webhook', webhook: { retired: true, preset: 'gitlab', auth: 'gitlab_token' } });
-    expect(read.webhook).not.toHaveProperty('secret');
-  });
-
-  it('creating a webhook with a retired preset or auth is refused', async () => {
+describe('vendor presets through the API', () => {
+  it('creating a webhook with a vendor preset or auth is a plain validation error', async () => {
     for (const webhook of [{ preset: 'github' }, { preset: 'gitlab' }, { preset: 'azure_devops' }, { preset: 'generic', auth: 'github_signature' }, { preset: 'generic', auth: 'basic' }]) {
       const res = await client('POST', '', { name: 'x', type: 'webhook', webhook, prompt: 'x' });
       expect(res.statusCode, JSON.stringify(webhook)).toBe(400);
     }
     expect(await storedTriggers()).toEqual([]);
-  });
-
-  it('Run now and rotate-secret are 410 webhook_preset_retired; a name change still works', async () => {
-    const row = await retired();
-    const id = String(row._id);
-    const run = await client('POST', `/${id}/run`, { payload: { a: 1 } });
-    expect(run.statusCode).toBe(410);
-    expect(json(run).error).toMatchObject({ type: 'gone', code: 'webhook_preset_retired' });
-    const rotate = await client('POST', `/${id}/webhook/rotate-secret`, {});
-    expect(rotate.statusCode).toBe(410);
-    expect(json(rotate).error.code).toBe('webhook_preset_retired');
-    expect(hoisted.fireTrigger).not.toHaveBeenCalled();
-    expect((await client('PATCH', `/${id}`, { name: 'legacy (retired)' })).statusCode).toBe(200);
-  });
-
-  it('writing the webhook object of a retired trigger makes it a generic webhook with a new hook (new URL and secret); a retired preset in the write is refused', async () => {
-    const row = await retired();
-    const id = String(row._id);
-    const oldUrl = json(await client('GET', `/${id}`)).webhook.url;
-    const stillRetired = await client('PATCH', `/${id}`, { type: 'webhook', webhook: { preset: 'github', events: ['push'] } });
-    expect(stillRetired.statusCode).toBe(400);
-    const rewritten = await client('PATCH', `/${id}`, { type: 'webhook', webhook: { events: ['push'] } });
-    expect(rewritten.statusCode, rewritten.body).toBe(200);
-    const view = json(rewritten);
-    expect(view.webhook).toMatchObject({ preset: 'generic', auth: 'bearer', retired: false, secret: expect.stringMatching(/^whsec_/) });
-    expect(view.webhook.url).not.toBe(oldUrl);
-    // The old URL is gone.
-    expect(await db.findAgentTriggerByHookId(String(oldUrl).split('/').pop()!)).toBeNull();
-  });
-
-  it('converting to another type is allowed (manual here; connector with a module)', async () => {
-    const row = await retired();
-    const manual = await client('PATCH', `/${String(row._id)}`, { type: 'manual', prompt: 'Plain.' });
-    expect(manual.statusCode, manual.body).toBe(200);
-    expect(json(manual)).toMatchObject({ type: 'manual' });
-
-    registerConnectorTriggerHost(fake.host);
-    const other = await retired('azure_devops', 'basic');
-    const converted = await client('PATCH', `/${String(other._id)}`, { type: 'connector', connector: CONNECTOR, prompt: 'Review {{payload.number}}.' });
-    expect(converted.statusCode, converted.body).toBe(200);
-    expect(json(converted)).toMatchObject({ type: 'connector', connector_subscription: { status: 'active' } });
-    expect(json(converted)).not.toHaveProperty('webhook');
   });
 });

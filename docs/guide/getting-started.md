@@ -181,7 +181,7 @@ src/
 ├── components/             # React components (Mantine UI)
 ├── config/                 # Feature policies, plan limits
 ├── lib/
-│   ├── api/                # Route helpers (withRequestContext)
+│   ├── api/                # Browser API client
 │   ├── core/               # Infrastructure modules
 │   ├── database/           # Database abstraction layer
 │   ├── license/            # License & JWT management

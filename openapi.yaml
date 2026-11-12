@@ -2935,7 +2935,6 @@ paths:
                       filter:
                         - {path: payload.ticket.priority, op: in, value: [high, urgent]}
                       include_payload: true
-                      retired: false
                     prompt: 'Triage ticket {{payload.ticket.id}}: {{payload.ticket.title}}.'
                     variables: null
                     version: null
@@ -3135,8 +3134,7 @@ paths:
         added. A template or mapping that cannot be applied is `400` with `code` `template_error` or
         `invalid_variables`. `dry_run: true` only evaluates the sample and returns an `AgentTriggerDryRun`:
         nothing is created, no run starts, no event is published. `payload`, `headers` and `dry_run` on a trigger of
-        any other type are `400 invalid_request`. A webhook trigger stored with a retired vendor preset is `410
-        webhook_preset_retired`.
+        any other type are `400 invalid_request`.
 
         **Connector triggers.** `payload` is the event's data, `event` its type (for example
         `pull_request.opened`) and `dry_run` works as above; `headers` are not accepted. Without `payload` the
@@ -3282,12 +3280,6 @@ paths:
                   type: idempotency_key_conflict
                   message: This Idempotency-Key was already used with a different request (agentKey, conversationId, userMessage, or version).
                   code: idempotency_key_conflict
-        '410':
-          description: '`webhook_preset_retired`: the trigger is a webhook trigger stored with a retired vendor preset; convert it to a connector trigger.'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
         '429':
           description: >-
             The run was refused: `agent_run_concurrency_limit`, `spend_limit_exceeded` or `agent_quota_exceeded`.
@@ -3319,7 +3311,7 @@ paths:
         `secret` and is not echoed. With `grace_seconds` > 0 the previous secret keeps working until
         `previous_valid_until`, so the sender can be switched without a gap; 0 ends it (and any earlier grace) at
         once. Needs the `agents` permission (Write). A trigger of another type is
-        `400 trigger_not_webhook`; a webhook trigger stored with a retired vendor preset is `410 webhook_preset_retired`.
+        `400 trigger_not_webhook`.
 
         A `connector` trigger rotates the signing secret of its subscription through the Connectors module: a
         manually set up webhook gets a new secret (the old one stays accepted for `grace_seconds`, and
@@ -3411,12 +3403,6 @@ paths:
           $ref: '#/components/responses/TriggerNotFound'
         '409':
           description: '`connector_triggers_unavailable`: a connector trigger and no Connectors module. Also a refusal of the module that is a conflict: `account_required` or `not_active` when a hook the module registered cannot be taken off the vendor first (the connector has no connected account or is disabled), or `not_active` when the package no longer offers the trigger.'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '410':
-          description: '`webhook_preset_retired`: the trigger is a webhook trigger stored with a retired vendor preset.'
           content:
             application/json:
               schema:
@@ -16239,9 +16225,6 @@ paths:
         the trigger's secret in the way its `webhook.auth` says (see below). Senders configure the URL, a content type
         of `application/json` and the secret in their own webhook settings.
 
-        A hook whose trigger was created with a retired vendor preset (`github`, `gitlab`, `azure_devops`) answers
-        `410 webhook_preset_retired` before any authentication; recreate it as a connector trigger.
-
         **Authentication** (`401 webhook_unauthorized` with a constant body; the precise reason is only in the
         delivery log):
 
@@ -16384,17 +16367,6 @@ paths:
                   type: not_found_error
                   message: Unknown webhook.
                   code: webhook_not_found
-        '410':
-          description: '`webhook_preset_retired`: the trigger was created with a retired vendor preset (`github`, `gitlab`, `azure_devops`). Answered before authentication; recreate it as a connector trigger.'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-              example:
-                error:
-                  type: gone
-                  message: This webhook trigger used a retired vendor preset. Recreate it as a connector trigger.
-                  code: webhook_preset_retired
         '413':
           description: '`payload_too_large`: the body is over the limit.'
           content:
@@ -30735,7 +30707,7 @@ components:
     AgentTriggerWebhook:
       type: object
       description: >-
-        The `webhook` of a trigger of type `webhook`: an incoming generic webhook. Each authenticated, matching request to `url` starts a run (`POST /hooks/{tenantId}/{hookId}` on `/api/public`). Triggers created before connectors with a vendor preset keep reading as before (`retired: true`) but no longer fire; recreate them as `connector` triggers.
+        The `webhook` of a trigger of type `webhook`: an incoming generic webhook. Each authenticated, matching request to `url` starts a run (`POST /hooks/{tenantId}/{hookId}` on `/api/public`).
       properties:
         url:
           type: string
@@ -30743,15 +30715,12 @@ components:
           description: The public hook URL; its hook id never changes while the trigger stays a webhook one.
         preset:
           type: string
-          enum: [generic, github, gitlab, azure_devops]
-          description: '`generic` for every working webhook trigger. `github`, `gitlab` and `azure_devops` appear only on retired legacy triggers (read-only).'
+          enum: [generic]
+          description: '`generic`: the only webhook preset; a vendor is reached through a `connector` trigger.'
         auth:
           type: string
-          enum: [bearer, signature, header, standard_webhooks, github_signature, gitlab_token, basic]
-          description: How a delivery proves the secret (the table on the hook endpoint). `github_signature`, `gitlab_token` and `basic` appear only on retired legacy triggers.
-        retired:
-          type: boolean
-          description: True for a legacy trigger stored with a retired vendor preset; its hook URL answers `410` and Run now is refused. Convert it by PATCHing it to a `connector` trigger (or a `generic` webhook).
+          enum: [bearer, signature, header, standard_webhooks]
+          description: How a delivery proves the secret (the table on the hook endpoint).
         header_name:
           type: string
           nullable: true
@@ -30780,7 +30749,7 @@ components:
         include_payload:
           type: boolean
           description: Append the event payload (JSON, cut at 32 KiB) to the message.
-      required: [url, preset, auth, header_name, secret_hint, secret_source, previous_secret_valid_until, events, filter, include_payload, retired]
+      required: [url, preset, auth, header_name, secret_hint, secret_source, previous_secret_valid_until, events, filter, include_payload]
     AgentTriggerConnector:
       type: object
       description: >-
@@ -31017,7 +30986,7 @@ components:
     AgentTriggerWebhookRequest:
       type: object
       description: >-
-        The `webhook` of a create / PATCH body with `type: webhook`. `preset` is required when the trigger is not a webhook one yet; the other fields keep their stored values when absent. The trigger's `prompt` is a Mustache template over the event (at most 16 KiB; values are inserted as JSON; roots `payload`, `headers`, `event`, `delivery_id`, `preset`, `received_at`, `trigger`, `agent`; sections nest at most 2 deep; partials, delimiter changes and unescaped tags are refused) and `variables` maps declared variables to literals or templates. The `auth` modes are `bearer` (default), `signature`, `header` and `standard_webhooks`. The retired vendor presets (`github`, `gitlab`, `azure_devops`) are refused (`400`); use a `connector` trigger.
+        The `webhook` of a create / PATCH body with `type: webhook`. `preset` is required when the trigger is not a webhook one yet; the other fields keep their stored values when absent. The trigger's `prompt` is a Mustache template over the event (at most 16 KiB; values are inserted as JSON; roots `payload`, `headers`, `event`, `delivery_id`, `preset`, `received_at`, `trigger`, `agent`; sections nest at most 2 deep; partials, delimiter changes and unescaped tags are refused) and `variables` maps declared variables to literals or templates. The `auth` modes are `bearer` (default), `signature`, `header` and `standard_webhooks`. Any preset other than `generic`, and any `auth` outside those modes, is refused (`400`); use a `connector` trigger for a vendor.
       properties:
         preset:
           type: string
@@ -31135,7 +31104,7 @@ components:
           type: string
           enum: [schedule, once, manual, webhook, connector]
           description: >-
-            Sent together with the settings object named after it (`schedule`, `once`, `webhook` or `connector`; `manual` takes none): they replace the type and its settings as a whole. A settings object without its `type`, or one of another type, is `400`. A webhook trigger stored with a retired vendor preset can be converted to any type here; a `webhook` object for it re-creates it as a generic webhook with a new URL and secret.
+            Sent together with the settings object named after it (`schedule`, `once`, `webhook` or `connector`; `manual` takes none): they replace the type and its settings as a whole. A settings object without its `type`, or one of another type, is `400`.
         schedule:
           $ref: '#/components/schemas/AgentTriggerScheduleRequest'
         once:

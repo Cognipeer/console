@@ -1,7 +1,6 @@
 /**
  * The incoming webhook's pure parts: every auth mode (header and body),
- * the header allow-list, the event / delivery id normalization, the retired
- * vendor presets, de-duplication material, the bounded view, filter
+ * the header allow-list, the event / delivery id normalization, de-duplication material, the bounded view, filter
  * rules, the prompt template (save-time rules, JSON insertion, output budget)
  * and the input mapping.
  */
@@ -16,7 +15,6 @@ import {
   deliveryKeyBase,
   headerNameProblem,
   connectorDeliveryKeyBase,
-  isRetiredWebhook,
   standardSecretProblem,
   verifyBodyAuth,
   verifyHeaderAuth,
@@ -130,16 +128,6 @@ describe('headers, event and delivery id', () => {
     expect(deliveryIdentity({ 'x-cognipeer-event': 'a\nb' }, {}).invalidEvent).toBe(true);
   });
 });
-
-describe('retired vendor presets', () => {
-  it('recognizes a stored vendor preset or auth mode', () => {
-    expect(isRetiredWebhook({ preset: 'github', auth: 'github_signature' })).toBe(true);
-    expect(isRetiredWebhook({ preset: 'gitlab', auth: 'standard_webhooks' })).toBe(true);
-    expect(isRetiredWebhook({ preset: 'generic', auth: 'basic' })).toBe(true);
-    expect(isRetiredWebhook({ preset: 'generic', auth: 'bearer' })).toBe(false);
-  });
-});
-
 
 describe('de-duplication material', () => {
   const sha = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
@@ -448,7 +436,7 @@ describe('webhook writes and rotation', () => {
     expect(parseWebhookWrite({ preset: 'generic', secret: 'mine' }, null).ok).toBe(false);
   });
 
-  it('refuses the retired vendor presets and auth modes', () => {
+  it('refuses vendor presets and auth modes as plain validation errors', () => {
     for (const preset of ['github', 'gitlab', 'azure_devops']) {
       const write = parseWebhookWrite({ preset }, null);
       expect(write.ok, preset).toBe(false);
@@ -457,14 +445,6 @@ describe('webhook writes and rotation', () => {
     for (const auth of ['github_signature', 'gitlab_token', 'basic']) {
       expect(parseWebhookWrite({ preset: 'generic', auth }, null).ok, auth).toBe(false);
     }
-  });
-
-  it('a stored retired webhook is rewritten as a new generic one (new hook id and secret)', () => {
-    const retired = { preset: 'github', auth: 'github_signature', hookId: 'wh_retiredretiredretired01', secretSealed: 'sealed', secretSource: 'generated', events: [], filter: [], includePayload: true } as unknown as AgentTriggerWebhook;
-    const write = parseWebhookWrite({ preset: 'generic' }, retired);
-    expect(write.ok && write.webhook).toMatchObject({ preset: 'generic', auth: 'bearer' });
-    expect(write.ok && write.webhook.hookId).not.toBe(retired.hookId);
-    expect(write.ok && write.secret).toMatch(/^whsec_/);
   });
 
   it('keeps the hook id and secret across edits; moving off Standard Webhooks generates a new secret', () => {

@@ -89,34 +89,34 @@ interface RequestContext {
 }
 ```
 
-## Integration with withRequestContext
+## Integration with withApiRequestContext
 
-The `withRequestContext` wrapper in `src/lib/api/withRequestContext.ts` automatically sets up request context for API routes using middleware-injected headers:
+The `withApiRequestContext` wrapper in `src/server/api/fastify-utils.ts` sets up request context for API routes from the authenticated session:
 
 ```typescript
-import { withRequestContext } from '@/lib/api/withRequestContext';
+import { withApiRequestContext } from '@/server/api/fastify-utils';
 
-export const GET = withRequestContext(async (request) => {
-  // Context is already set from x-user-id, x-tenant-id, etc. headers
+app.get('/api/example', withApiRequestContext(async (request, reply) => {
+  // Context is already set from the session and the request id
   // Logger, services, cache all pick it up automatically
-  return NextResponse.json({ ok: true });
-});
+  return reply.send({ ok: true });
+}));
 ```
 
-Headers extracted by the wrapper:
+Fields the wrapper sets:
 
-| Header | Context Field |
+| Source | Context Field |
 |--------|--------------|
-| `x-user-id` | `userId` |
-| `x-tenant-id` | `tenantId` |
-| `x-tenant-slug` | `tenantSlug` |
-| `x-request-id` | `requestId` |
+| session user | `userId` |
+| session tenant | `tenantId` |
+| session tenant slug | `tenantSlug` |
+| request id | `requestId` |
 
 ## How It Flows
 
 ```
 Request → Middleware (validates JWT)
-       → withRequestContext (sets up AsyncLocalStorage)
+       → withApiRequestContext (sets up AsyncLocalStorage)
          → Route Handler
            → Service Layer
              → createLogger('service').info(...)  ← requestId auto-injected
