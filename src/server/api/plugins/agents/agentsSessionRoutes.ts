@@ -108,6 +108,7 @@ import {
   agentsOfSessions,
   sessionsOfTrigger,
 } from './agentsRouteHelpers';
+import { canSeeRawProviderErrors } from './agentsErrorVisibility';
 
 export function registerAgentsSessionRoutes(app: FastifyInstance): void {
   // ── Sessions ─────────────────────────────────────────────────────────
@@ -528,7 +529,7 @@ export function registerAgentsSessionRoutes(app: FastifyInstance): void {
       }
       return reply.code(200).send({ status: 'continued', result: continued.result });
     } catch (error) {
-      const classified = classifyAgentRunError(error, { exposeInternal: true });
+      const classified = classifyAgentRunError(error, { exposeInternal: await canSeeRawProviderErrors(request) });
       const resumeStatus = (error as { status?: unknown })?.status;
       if (stream.started()) {
         // The status line is long gone; the error travels as an event, like `/chat/stream`.

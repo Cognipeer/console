@@ -53,6 +53,7 @@ import {
   readStatelessHistory,
   prepareDashboardTurn,
 } from './agentsRouteHelpers';
+import { canSeeRawProviderErrors } from './agentsErrorVisibility';
 
 export function registerAgentsChatRoutes(app: FastifyInstance): void {
   /**
@@ -95,7 +96,7 @@ export function registerAgentsChatRoutes(app: FastifyInstance): void {
       await enforceAgentRunQuota(quotaCaller);
     } catch (error) {
       await turn.reservation?.release();
-      const classified = classifyAgentRunError(error, { exposeInternal: true });
+      const classified = classifyAgentRunError(error, { exposeInternal: await canSeeRawProviderErrors(request) });
       return reply.code(classified.status).send({
         error: classified.error.message,
         type: classified.error.type,
@@ -183,7 +184,7 @@ export function registerAgentsChatRoutes(app: FastifyInstance): void {
         send('error', { error: error.message, type: 'guardrail_block' });
       } else {
         logAgentRunFailure(logger, 'Agent playground stream error', error);
-        const classified = classifyAgentRunError(error, { exposeInternal: true });
+        const classified = classifyAgentRunError(error, { exposeInternal: await canSeeRawProviderErrors(request) });
         send('error', isPlanLimitError(error) ? planLimitErrorBody(error) : { error: classified.error.message, type: classified.error.type, code: classified.error.code });
       }
     } finally {
@@ -240,7 +241,7 @@ export function registerAgentsChatRoutes(app: FastifyInstance): void {
       } else {
         logAgentRunFailure(logger, 'Agent playground chat error', error);
       }
-      const classified = classifyAgentRunError(error, { exposeInternal: true });
+      const classified = classifyAgentRunError(error, { exposeInternal: await canSeeRawProviderErrors(request) });
       if (isPlanLimitError(error)) return reply.headers(planLimitHeaders(error)).code(error.status).send(planLimitErrorBody(error));
       return sendAgentGuardrailBlock(reply, error)
         ?? sendProjectContextError(reply, error)

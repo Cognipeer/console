@@ -57,6 +57,7 @@ import {
   dashboardActor,
   resolveRefusal,
 } from './agentsRouteHelpers';
+import { canSeeRawProviderErrors } from './agentsErrorVisibility';
 
 export function registerAgentsSessionActionRoutes(app: FastifyInstance): void {
   app.get('/agents/:agentId/sessions/:sessionId/actions', AGENT_SCOPED, withApiRequestContext(async (request, reply) => {
@@ -186,7 +187,7 @@ export function registerAgentsSessionActionRoutes(app: FastifyInstance): void {
       }
       return reply.code(500).send({ error: 'Unexpected resolution outcome' });
     } catch (error) {
-      const classified = classifyAgentRunError(error, { exposeInternal: true });
+      const classified = classifyAgentRunError(error, { exposeInternal: await canSeeRawProviderErrors(request) });
       const resumeStatus = (error as { status?: unknown })?.status;
       if (stream.started()) {
         // The status line is long gone; the error travels as an event, like `/chat/stream`.

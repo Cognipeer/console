@@ -10,6 +10,11 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+vi.mock('@/server/api/plugins/agents/agentsErrorVisibility', () => ({
+    // Who reads a raw failure message is agents-error-visibility.test.ts; the viewer here may.
+    canSeeRawProviderErrors: vi.fn(async () => true),
+}));
+
 vi.mock('@/server/api/fastify-utils', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/server/api/fastify-utils')>();
     return {
@@ -365,7 +370,7 @@ describe('config validation and model check', () => {
         const res = await app.inject({ method: 'POST', url: '/api/agents/model-check', payload: { modelKey: 'gpt-5-terra' } });
         expect(res.statusCode).toBe(200);
         expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('provider_authentication_error');
-        expect(mockFn(checkAgentModel)).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'gpt-5-terra');
+        expect(mockFn(checkAgentModel)).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'gpt-5-terra', { exposeInternal: true });
     });
 
     it('POST /agents/:agentId/publish refuses a draft that fails validation', async () => {

@@ -69,6 +69,7 @@ import {
   RUN_CHANNEL_VALUES,
   sessionTitles,
 } from './agentsRouteHelpers';
+import { canSeeRawProviderErrors } from './agentsErrorVisibility';
 
 export function registerAgentsMetaRoutes(app: FastifyInstance): void {
   /**
@@ -370,7 +371,9 @@ export function registerAgentsMetaRoutes(app: FastifyInstance): void {
       if (typeof body.modelKey !== 'string' || !body.modelKey) {
         return reply.code(400).send({ error: 'modelKey is required' });
       }
-      const result = await checkAgentModel(session.tenantDbName, session.tenantId, projectId, body.modelKey);
+      const result = await checkAgentModel(session.tenantDbName, session.tenantId, projectId, body.modelKey, {
+        exposeInternal: await canSeeRawProviderErrors(request),
+      });
       return reply.code(200).send(result);
     } catch (error) {
       return sendRouteError(reply, error, 'Agent model check error', 'Failed to check the model');

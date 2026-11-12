@@ -380,6 +380,8 @@ export async function checkAgentModel(
     tenantId: string,
     projectId: string,
     modelKey: string,
+    // Whether an unrecognized failure keeps its message (the route decides who may read it).
+    options: { exposeInternal?: boolean } = {},
 ): Promise<AgentModelCheckResult> {
     const startedAt = Date.now();
     try {
@@ -398,6 +400,6 @@ export async function checkAgentModel(
             modelKey,
             error: error instanceof Error ? error.message : String(error),
         });
-        return { ok: false, latencyMs: Date.now() - startedAt, error: classifyAgentRunError(error, { exposeInternal: true }).error };
+        return { ok: false, latencyMs: Date.now() - startedAt, error: classifyAgentRunError(error, { exposeInternal: options.exposeInternal === true }).error };
     }
 }

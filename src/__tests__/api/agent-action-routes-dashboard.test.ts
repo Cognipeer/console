@@ -9,6 +9,11 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+vi.mock('@/server/api/plugins/agents/agentsErrorVisibility', () => ({
+    // Who reads a raw failure message is agents-error-visibility.test.ts; the viewer here may.
+    canSeeRawProviderErrors: vi.fn(async () => true),
+}));
+
 vi.mock('@/server/api/fastify-utils', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/server/api/fastify-utils')>();
     return {
