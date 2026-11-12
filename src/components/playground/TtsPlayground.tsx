@@ -90,6 +90,7 @@ export default function TtsPlayground({ modelKey, voices }: TtsPlaygroundProps) 
     setBytes(null);
     const t0 = performance.now();
     try {
+      // Raw on purpose: the answer is an audio body (a blob), not JSON.
       const response = await fetch('/api/dashboard/playground/speech', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

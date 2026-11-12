@@ -10,12 +10,20 @@
  * list without them is only useful on a tenant that has ten sessions.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Badge, Button, Group, Select, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useConfirm, useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useBrowserSessions,
+  useBrowsers,
+  useCloseBrowserSession,
+  useDeleteBrowserSession,
+  useRecordBrowserFlow,
+} from '@/lib/api/queries/browser';
 import {
   IconArrowsSplit,
   IconCamera,
@@ -29,7 +37,7 @@ import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
-import type { BrowserSessionView, BrowserView } from '@/lib/services/browser';
+import type { BrowserSessionView } from '@/lib/services/browser';
 
 /** A session that is still holding a real Chromium context open. */
 const LIVE_STATUSES = new Set(['running', 'idle', 'pending']);
@@ -78,11 +86,6 @@ export default function BrowserSessionsPage() {
   const { confirmAction } = useConfirm();
   const tSafe = useTranslations('common.confirm.dataSafety');
   const router = useRouter();
-  const [sessions, setSessions] = useState<BrowserSessionView[]>([]);
-  const [browsers, setBrowsers] = useState<BrowserView[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [browserFilter, setBrowserFilter] = useState('all');
@@ -93,9 +96,8 @@ export default function BrowserSessionsPage() {
 
   const [recordTarget, setRecordTarget] = useState<BrowserSessionView | null>(null);
   const [recordName, setRecordName] = useState('');
-  const [recording, setRecording] = useState(false);
 
-  /** The range as the API wants it — resolved once, used by load and the summary. */
+  /** The range as the API wants it — resolved once, used by the session query and the summary. */
   const bounds = useMemo(() => {
     if (range === 'all') return {};
     if (range === 'custom') {
@@ -108,37 +110,26 @@ export default function BrowserSessionsPage() {
     return span ? { createdFrom: new Date(Date.now() - span).toISOString() } : {};
   }, [range, customFrom, customTo]);
 
-  const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const params = new URLSearchParams({ limit: '500' });
-      if (browserFilter !== 'all') params.set('browserId', browserFilter);
-      if (statusFilter !== 'all') params.set('status', statusFilter);
-      if (bounds.createdFrom) params.set('createdFrom', bounds.createdFrom);
-      if (bounds.createdTo) params.set('createdTo', bounds.createdTo);
-
-      const [sessionsRes, browsersRes] = await Promise.all([
-        fetch(`/api/browser/sessions?${params.toString()}`, { cache: 'no-store' }),
-        fetch('/api/browser/browsers', { cache: 'no-store' }),
-      ]);
-      if (!sessionsRes.ok) throw new Error('Failed to load sessions');
-      setSessions((await sessionsRes.json()).sessions ?? []);
-      setBrowsers(browsersRes.ok ? (await browsersRes.json()).browsers ?? [] : []);
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed to load sessions',
-      });
-    } finally {
-      setRefreshing(false);
-      setLoading(false);
-    }
+  const sessionsSearch = useMemo(() => {
+    const params = new URLSearchParams({ limit: '500' });
+    if (browserFilter !== 'all') params.set('browserId', browserFilter);
+    if (statusFilter !== 'all') params.set('status', statusFilter);
+    if (bounds.createdFrom) params.set('createdFrom', bounds.createdFrom);
+    if (bounds.createdTo) params.set('createdTo', bounds.createdTo);
+    return params.toString();
   }, [browserFilter, statusFilter, bounds]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  // A failed session list is told in a notification; without the browser list the Browser column shows no names.
+  const sessionsQuery = useBrowserSessions(sessionsSearch, { notifyOnError: 'Error' });
+  const browsersQuery = useBrowsers();
+  const sessions = useMemo(() => sessionsQuery.data ?? [], [sessionsQuery.data]);
+  const browsers = useMemo(() => browsersQuery.data ?? [], [browsersQuery.data]);
+  const loading = sessionsQuery.isPending || browsersQuery.isPending;
+  const refreshing = sessionsQuery.isFetching || browsersQuery.isFetching;
+  const closeSessionMutation = useCloseBrowserSession();
+  const deleteSessionMutation = useDeleteBrowserSession();
+  const recordFlow = useRecordBrowserFlow();
+  const load = () => Promise.all([sessionsQuery.refetch(), browsersQuery.refetch()]);
 
   const browserName = useCallback(
     (id: string) => browsers.find((item) => item.id === id)?.name ?? '—',
@@ -172,12 +163,8 @@ export default function BrowserSessionsPage() {
       confirmLabel: tSafe('closeSession.confirm'),
       tone: 'warning',
       action: async () => {
-        const res = await fetch(`/api/browser/sessions/${encodeURIComponent(session.sessionKey)}`, {
-          method: 'DELETE',
-        });
-        if (!res.ok) throw new Error(await res.text());
+        await closeSessionMutation.mutateAsync(session.sessionKey);
         notifications.show({ color: 'teal', title: 'Closed', message: session.sessionKey });
-        await load();
       },
     });
   }
@@ -187,28 +174,19 @@ export default function BrowserSessionsPage() {
       noun: tSafe('nouns.browserSession'),
       name: session.name || session.sessionKey,
       action: async () => {
-        const res = await fetch(`/api/browser/sessions/by-id/${session.id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error(await res.text());
+        await deleteSessionMutation.mutateAsync(session.id);
         notifications.show({ color: 'teal', title: 'Deleted', message: session.sessionKey });
-        await load();
       },
     });
   }
 
   async function recordAsFlow() {
     if (!recordTarget) return;
-    setRecording(true);
     try {
-      const res = await fetch('/api/browser/flows/record', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          sessionId: recordTarget.id,
-          name: recordName.trim() || `Flow from ${recordTarget.name || recordTarget.sessionKey}`,
-        }),
+      const data = await recordFlow.mutateAsync({
+        sessionId: recordTarget.id,
+        name: recordName.trim() || `Flow from ${recordTarget.name || recordTarget.sessionKey}`,
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Recording failed');
       notifications.show({
         color: 'teal',
         title: 'Flow recorded',
@@ -221,10 +199,8 @@ export default function BrowserSessionsPage() {
       notifications.show({
         color: 'red',
         title: 'Could not record',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
-    } finally {
-      setRecording(false);
     }
   }
 
@@ -389,7 +365,7 @@ export default function BrowserSessionsPage() {
             </Button>
           ) : undefined
         }
-        onRefresh={load}
+        onRefresh={() => void load()}
         refreshing={refreshing}
         rowActions={(s) => [
           {
@@ -484,7 +460,7 @@ export default function BrowserSessionsPage() {
         primaryAction={{
           label: 'Record flow',
           color: 'teal',
-          loading: recording,
+          loading: recordFlow.isPending,
           onClick: recordAsFlow,
         }}
         secondaryAction={{ label: 'Cancel', onClick: () => setRecordTarget(null) }}

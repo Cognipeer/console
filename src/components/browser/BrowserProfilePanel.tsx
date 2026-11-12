@@ -32,6 +32,8 @@ import {
 import { notifications } from '@mantine/notifications';
 import { useConfirm } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useAttachBrowserProfile, useClearBrowserProfile, useUpdateBrowser } from '@/lib/api/queries/browser';
 import {
   IconAlertTriangle,
   IconCookie,
@@ -58,15 +60,17 @@ export default function BrowserProfilePanel({ browser, onUpdated }: Props) {
   const { confirmAction } = useConfirm();
   const tSafe = useTranslations('common.confirm.dataSafety');
   const fileInput = useRef<HTMLInputElement>(null);
-  const [uploading, setUploading] = useState(false);
-  const [savingConfig, setSavingConfig] = useState(false);
+  const attachProfile = useAttachBrowserProfile();
+  const clearBrowserProfile = useClearBrowserProfile();
+  const updateBrowser = useUpdateBrowser();
+  const uploading = attachProfile.isPending;
+  const savingConfig = updateBrowser.isPending;
   const [config, setConfig] = useState<IBrowserSessionConfig>(browser.defaultSessionConfig ?? {});
 
   const profile = browser.storageStateMeta;
   const expiresInDays = daysUntil(profile?.earliestExpiry);
 
   async function handleFile(file: File) {
-    setUploading(true);
     try {
       const text = await file.text();
       let parsed: unknown;
@@ -76,35 +80,22 @@ export default function BrowserProfilePanel({ browser, onUpdated }: Props) {
         throw new Error('That file is not valid JSON. Export it with Playwright’s storageState, or from this console.');
       }
 
-      const res = await fetch(`/api/browser/browsers/${browser.id}/profile`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ storageState: parsed, fileName: file.name }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Upload failed');
+      const data = await attachProfile.mutateAsync({ browserId: browser.id, storageState: parsed, fileName: file.name });
 
       notifications.show({
         color: 'teal',
         title: 'Profile attached',
         message: `${data.profile.cookieCount} cookie(s) across ${data.profile.origins.length} origin(s). New sessions start signed in.`,
       });
-      await refresh();
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Could not attach profile',
-        message: err instanceof Error ? err.message : 'Upload failed',
+        message: errorMessage(err, 'Upload failed'),
       });
     } finally {
-      setUploading(false);
       if (fileInput.current) fileInput.current.value = '';
     }
-  }
-
-  async function refresh() {
-    const res = await fetch(`/api/browser/browsers/${browser.id}`, { cache: 'no-store' });
-    if (res.ok) onUpdated((await res.json()).browser);
   }
 
   function clearProfile() {
@@ -114,28 +105,19 @@ export default function BrowserProfilePanel({ browser, onUpdated }: Props) {
       confirmLabel: tSafe('clearProfile.confirm'),
       tone: 'danger',
       action: async () => {
-        const res = await fetch(`/api/browser/browsers/${browser.id}/profile`, { method: 'DELETE' });
-        if (!res.ok) throw new Error(await res.text());
+        await clearBrowserProfile.mutateAsync(browser.id);
         notifications.show({
           color: 'teal',
           title: 'Profile removed',
           message: 'New sessions will start signed out.',
         });
-        await refresh();
       },
     });
   }
 
   async function saveConfig() {
-    setSavingConfig(true);
     try {
-      const res = await fetch(`/api/browser/browsers/${browser.id}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ defaultSessionConfig: config }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Save failed');
+      const data = await updateBrowser.mutateAsync({ id: browser.id, defaultSessionConfig: config });
       onUpdated(data.browser);
       notifications.show({
         color: 'teal',
@@ -146,10 +128,8 @@ export default function BrowserProfilePanel({ browser, onUpdated }: Props) {
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Save failed',
+        message: errorMessage(err, 'Save failed'),
       });
-    } finally {
-      setSavingConfig(false);
     }
   }
 

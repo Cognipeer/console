@@ -11,7 +11,7 @@
  * compact strip at the bottom where they are still copyable.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Badge,
@@ -34,6 +34,7 @@ import {
 import StatTile from '@/components/common/ui/StatTile';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import BrowserProfilePanel from '@/components/browser/BrowserProfilePanel';
+import { useBrowserFlows } from '@/lib/api/queries/browser';
 import type { BrowserFlowView, BrowserSessionView, BrowserView } from '@/lib/services/browser';
 
 interface Props {
@@ -45,6 +46,7 @@ interface Props {
 
 const LIVE_STATUSES = new Set(['running', 'idle', 'pending']);
 const DAY_MS = 86_400_000;
+const EMPTY_FLOWS: BrowserFlowView[] = [];
 
 function statusVariant(status: string): 'active' | 'paused' | 'error' {
   if (status === 'running' || status === 'idle') return 'active';
@@ -80,18 +82,8 @@ export default function BrowserOverview({
   onNewSession,
 }: Props) {
   const router = useRouter();
-  const [flows, setFlows] = useState<BrowserFlowView[]>([]);
-
-  const loadFlows = useCallback(async () => {
-    const res = await fetch(`/api/browser/flows?browserId=${encodeURIComponent(browser.id)}`, {
-      cache: 'no-store',
-    });
-    if (res.ok) setFlows((await res.json()).flows ?? []);
-  }, [browser.id]);
-
-  useEffect(() => {
-    void loadFlows();
-  }, [loadFlows]);
+  // This browser's flows; a failed read just shows none.
+  const flows = useBrowserFlows({ browserId: browser.id }).data ?? EMPTY_FLOWS;
 
   const stats = useMemo(() => {
     const cutoff = Date.now() - 7 * DAY_MS;

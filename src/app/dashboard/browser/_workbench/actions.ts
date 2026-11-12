@@ -10,6 +10,8 @@
  * the first and stores the second, from one composer state.
  */
 
+import { describeSessionElement } from '@/lib/api/queries/browser';
+
 export const ACTION_TYPES = [
   { value: 'goto', label: 'Navigate' },
   { value: 'click', label: 'Click' },
@@ -137,14 +139,8 @@ export async function targetForNode(
   if (node.name) return target;
 
   try {
-    const res = await fetch(`/api/browser/sessions/${encodeURIComponent(sessionKey)}/describe`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ref: node.ref }),
-    });
-    if (!res.ok) return target;
-    const data = await res.json();
-    const described = (data.target ?? {}) as Record<string, string | number>;
+    const data = await describeSessionElement(sessionKey, node.ref);
+    const described = (data?.target ?? {}) as Record<string, string | number>;
     // The ref stays: the live action should still use the exact handle.
     return { ref: node.ref, ...described };
   } catch {

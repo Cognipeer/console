@@ -82,6 +82,15 @@ import OutputDialog, { EMPTY_OUTPUT } from './_components/OutputDialog';
 import ParametrizeDialog, { applyToAction } from './_components/ParametrizeDialog';
 import { useConfirm } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useBrowserFlow,
+  useBrowserFlowRun,
+  useBrowserFlowRuns,
+  useRunFlowSteps,
+  useStartFlowRun,
+  useUpdateBrowserFlow,
+} from '@/lib/api/queries/browser';
 
 /** A slug that is a valid identifier and not already taken. */
 function uniqueName(base: string, taken: string[]): string {
@@ -111,10 +120,15 @@ export default function BrowserFlowEditorPage() {
   const flowId = params?.flowId ?? '';
   const shell = useFillMain();
 
-  const [flow, setFlow] = useState<BrowserFlowView | null>(null);
-  const [runs, setRuns] = useState<BrowserFlowRunView[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  // A failed flow read is told in a notification and the page says the flow was not found.
+  const flowQuery = useBrowserFlow(flowId, { notifyOnError: 'Error' });
+  const runsQuery = useBrowserFlowRuns(flowId);
+  const flow = flowQuery.data ?? null;
+  const runs = useMemo(() => runsQuery.data ?? [], [runsQuery.data]);
+  const loading = flowQuery.isPending;
+  const { mutateAsync: saveFlow, isPending: saving } = useUpdateBrowserFlow(flowId);
+  const { mutateAsync: runFlowSteps } = useRunFlowSteps(flowId);
+  const { mutateAsync: startFlowRun, isPending: runStarting } = useStartFlowRun(flowId);
 
   const [tab, setTab] = useState('steps');
   const [cursor, setCursor] = useState(0);
@@ -125,7 +139,6 @@ export default function BrowserFlowEditorPage() {
   const [watchRunId, setWatchRunId] = useState<string | null>(null);
   const [runOpen, setRunOpen] = useState(false);
   const [runValues, setRunValues] = useState<Record<string, string>>({});
-  const [runStarting, setRunStarting] = useState(false);
 
   const [stepDialog, setStepDialog] = useState<{ open: boolean; index: number | null; initial: StepDraft }>(
     { open: false, index: null, initial: EMPTY_STEP },
@@ -169,56 +182,31 @@ export default function BrowserFlowEditorPage() {
 
   // ── Loading and saving ────────────────────────────────────
 
-  const loadRuns = useCallback(async () => {
-    const res = await fetch(`/api/browser/flow-runs?flowId=${encodeURIComponent(flowId)}&limit=25`, { cache: 'no-store' });
-    if (res.ok) setRuns((await res.json()).runs ?? []);
-  }, [flowId]);
+  const { refetch: refetchRuns } = runsQuery;
+  const loadRuns = useCallback(() => refetchRuns(), [refetchRuns]);
 
-  const load = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/browser/flows/${flowId}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error('Flow not found');
-      const { flow: loaded } = await res.json();
-      setFlow(loaded);
-      setCursor(loaded.steps?.length ?? 0);
-      await loadRuns();
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed to load flow',
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [flowId, loadRuns]);
-
-  useEffect(() => { if (flowId) void load(); }, [flowId, load]);
+  // A flow opens with the cursor after its last step.
+  const cursorSeededFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!flow || cursorSeededFor.current === flow.id) return;
+    cursorSeededFor.current = flow.id;
+    setCursor(flow.steps?.length ?? 0);
+  }, [flow]);
 
   const patch = useCallback(async (body: Record<string, unknown>, message?: string) => {
-    setSaving(true);
     try {
-      const res = await fetch(`/api/browser/flows/${flowId}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Save failed');
-      setFlow(data.flow);
+      const data = await saveFlow(body);
       if (message) notifications.show({ color: 'teal', title: 'Saved', message });
       return data.flow as BrowserFlowView;
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Could not save',
-        message: err instanceof Error ? err.message : 'Save failed',
+        message: errorMessage(err, 'Save failed'),
       });
       return null;
-    } finally {
-      setSaving(false);
     }
-  }, [flowId]);
+  }, [saveFlow]);
 
   // ── Authoring ─────────────────────────────────────────────
 
@@ -287,19 +275,13 @@ export default function BrowserFlowEditorPage() {
       const from = backwards ? 0 : executedThrough + 1;
       const carried = backwards ? {} : captures;
 
-      const res = await fetch(`/api/browser/flows/${flow.id}/steps/run`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          sessionKey,
-          from,
-          to: index + 1,
-          inputs: authValues,
-          captures: carried,
-        }),
+      const data = await runFlowSteps({
+        sessionKey,
+        from,
+        to: index + 1,
+        inputs: authValues,
+        captures: carried,
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Could not replay the steps');
 
       const results = (data.results ?? []) as IBrowserFlowStepResult[];
       setAuthResults((current) => {
@@ -309,7 +291,7 @@ export default function BrowserFlowEditorPage() {
       });
       setCaptures(data.captures ?? {});
 
-      const failedAt = data.failedStepIndex as number | undefined;
+      const failedAt = data.failedStepIndex;
       const reached = failedAt === undefined ? index : failedAt - 1;
       setExecutedThrough(reached);
       setCursor(reached + 1);
@@ -326,7 +308,7 @@ export default function BrowserFlowEditorPage() {
       notifications.show({
         color: 'red',
         title: 'Replay failed',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Could not replay the steps'),
       });
     } finally {
       setReplayingTo(null);
@@ -564,20 +546,13 @@ export default function BrowserFlowEditorPage() {
 
   async function startRun() {
     if (!flow) return;
-    setRunStarting(true);
     try {
-      const res = await fetch(`/api/browser/flows/${flow.id}/run/start`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          inputs: runValues,
-          // A failed run's session is otherwise closed immediately, and the
-          // whole point of watching it here is seeing the page it broke on.
-          keepSessionOpen: true,
-        }),
+      const data = await startFlowRun({
+        inputs: runValues,
+        // A failed run's session is otherwise closed immediately, and the
+        // whole point of watching it here is seeing the page it broke on.
+        keepSessionOpen: true,
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Could not start the run');
       setRunOpen(false);
       setSelectedRun(data.run);
       setWatchRunId(data.run.id);
@@ -587,28 +562,26 @@ export default function BrowserFlowEditorPage() {
       notifications.show({
         color: 'red',
         title: 'Could not start run',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Could not start the run'),
       });
-    } finally {
-      setRunStarting(false);
     }
   }
 
-  // Poll the run while it is in progress. Each new step result refreshes the
+  // Read the run while it is in progress. Each new step result refreshes the
   // preview and element list, so the run lands one step at a time rather than
   // appearing finished.
   const refreshFrom = stage.refreshFrom;
   const lastSteps = useRef(-1);
+  const watchedRun = useBrowserFlowRun(watchRunId).data;
   useEffect(() => {
-    if (!watchRunId) return;
-    let cancelled = false;
     lastSteps.current = -1;
+  }, [watchRunId]);
+  useEffect(() => {
+    const run = watchedRun;
+    if (!watchRunId || !run || run.id !== watchRunId) return;
+    let cancelled = false;
 
-    const tick = async () => {
-      const res = await fetch(`/api/browser/flow-runs/${watchRunId}`, { cache: 'no-store' });
-      if (!res.ok || cancelled) return;
-      const { run } = (await res.json()) as { run: BrowserFlowRunView };
-      if (cancelled) return;
+    const apply = async () => {
       setSelectedRun(run);
 
       const count = run.stepResults?.length ?? 0;
@@ -616,6 +589,7 @@ export default function BrowserFlowEditorPage() {
         lastSteps.current = count;
         await refreshFrom(run.sessionKey);
       }
+      if (cancelled) return;
 
       if (run.status !== 'running') {
         setWatchRunId(null);
@@ -629,11 +603,9 @@ export default function BrowserFlowEditorPage() {
         });
       }
     };
-
-    const timer = setInterval(() => { void tick(); }, 800);
-    void tick();
-    return () => { cancelled = true; clearInterval(timer); };
-  }, [watchRunId, refreshFrom, loadRuns]);
+    void apply();
+    return () => { cancelled = true; };
+  }, [watchedRun, watchRunId, refreshFrom, loadRuns]);
 
   // ── Derived ───────────────────────────────────────────────
 

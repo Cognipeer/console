@@ -6,8 +6,10 @@
  * the browser's own bucket for a session, the platform default for a browser.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { Loader, Select } from '@mantine/core';
+import { errorMessage } from '@/lib/api/client';
+import { useArtifactBuckets } from '@/lib/api/queries/browser';
 import { artifactBucketOptions, type ArtifactBucketRow } from './artifactBucket';
 
 interface ArtifactBucketSelectProps {
@@ -20,27 +22,14 @@ interface ArtifactBucketSelectProps {
 }
 
 export default function ArtifactBucketSelect({ value, onChange, emptyLabel, clearable = true }: ArtifactBucketSelectProps) {
-  const [buckets, setBuckets] = useState<ArtifactBucketRow[] | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch('/api/files/buckets', { cache: 'no-store' });
-        const body = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(body.error || 'Could not load the file buckets');
-        if (!cancelled) setBuckets(body.buckets ?? []);
-      } catch (err) {
-        if (cancelled) return;
-        setBuckets([]);
-        setLoadError(err instanceof Error ? err.message : 'Could not load the file buckets');
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const bucketsQuery = useArtifactBuckets();
+  // Until the read answers there is no list (null); a failed read leaves an empty one and says why.
+  const bucketRows = bucketsQuery.data;
+  const buckets = useMemo<ArtifactBucketRow[] | null>(
+    () => (bucketsQuery.isPending ? null : (bucketRows ?? [])),
+    [bucketsQuery.isPending, bucketRows],
+  );
+  const loadError = bucketsQuery.isError ? errorMessage(bucketsQuery.error, 'Could not load the file buckets') : null;
 
   const options = useMemo(() => artifactBucketOptions(buckets, value), [buckets, value]);
   const empty = buckets !== null && buckets.length === 0 && !loadError;
