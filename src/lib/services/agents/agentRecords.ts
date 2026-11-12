@@ -74,34 +74,33 @@ export async function createAgentRecord(
         owner?: IAgent['owner'];
     },
 ): Promise<IAgent> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const key = data.key ?? generateAgentKey(data.name);
 
-    const key = data.key ?? generateAgentKey(data.name);
+        // Verify uniqueness
+        const existing = await db.findAgentByKey(key, projectId);
+        if (existing) {
+            throw new Error(`Agent key "${key}" already exists`);
+        }
 
-    // Verify uniqueness
-    const existing = await db.findAgentByKey(key, projectId);
-    if (existing) {
-        throw new Error(`Agent key "${key}" already exists`);
-    }
+        const agent = await db.createAgent({
+            tenantId,
+            projectId,
+            key,
+            name: data.name,
+            description: data.description,
+            // Sandbox secrets are sealed here, the one write path every creator
+            // (dashboard, client API) goes through.
+            config: sealAgentConfigSecrets(migrateAgentReasoning(data.config), undefined),
+            status: data.status || 'active',
+            ...(data.metadata ? { metadata: data.metadata } : {}),
+            ...(data.owner ? { owner: data.owner } : {}),
+            createdBy: userId,
+        });
 
-    const agent = await db.createAgent({
-        tenantId,
-        projectId,
-        key,
-        name: data.name,
-        description: data.description,
-        // Sandbox secrets are sealed here, the one write path every creator
-        // (dashboard, client API) goes through.
-        config: sealAgentConfigSecrets(migrateAgentReasoning(data.config), undefined),
-        status: data.status || 'active',
-        ...(data.metadata ? { metadata: data.metadata } : {}),
-        ...(data.owner ? { owner: data.owner } : {}),
-        createdBy: userId,
+        logger.info('Agent created', { key, projectId });
+        return agent;
     });
-
-    logger.info('Agent created', { key, projectId });
-    return agent;
 }
 
 export async function updateAgentRecord(
@@ -110,23 +109,23 @@ export async function updateAgentRecord(
     data: Partial<Omit<IAgent, 'tenantId' | 'key' | 'createdBy'>>,
     userId: string,
 ): Promise<IAgent | null> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    // Old Advanced-tab reasoning moves next to the model on every save.
-    if (data.config) data = { ...data, config: migrateAgentReasoning(data.config) };
-    if (data.config?.sandbox || data.config?.callback !== undefined) {
-        // `config` replaces the stored one wholesale; masked secret values
-        // must resolve against what is stored, not be saved as the mask —
-        // and a plaintext secret (sandbox secrets, the callback secret) must
-        // be sealed before it is written. A callback sent without a URL (or
-        // as `null`) is the way to remove it: the field is dropped here.
-        const current = await db.findAgentById(agentId);
-        data = { ...data, config: sealAgentConfigSecrets(data.config, current?.config) };
-    } else if (data.config) {
-        // The removed Execution settings a stored config may still carry go on save.
-        data = { ...data, config: stripLegacyExecutionConfig(data.config) };
-    }
-    return db.updateAgent(agentId, { ...data, updatedBy: userId });
+    return runWithTenantScope(tenantDbName, async (db) => {
+        // Old Advanced-tab reasoning moves next to the model on every save.
+        if (data.config) data = { ...data, config: migrateAgentReasoning(data.config) };
+        if (data.config?.sandbox || data.config?.callback !== undefined) {
+            // `config` replaces the stored one wholesale; masked secret values
+            // must resolve against what is stored, not be saved as the mask —
+            // and a plaintext secret (sandbox secrets, the callback secret) must
+            // be sealed before it is written. A callback sent without a URL (or
+            // as `null`) is the way to remove it: the field is dropped here.
+            const current = await db.findAgentById(agentId);
+            data = { ...data, config: sealAgentConfigSecrets(data.config, current?.config) };
+        } else if (data.config) {
+            // The removed Execution settings a stored config may still carry go on save.
+            data = { ...data, config: stripLegacyExecutionConfig(data.config) };
+        }
+        return db.updateAgent(agentId, { ...data, updatedBy: userId });
+    });
 }
 
 export async function deleteAgentRecord(
@@ -156,9 +155,9 @@ export async function getAgentById(
     tenantDbName: string,
     agentId: string,
 ): Promise<IAgent | null> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return withMigratedReasoning(await db.findAgentById(agentId));
+    return runWithTenantScope(tenantDbName, async (db) => {
+        return withMigratedReasoning(await db.findAgentById(agentId));
+    });
 }
 
 /**
@@ -173,11 +172,11 @@ export async function getAgentByKey(
     projectId?: string,
     options: { includeOwned?: boolean } = {},
 ): Promise<IAgent | null> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const agent = await db.findAgentByKey(key, projectId);
-    if (agent?.owner && !options.includeOwned) return null;
-    return withMigratedReasoning(agent);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const agent = await db.findAgentByKey(key, projectId);
+        if (agent?.owner && !options.includeOwned) return null;
+        return withMigratedReasoning(agent);
+    });
 }
 
 /** Read-side half of the `runtime.reasoning` migration (the save side is in create/update). */
@@ -192,9 +191,9 @@ export async function listAgents(
     // Hidden agents owned by a flow node are left out unless `owned` asks for them (see the provider's `listAgents`).
     filters?: { projectId?: string; status?: IAgent['status']; search?: string; owned?: 'include' | 'only'; ownerFlowId?: string },
 ): Promise<IAgent[]> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db.listAgents(filters);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        return db.listAgents(filters);
+    });
 }
 
 // ── Agent Publish & Versioning ───────────────────────────────────────
@@ -209,57 +208,56 @@ export async function publishAgent(
     userId: string,
     changelog?: string,
 ): Promise<IAgentVersion> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const agent = await db.findAgentById(agentId);
+        if (!agent) throw new Error(`Agent "${agentId}" not found`);
 
-    const agent = await db.findAgentById(agentId);
-    if (!agent) throw new Error(`Agent "${agentId}" not found`);
+        // Keep versioning monotonic even if agent.latestVersion was not persisted
+        // correctly in older SQLite writes.
+        const latestPublishedSnapshot = await db.findLatestAgentVersion(String(agent._id));
+        const latestKnownVersion = Math.max(
+          agent.latestVersion ?? 0,
+          agent.publishedVersion ?? 0,
+          latestPublishedSnapshot?.version ?? 0,
+        );
+        const nextVersion = latestKnownVersion + 1;
 
-    // Keep versioning monotonic even if agent.latestVersion was not persisted
-    // correctly in older SQLite writes.
-    const latestPublishedSnapshot = await db.findLatestAgentVersion(String(agent._id));
-    const latestKnownVersion = Math.max(
-      agent.latestVersion ?? 0,
-      agent.publishedVersion ?? 0,
-      latestPublishedSnapshot?.version ?? 0,
-    );
-    const nextVersion = latestKnownVersion + 1;
+        // An imported agent waits as a draft until someone reviews and publishes it, so
+        // publishing turns it on. An agent someone switched off stays inactive.
+        const status = agent.status === 'draft' ? 'active' : agent.status;
 
-    // An imported agent waits as a draft until someone reviews and publishes it, so
-    // publishing turns it on. An agent someone switched off stays inactive.
-    const status = agent.status === 'draft' ? 'active' : agent.status;
+        const version = await db.createAgentVersion({
+            tenantId: agent.tenantId,
+            projectId: agent.projectId,
+            agentId: String(agent._id),
+            agentKey: agent.key,
+            version: nextVersion,
+            snapshot: {
+                name: agent.name,
+                description: agent.description,
+                config: agent.config,
+                status,
+            },
+            changelog,
+            publishedBy: userId,
+        });
 
-    const version = await db.createAgentVersion({
-        tenantId: agent.tenantId,
-        projectId: agent.projectId,
-        agentId: String(agent._id),
-        agentKey: agent.key,
-        version: nextVersion,
-        snapshot: {
-            name: agent.name,
-            description: agent.description,
-            config: agent.config,
-            status,
-        },
-        changelog,
-        publishedBy: userId,
+        // Update agent with latest published version
+        await db.updateAgent(agentId, {
+            publishedVersion: nextVersion,
+            latestVersion: nextVersion,
+            ...(status !== agent.status ? { status } : {}),
+            updatedBy: userId,
+        });
+
+        logger.info('Agent published', {
+            agentId,
+            agentKey: agent.key,
+            version: nextVersion,
+        });
+
+        return version;
     });
-
-    // Update agent with latest published version
-    await db.updateAgent(agentId, {
-        publishedVersion: nextVersion,
-        latestVersion: nextVersion,
-        ...(status !== agent.status ? { status } : {}),
-        updatedBy: userId,
-    });
-
-    logger.info('Agent published', {
-        agentId,
-        agentKey: agent.key,
-        version: nextVersion,
-    });
-
-    return version;
 }
 
 export async function getAgentVersion(
@@ -267,9 +265,9 @@ export async function getAgentVersion(
     agentId: string,
     version: number,
 ): Promise<IAgentVersion | null> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db.findAgentVersion(agentId, version);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        return db.findAgentVersion(agentId, version);
+    });
 }
 
 export async function listAgentVersions(
@@ -277,9 +275,9 @@ export async function listAgentVersions(
     agentId: string,
     options?: { limit?: number; skip?: number },
 ): Promise<{ versions: IAgentVersion[]; total: number }> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db.listAgentVersions(agentId, options);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        return db.listAgentVersions(agentId, options);
+    });
 }
 
 /**
@@ -300,16 +298,16 @@ export async function resolveAgentVoiceVersion(params: {
     prefer: 'published' | 'draft';
 }): Promise<number | undefined> {
     if (params.prefer === 'draft') return undefined;
-    const db = await getDatabase();
-    await db.switchToTenant(params.tenantDbName);
-    const agent = await db.findAgentByKey(params.agentKey, params.projectId);
-    if (!agent) {
-        logger.warn('Voice version lookup: agent not found', { agentKey: params.agentKey });
-        return undefined;
-    }
-    if (!agent.publishedVersion) return undefined;
-    const snapshot = await db.findAgentVersion(String(agent._id), agent.publishedVersion);
-    return snapshot ? snapshot.version : undefined;
+    return runWithTenantScope(params.tenantDbName, async (db) => {
+        const agent = await db.findAgentByKey(params.agentKey, params.projectId);
+        if (!agent) {
+            logger.warn('Voice version lookup: agent not found', { agentKey: params.agentKey });
+            return undefined;
+        }
+        if (!agent.publishedVersion) return undefined;
+        const snapshot = await db.findAgentVersion(String(agent._id), agent.publishedVersion);
+        return snapshot ? snapshot.version : undefined;
+    });
 }
 
 // ── Model connection check ───────────────────────────────────────────

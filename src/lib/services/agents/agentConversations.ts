@@ -2,7 +2,7 @@
  * Agent conversation records: create, read, list and delete.
  */
 
-import { type IAgentSessionBudget, type IAgentConversation, getDatabase } from '@/lib/database';
+import { type IAgentSessionBudget, type IAgentConversation, runWithTenantScope } from '@/lib/database';
 import { agentSessionBudget, withSessionSpend } from './sessionBudget';
 import { normalizeStaleRunningStatus, normalizeStaleRunningStatuses } from './sessionRuntime';
 import { destroyConversationSandbox } from './agentSandboxTools';
@@ -35,22 +35,21 @@ export async function createConversation(
      */
     budget?: IAgentSessionBudget | null,
 ): Promise<IAgentConversation> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const sessionBudget = budget === undefined
+            ? agentSessionBudget((await db.findAgentByKey(agentKey, projectId))?.config)
+            : budget ?? undefined;
 
-    const sessionBudget = budget === undefined
-        ? agentSessionBudget((await db.findAgentByKey(agentKey, projectId))?.config)
-        : budget ?? undefined;
-
-    return db.createAgentConversation({
-        tenantId,
-        projectId,
-        agentKey,
-        title: title || 'New conversation',
-        messages: [],
-        ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
-        ...(sessionBudget ? { budget: sessionBudget, spentUsd: 0 } : {}),
-        createdBy: userId,
+        return db.createAgentConversation({
+            tenantId,
+            projectId,
+            agentKey,
+            title: title || 'New conversation',
+            messages: [],
+            ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
+            ...(sessionBudget ? { budget: sessionBudget, spentUsd: 0 } : {}),
+            createdBy: userId,
+        });
     });
 }
 
@@ -58,11 +57,11 @@ export async function getConversationById(
     tenantDbName: string,
     conversationId: string,
 ): Promise<IAgentConversation | null> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const conversation = await db.findAgentConversationById(conversationId);
-    // A "running" session whose turn died (process crash) reads as ended.
-    return conversation ? withSessionSpend(await normalizeStaleRunningStatus(db, conversation)) : null;
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const conversation = await db.findAgentConversationById(conversationId);
+        // A "running" session whose turn died (process crash) reads as ended.
+        return conversation ? withSessionSpend(await normalizeStaleRunningStatus(db, conversation)) : null;
+    });
 }
 
 export async function listConversations(
@@ -70,23 +69,23 @@ export async function listConversations(
     agentKey: string,
     filters?: { projectId?: string; limit?: number; skip?: number; createdBy?: string },
 ): Promise<IAgentConversation[]> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return normalizeStaleRunningStatuses(db, await db.listAgentConversations(agentKey, filters));
+    return runWithTenantScope(tenantDbName, async (db) => {
+        return normalizeStaleRunningStatuses(db, await db.listAgentConversations(agentKey, filters));
+    });
 }
 
 export async function deleteConversation(
     tenantDbName: string,
     conversationId: string,
 ): Promise<boolean> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    // A persistent agent sandbox belongs to its conversation and goes with it.
-    const conversation = await db.findAgentConversationById(conversationId);
-    if (conversation?.metadata?.sandbox) {
-        await destroyConversationSandbox({ tenantDbName, tenantId: conversation.tenantId, conversation });
-    }
-    // So do the files attached to it (object, markdown and row).
-    if (conversation) await deleteConversationFiles(tenantDbName, conversation);
-    return db.deleteAgentConversation(conversationId);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        // A persistent agent sandbox belongs to its conversation and goes with it.
+        const conversation = await db.findAgentConversationById(conversationId);
+        if (conversation?.metadata?.sandbox) {
+            await destroyConversationSandbox({ tenantDbName, tenantId: conversation.tenantId, conversation });
+        }
+        // So do the files attached to it (object, markdown and row).
+        if (conversation) await deleteConversationFiles(tenantDbName, conversation);
+        return db.deleteAgentConversation(conversationId);
+    });
 }
