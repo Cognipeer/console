@@ -1091,7 +1091,7 @@ export class AgentTracingService {
     try {
       logger.debug('Getting dashboard overview', { tenantDbName, filters });
 
-      return runWithTenantScope(tenantDbName, async (db) => {
+      return await runWithTenantScope(tenantDbName, async (db) => {
 
           const overview = await db.aggregateAgentTracingDashboard(filters, projectId);
           // Hidden agents a flow owns are not agents of their own: their rows are folded into one `Flow: <name>` row per flow.
