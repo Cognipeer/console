@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Button, Group, Loader, Paper, Stack, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
@@ -10,8 +10,21 @@ import { IconArrowLeft, IconPencil, IconPlayerPlay, IconTrash } from '@tabler/ic
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import CreateDefinitionModal from '@/components/analysis/CreateDefinitionModal';
-import type { AnalysisDefinitionView, AnalysisRunView, CalibrationQuestionView, CalibrationView, ModelOption } from '@/components/analysis/types';
+import type { AnalysisDefinitionView, AnalysisRunView, CalibrationQuestionView } from '@/components/analysis/types';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useAnalysisCalibration,
+  useAnalysisDefinition,
+  useAnalysisRuns,
+  useDeleteAnalysisDefinition,
+  useLlmModelOptions,
+  useRunAnalysisDefinition,
+  useSaveAnalysisDefinition,
+} from '@/lib/api/queries/analysis';
 import { isDecisionType, pct as pctOf } from '@/components/analysis/decisionUi';
+
+const NO_RUNS: AnalysisRunView[] = [];
+const NO_MODELS: Array<{ value: string; label: string }> = [];
 
 const RUN_STATUS_BADGE: Record<string, string> = {
   completed: 'ds-badge-teal', running: 'ds-badge-info', failed: 'ds-badge-err', pending: 'ds-badge', cancelled: 'ds-badge-warn',
@@ -47,63 +60,31 @@ export default function AnalysisDefinitionDetailPage() {
   const tq = useTranslations('common.confirm.qos');
   const params = useParams<{ id: string }>();
   const id = params?.id;
-  const [def, setDef] = useState<AnalysisDefinitionView | null>(null);
-  const [runs, setRuns] = useState<AnalysisRunView[]>([]);
-  const [models, setModels] = useState<ModelOption[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [notFound, setNotFound] = useState(false);
+  const defQuery = useAnalysisDefinition(id);
+  const def = defQuery.data ?? null;
+  const runsQuery = useAnalysisRuns(def?.key, Boolean(def));
+  const calibrationQuery = useAnalysisCalibration(def?.id, Boolean(def?.decisionModelKey));
+  const modelsQuery = useLlmModelOptions();
+  const runs = runsQuery.data ?? NO_RUNS;
+  const models = modelsQuery.data ?? NO_MODELS;
+  const calibration = calibrationQuery.data ?? null;
+  const loading = defQuery.isPending;
+  const runAnalysis = useRunAnalysisDefinition();
+  const saveDefinition = useSaveAnalysisDefinition();
+  const deleteDefinition = useDeleteAnalysisDefinition();
   const [running, setRunning] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const [calibration, setCalibration] = useState<CalibrationView | null>(null);
   const [applying, setApplying] = useState<string | null>(null);
-
-  const loadRuns = async (definitionKey: string) => {
-    const res = await fetch(`/api/analysis/runs?definitionKey=${encodeURIComponent(definitionKey)}`, { cache: 'no-store' });
-    if (res.ok) setRuns((await res.json()).runs ?? []);
-  };
-
-  const loadCalibration = async (defId: string) => {
-    const res = await fetch(`/api/analysis/definitions/${defId}/calibration`, { cache: 'no-store' });
-    if (res.ok) setCalibration((await res.json()).calibration ?? null);
-  };
-
-  const loadDef = async (): Promise<AnalysisDefinitionView | null> => {
-    if (!id) return null;
-    const res = await fetch(`/api/analysis/definitions/${id}`, { cache: 'no-store' });
-    if (res.status === 404) { setNotFound(true); return null; }
-    if (!res.ok) return null;
-    const d = (await res.json()).definition ?? null;
-    setDef(d);
-    return d;
-  };
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const d = await loadDef();
-        if (d) await loadRuns(d.key);
-        if (d?.decisionModelKey) await loadCalibration(d.id);
-        const mRes = await fetch('/api/models?category=llm', { cache: 'no-store' });
-        if (mRes.ok) setModels(((await mRes.json()).models ?? []).map((m: { key: string; name: string }) => ({ value: m.key, label: m.name })));
-      } finally {
-        setLoading(false);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
 
   const runNow = async () => {
     if (!def) return;
     setRunning(true);
     try {
-      const res = await fetch(`/api/analysis/definitions/${encodeURIComponent(def.key)}/run`, { method: 'POST' });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Run failed');
+      const data = await runAnalysis.mutateAsync({ definitionKey: def.key });
       notifications.show({ title: 'Run started', message: 'Analysis is running in the background.', color: 'teal' });
       if (data.run?.id) router.push(`/dashboard/analysis/runs/${data.run.id}`);
-      else await loadRuns(def.key);
     } catch (err) {
-      notifications.show({ title: 'Run failed', message: err instanceof Error ? err.message : 'Run failed', color: 'red' });
+      notifications.show({ title: 'Run failed', message: errorMessage(err, 'Run failed'), color: 'red' });
     } finally {
       setRunning(false);
     }
@@ -115,18 +96,10 @@ export default function AnalysisDefinitionDetailPage() {
     setApplying(q.key);
     try {
       const fieldSet = def.fieldSet.map((f) => (f.key === q.key ? { ...f, reviewBelow: q.suggestedThreshold as number } : f));
-      const res = await fetch(`/api/analysis/definitions/${def.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fieldSet }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Could not apply the threshold');
+      await saveDefinition.mutateAsync({ id: def.id, body: { fieldSet } });
       notifications.show({ title: 'Threshold updated', message: `${q.key} now flags answers below ${pctOf(q.suggestedThreshold)}.`, color: 'teal' });
-      const d = await loadDef();
-      if (d) await loadCalibration(d.id);
     } catch (err) {
-      notifications.show({ title: 'Apply failed', message: err instanceof Error ? err.message : 'Apply failed', color: 'red' });
+      notifications.show({ title: 'Apply failed', message: errorMessage(err, 'Apply failed'), color: 'red' });
     } finally {
       setApplying(null);
     }
@@ -140,8 +113,11 @@ export default function AnalysisDefinitionDetailPage() {
       type: 'analysis-definition',
       id: def.id,
       action: async () => {
-        const res = await fetch(`/api/analysis/definitions/${def.id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error(tq('deleteFailed'));
+        try {
+          await deleteDefinition.mutateAsync(def.id);
+        } catch {
+          throw new Error(tq('deleteFailed'));
+        }
       },
     });
     if (!done) return;
@@ -197,7 +173,7 @@ export default function AnalysisDefinitionDetailPage() {
   if (loading) {
     return <PageContainer><Group justify="center" mt={80}><Loader /></Group></PageContainer>;
   }
-  if (notFound || !def) {
+  if (!def) {
     return (
       <PageContainer>
         <PageHeader eyebrow="Operate · Analysis" title="Definition not found" actions={backButton} />
@@ -284,7 +260,6 @@ export default function AnalysisDefinitionDetailPage() {
         editing={def}
         models={models}
         onClose={() => setEditOpen(false)}
-        onCreated={(d) => { setDef(d); setEditOpen(false); }}
       />
 
 

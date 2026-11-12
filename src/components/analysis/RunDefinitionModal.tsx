@@ -21,7 +21,9 @@ import FormShell, {
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
-import type { AnalysisConversationView, AnalysisDefinitionView, RunEstimateView } from './types';
+import { errorMessage } from '@/lib/api/client';
+import { useAnalysisEstimate } from '@/lib/api/queries/analysis';
+import type { AnalysisConversationView, AnalysisDefinitionView } from './types';
 
 export type RunStrategy = 'all' | 'tag' | 'random' | 'unanalyzed' | 'keys' | 'changed';
 
@@ -83,15 +85,11 @@ export default function RunDefinitionModal({ opened, definition, conversations, 
   const [pickedKeys, setPickedKeys] = useState<string[]>([]);
   const [lookBackDays, setLookBackDays] = useState<number>(7);
   const [loading, setLoading] = useState(false);
-  const [estimate, setEstimate] = useState<RunEstimateView | null>(null);
-  const [estimateError, setEstimateError] = useState<string | null>(null);
-  const [estimating, setEstimating] = useState(false);
 
   // Start from the definition's source each time the modal opens.
   useEffect(() => {
     if (!opened) {
       setStrategy('all'); setTag(null); setSampleSize(50); setPickedKeys([]); setLoading(false);
-      setEstimate(null); setEstimateError(null); setEstimating(false);
       return;
     }
     setStrategy(isSessions ? 'changed' : 'all');
@@ -143,42 +141,22 @@ export default function RunDefinitionModal({ opened, definition, conversations, 
   const selectionComplete = (strategy !== 'tag' || !!tag) && (strategy !== 'keys' || pickedKeys.length > 0);
   const payloadKey = JSON.stringify({ selection, target });
 
-  // Debounced estimate of what this run would do and cost.
+  // Debounced estimate of what this run would do and cost: the payload is read once it has stopped changing.
+  const estimateActive = opened && !!definition && selectionComplete;
+  const [settledPayload, setSettledPayload] = useState<string | null>(null);
   useEffect(() => {
-    if (!opened || !definition || !selectionComplete) {
-      setEstimate(null); setEstimateError(null); setEstimating(false);
-      return;
+    if (!estimateActive) {
+      setSettledPayload(null);
+      return undefined;
     }
-    let cancelled = false;
-    setEstimating(true);
-    const timer = setTimeout(async () => {
-      try {
-        const res = await fetch(`/api/analysis/definitions/${encodeURIComponent(definition.key)}/estimate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: payloadKey,
-        });
-        const data = await res.json().catch(() => ({}));
-        if (cancelled) return;
-        if (!res.ok) {
-          setEstimate(null);
-          setEstimateError(data.error || 'Could not estimate this run');
-        } else {
-          setEstimate(data.estimate ?? null);
-          setEstimateError(null);
-        }
-      } catch {
-        if (!cancelled) {
-          setEstimate(null);
-          setEstimateError('Could not estimate this run');
-        }
-      } finally {
-        if (!cancelled) setEstimating(false);
-      }
-    }, ESTIMATE_DEBOUNCE_MS);
-    return () => { cancelled = true; clearTimeout(timer); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opened, definition?.key, selectionComplete, payloadKey]);
+    const timer = setTimeout(() => setSettledPayload(payloadKey), ESTIMATE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [estimateActive, payloadKey]);
+  const estimateQuery = useAnalysisEstimate(definition?.key, estimateActive ? settledPayload : null);
+  const estimating = estimateActive && (settledPayload !== payloadKey || estimateQuery.isFetching);
+  const estimate = estimateActive && !estimateQuery.isError ? estimateQuery.data ?? null : null;
+  const estimateError =
+    estimateActive && estimateQuery.isError ? errorMessage(estimateQuery.error, 'Could not estimate this run') : null;
 
   const emptySelection = estimate?.conversations === 0 || (estimateError !== null && /no conversations/i.test(estimateError));
   const matchCount = isSessions ? estimate?.conversations ?? null : corpusMatchCount;
