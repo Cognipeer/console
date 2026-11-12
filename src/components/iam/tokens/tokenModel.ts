@@ -45,6 +45,10 @@ export interface ApiTokenRow {
   /** Whether the token carries an allowlist, for everybody (the badge); `allowedIpRangeCount` is its size. */
   ipRestricted?: boolean;
   allowedIpRangeCount?: number;
+  /** The MCP server ids the token is limited to, only for someone who may edit it (null = unrestricted or hidden). */
+  allowedMcpServerIds?: string[] | null;
+  /** Whether the token is limited to some MCP servers, for everybody. */
+  mcpRestricted?: boolean;
   /** The token is only served on behalf of a verified person (a user token must accompany every call). */
   requireUserToken?: boolean;
   exceedsTenantPolicy?: boolean;

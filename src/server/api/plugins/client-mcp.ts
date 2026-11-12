@@ -62,6 +62,7 @@ import {
 } from '../mcpTransport';
 import {
   MCP_PROTOCOL_VERSION,
+  PUBLIC_EXPOSURE_FORBIDDEN_ERROR,
   SERVER_VERSION,
   VALID_AUTH_TYPES,
   auditContextFor,
@@ -72,10 +73,14 @@ import {
   parseGuardrail,
   parseRemoteConfig,
   parseStdioConfig,
+  publishesPublicly,
   readMcpCommonCreateFields,
   readMcpCreateHead,
+  readMcpSecurityUpdate,
   readMcpUpstreamBody,
 } from './mcp-shared';
+
+import { mayUseSharedResource } from '@/lib/services/agents/sharedResourceAccess';
 
 const logger = createLogger('api:client-mcp');
 
@@ -86,6 +91,31 @@ const logger = createLogger('api:client-mcp');
 async function sharedServerByKey(tenantDbName: string, serverKey: string, projectId: string | undefined) {
   const server = await getMcpServerByKey(tenantDbName, serverKey, projectId);
   return server && !server.owner ? server : null;
+}
+
+/**
+ * A server the token may CALL (initialize, tools/list, tools/call, execute, SSE). A token limited to some servers
+ * serves only those, and the server's access list decides for the person the call is made for (the token's owner,
+ * or the delegated person), as it does for an agent run. A server the caller may not use answers like an unknown key.
+ */
+async function callableServerByKey(
+  ctx: Awaited<ReturnType<typeof getApiTokenContextForRequest>>,
+  serverKey: string,
+): Promise<IMcpServer | null> {
+  const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+  if (!server) return null;
+  const allowedIds = ctx.tokenRecord.allowedMcpServerIds;
+  if (Array.isArray(allowedIds) && allowedIds.length > 0 && !allowedIds.includes(String(server._id))) return null;
+  const mayUse = await mayUseSharedResource(
+    {
+      tenantDbName: ctx.tenantDbName,
+      tenantId: ctx.tenantId,
+      caller: { userId: ctx.user?._id?.toString(), tokenId: ctx.tokenRecord._id?.toString(), source: 'mcp' },
+      source: 'mcp',
+    },
+    { type: 'mcp-server', id: String(server._id ?? ''), key: server.key, projectId: server.projectId, access: server.access },
+  );
+  return mayUse ? server : null;
 }
 
 const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio'] as const;
@@ -311,7 +341,7 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
   const requiredProtocol = session && sessionId ? 'sse' : 'streamable-http';
 
   if (method === 'initialize') {
-    const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+    const server = await callableServerByKey(ctx, serverKey);
     if (!server) {
       return respond(jsonRpcError(id, -32001, 'MCP server not found'));
     }
@@ -338,7 +368,7 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
   }
 
   if (method === 'tools/list') {
-    const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+    const server = await callableServerByKey(ctx, serverKey);
     if (!server) {
       return respond(jsonRpcError(id, -32001, 'MCP server not found'));
     }
@@ -361,7 +391,7 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
       return respond(jsonRpcError(id, -32602, 'Invalid params: "name" is required'));
     }
 
-    const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+    const server = await callableServerByKey(ctx, serverKey);
     if (!server) {
       return respond(jsonRpcError(id, -32001, 'MCP server not found'));
     }
@@ -433,7 +463,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
-      const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      const server = await callableServerByKey(ctx, serverKey);
 
       if (!server) {
         return reply.code(404).send({ error: 'MCP server not found' });
@@ -500,7 +530,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
-      const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      const server = await callableServerByKey(ctx, serverKey);
 
       if (!server) {
         return reply.code(404).send({ error: 'MCP server not found' });
@@ -546,7 +576,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
-      const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      const server = await callableServerByKey(ctx, serverKey);
 
       if (!server) {
         return reply.code(404).send({ error: 'MCP server not found' });
@@ -605,6 +635,10 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
 
       if (stdioConfig?.executionMode === 'subprocess' && !(await hasStdioSubprocessPermission(request))) {
         return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
+      }
+      // Publishing at the public URL is admin-level, like a stdio subprocess.
+      if (publishesPublicly(body) && !(await hasStdioSubprocessPermission(request))) {
+        return reply.code(403).send({ error: PUBLIC_EXPOSURE_FORBIDDEN_ERROR });
       }
 
       const upstream = readMcpUpstreamBody(body, sourceType);
@@ -696,6 +730,15 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       if (nextStdioConfig?.executionMode === 'subprocess' && !(await hasStdioSubprocessPermission(request))) {
         return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
       }
+      if (publishesPublicly(body, existing) && !(await hasStdioSubprocessPermission(request))) {
+        return reply.code(403).send({ error: PUBLIC_EXPOSURE_FORBIDDEN_ERROR });
+      }
+
+      const security = await readMcpSecurityUpdate(body, {
+        tenantDbName: ctx.tenantDbName,
+        projectId: existing.projectId ?? ctx.projectId,
+      });
+      if ('error' in security) return reply.code(400).send({ error: security.error });
 
       const instructionsError = mcpInstructionsInputError(body.instructions);
       if (instructionsError) return reply.code(400).send({ error: instructionsError });
@@ -718,7 +761,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         aegis: nextAegis,
         guardrail: nextGuardrail,
         ...(nextAccess?.ok ? { access: nextAccess.access } : {}),
-        runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
+        ...security.fields,
         disabledTools: body.disabledTools as string[] | undefined,
         toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],
         toolDescriptions: body.toolDescriptions as UpdateMcpServerInput['toolDescriptions'],

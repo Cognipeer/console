@@ -332,15 +332,18 @@ function describeChange(row: IAuditLog): { summary: string; text?: AuditFeedText
       };
     }
     case TOKEN_RESTRICTIONS_EVENT: {
-      const after = (m.after ?? {}) as { expiresAt?: string | null; allowedIpRanges?: unknown; allowedIpRangeCount?: number; requireUserToken?: boolean };
-      const before = (m.before ?? {}) as { expiresAt?: string | null; allowedIpRanges?: unknown; allowedIpRangeCount?: number; requireUserToken?: boolean };
+      const after = (m.after ?? {}) as { expiresAt?: string | null; allowedIpRanges?: unknown; allowedIpRangeCount?: number; allowedMcpServerIds?: unknown; allowedMcpServerCount?: number; requireUserToken?: boolean };
+      const before = (m.before ?? {}) as { expiresAt?: string | null; allowedIpRanges?: unknown; allowedIpRangeCount?: number; allowedMcpServerIds?: unknown; allowedMcpServerCount?: number; requireUserToken?: boolean };
       const parts: string[] = [];
       const expiryChanged = before.expiresAt !== after.expiresAt;
       const ipChanged = (before.allowedIpRangeCount ?? 0) !== (after.allowedIpRangeCount ?? 0)
         || JSON.stringify(before.allowedIpRanges) !== JSON.stringify(after.allowedIpRanges);
+      const mcpChanged = (before.allowedMcpServerCount ?? 0) !== (after.allowedMcpServerCount ?? 0)
+        || JSON.stringify(before.allowedMcpServerIds ?? null) !== JSON.stringify(after.allowedMcpServerIds ?? null);
       if (expiryChanged) parts.push(`expiry ${before.expiresAt ? before.expiresAt.slice(0, 10) : 'none'} -> ${after.expiresAt ? after.expiresAt.slice(0, 10) : 'none'}`);
       if ((before.requireUserToken === true) !== (after.requireUserToken === true)) parts.push(`user token ${after.requireUserToken === true ? 'now required' : 'no longer required'}`);
       if (ipChanged) parts.push(`IP allowlist ${before.allowedIpRangeCount ?? 0} -> ${after.allowedIpRangeCount ?? 0} ranges`);
+      if (mcpChanged) parts.push(`MCP servers ${before.allowedMcpServerCount ?? 0} -> ${after.allowedMcpServerCount ?? 0}`);
       const label = str(m.label) ?? String(row.resourceId ?? '');
       return {
         summary: `Changed the restrictions of token ${str(m.label) ? `"${String(m.label)}"` : String(row.resourceId ?? '')}${parts.length ? ` (${parts.join(', ')})` : ''}`,

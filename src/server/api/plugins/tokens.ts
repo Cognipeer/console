@@ -43,6 +43,7 @@ import {
   presentApiToken,
   tokenExceedsPolicy,
   presentAllowedIpRanges,
+  presentAllowedMcpServerIds,
 } from '@/lib/services/apiTokens/tokenPolicy';
 import {
   getEffectiveServicePermission,
@@ -205,6 +206,7 @@ export async function editApiTokenForSession(args: {
   // Being allowed to edit a token is being allowed to manage it, so it can be revoked as well.
   const view = presentApiToken(updated, { policy, canDelete: true, canEdit: true });
   const restrictionsTouched = prepared.patch.expiresAt !== undefined || prepared.patch.allowedIpRanges !== undefined
+    || prepared.patch.allowedMcpServerIds !== undefined
     || prepared.patch.requireUserToken !== undefined;
   const change: TokenRestrictionChange | undefined = restrictionsTouched
     ? {
@@ -219,11 +221,12 @@ export async function editApiTokenForSession(args: {
   return { status: 200, body: view, change };
 }
 
-function restrictionSnapshot(token: { expiresAt?: Date | string | null; allowedIpRanges?: string[] | null; requireUserToken?: boolean }) {
+function restrictionSnapshot(token: { expiresAt?: Date | string | null; allowedIpRanges?: string[] | null; allowedMcpServerIds?: string[] | null; requireUserToken?: boolean }) {
   const expires = token.expiresAt ? new Date(token.expiresAt) : null;
   return {
     expiresAt: expires && Number.isFinite(expires.getTime()) ? expires.toISOString() : null,
     allowedIpRanges: presentAllowedIpRanges(token.allowedIpRanges),
+    allowedMcpServerIds: presentAllowedMcpServerIds(token.allowedMcpServerIds),
     requireUserToken: token.requireUserToken === true,
   };
 }
@@ -426,6 +429,7 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
         expiresAt?: unknown;
         expiresInDays?: unknown;
         allowedIpRanges?: unknown;
+        allowedMcpServerIds?: unknown;
         requireUserToken?: unknown;
       }>(request);
 
@@ -555,6 +559,7 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
         servicePermissions,
         ...(prepared.expiresAt ? { expiresAt: prepared.expiresAt } : {}),
         ...(prepared.allowedIpRanges ? { allowedIpRanges: prepared.allowedIpRanges } : {}),
+        ...(prepared.allowedMcpServerIds ? { allowedMcpServerIds: prepared.allowedMcpServerIds } : {}),
         ...(prepared.requireUserToken ? { requireUserToken: true } : {}),
       });
 
@@ -568,6 +573,7 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
         userId: apiToken.userId,
         expiresAt: prepared.expiresAt ? prepared.expiresAt.toISOString() : null,
         allowedIpRanges: presentAllowedIpRanges(apiToken.allowedIpRanges),
+        allowedMcpServerIds: presentAllowedMcpServerIds(apiToken.allowedMcpServerIds),
         requireUserToken: apiToken.requireUserToken === true,
         lastUsedAt: null,
         exceedsTenantPolicy: tokenExceedsPolicy(apiToken, prepared.policy),

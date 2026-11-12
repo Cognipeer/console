@@ -64,6 +64,7 @@ import {
 } from '../fastify-utils';
 import { withoutRestrictedMcpLogContent } from '../restrictedKnowledgeRequest';
 import {
+  PUBLIC_EXPOSURE_FORBIDDEN_ERROR,
   VALID_AUTH_TYPES,
   auditContextFor,
   parseAegis,
@@ -71,8 +72,10 @@ import {
   parseGuardrail,
   parseRemoteConfig,
   parseStdioConfig,
+  publishesPublicly,
   readMcpCommonCreateFields,
   readMcpCreateHead,
+  readMcpSecurityUpdate,
   readMcpUpstreamBody,
 } from './mcp-shared';
 
@@ -397,6 +400,10 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       if (stdioConfig?.executionMode === 'subprocess' && !(await requireStdioSubprocessPermission(request, session))) {
         return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
       }
+      // Publishing at the public URL is admin-level, like a stdio subprocess.
+      if (publishesPublicly(body) && !(await requireStdioSubprocessPermission(request, session))) {
+        return reply.code(403).send({ error: PUBLIC_EXPOSURE_FORBIDDEN_ERROR });
+      }
 
       const upstream = readMcpUpstreamBody(body, sourceType);
       if (!upstream.ok) {
@@ -498,10 +505,14 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { id } = request.params as { id: string };
-      if (!(await serverInProjectScope(session.tenantDbName, id, projectId))) {
+      const existingServer = await serverInProjectScope(session.tenantDbName, id, projectId);
+      if (!existingServer) {
         return reply.code(404).send({ error: 'MCP server not found' });
       }
       const body = readJsonBody<Record<string, unknown>>(request);
+
+      const security = await readMcpSecurityUpdate(body, { tenantDbName: session.tenantDbName, projectId });
+      if ('error' in security) return reply.code(400).send({ error: security.error });
 
       const authType = body.upstreamAuth && typeof body.upstreamAuth === 'object'
         ? (body.upstreamAuth as { type?: unknown }).type
@@ -567,6 +578,9 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       if (nextStdioConfig?.executionMode === 'subprocess' && !(await requireStdioSubprocessPermission(request, session))) {
         return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
       }
+      if (publishesPublicly(body, existingServer) && !(await requireStdioSubprocessPermission(request, session))) {
+        return reply.code(403).send({ error: PUBLIC_EXPOSURE_FORBIDDEN_ERROR });
+      }
 
       const nextInternalConfig = body.internalConfig !== undefined ? parseInternalConfig(body.internalConfig) : undefined;
       const sandboxRefusal = await sandboxMcpRefusal(request, projectId, nextInternalConfig);
@@ -595,7 +609,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         aegis: nextAegis,
         guardrail: nextGuardrail,
         ...(nextAccess?.ok ? { access: nextAccess.access } : {}),
-        runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,
+        ...security.fields,
         disabledTools: body.disabledTools as string[] | undefined,
         toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],
         toolDescriptions: body.toolDescriptions as UpdateMcpServerInput['toolDescriptions'],

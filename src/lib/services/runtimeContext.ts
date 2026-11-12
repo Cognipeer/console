@@ -271,6 +271,9 @@ export function resolveRuntimeHeaders(
   const allowedNames = policy.allowedNames?.length
     ? new Set(policy.allowedNames.map((n) => n.toLowerCase()))
     : null;
+  // An MCP server forwards only the header names it lists: "allow" with no
+  // names passes nothing (other target kinds keep their existing behaviour).
+  if (!allowedNames && targetKind === 'mcp') return undefined;
 
   const applied: Record<string, string> = {};
   for (const [name, value] of Object.entries(offered)) {
@@ -278,6 +281,32 @@ export function resolveRuntimeHeaders(
     applied[name] = value;
   }
   return Object.keys(applied).length > 0 ? applied : undefined;
+}
+
+/**
+ * Why a runtime-header policy sent for an MCP server cannot be saved, or
+ * `undefined` when it can. Accepting caller headers requires the list of
+ * header names to forward.
+ */
+export function mcpRuntimeHeaderPolicyError(input: unknown): string | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (typeof input !== 'object' || Array.isArray(input)) return 'runtimeHeaders must be an object or null';
+  const { allow, allowedNames } = input as { allow?: unknown; allowedNames?: unknown };
+  if (allow !== undefined && typeof allow !== 'boolean') return 'runtimeHeaders.allow must be a boolean';
+  if (allowedNames !== undefined
+    && (!Array.isArray(allowedNames) || allowedNames.some((name) => typeof name !== 'string'))) {
+    return 'runtimeHeaders.allowedNames must be an array of header names';
+  }
+  const names = ((allowedNames as string[] | undefined) ?? []).map((name) => name.trim()).filter(Boolean);
+  if (allow === true && names.length === 0) {
+    return 'runtimeHeaders.allowedNames must list at least one header name when caller headers are accepted';
+  }
+  if (names.length > MAX_HEADERS) return `runtimeHeaders.allowedNames accepts at most ${MAX_HEADERS} names`;
+  const invalid = names.find((name) => name.length > MAX_NAME_LENGTH
+    || !HEADER_NAME_RE.test(name)
+    || HEADER_BLOCKLIST.has(name.toLowerCase()));
+  if (invalid) return `"${invalid}" cannot be forwarded as a caller header`;
+  return undefined;
 }
 
 /** Log-safe description of applied runtime auth: header NAMES only, never values. */

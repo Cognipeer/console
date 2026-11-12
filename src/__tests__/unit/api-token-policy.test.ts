@@ -22,6 +22,7 @@ import {
   prepareTokenUpdate,
   presentApiToken,
   tokenExceedsPolicy,
+  validateAllowedMcpServerIds,
   type TokenPolicy,
 } from '@/lib/services/apiTokens/tokenPolicy';
 
@@ -212,6 +213,28 @@ describe('prepareTokenCreate', () => {
     expect(result).toMatchObject({ ok: true, expiresAt: days(30), allowedIpRanges: ['203.0.113.0/24', '203.0.113.7/32'] });
   });
 
+  it('takes the MCP server restriction from the body, deduped; absent / empty = unrestricted', async () => {
+    const some = await prepareTokenCreate({
+      body: { allowedMcpServerIds: ['a1', ' b2 ', 'a1'] },
+      tenantDbName: 't',
+      now: NOW,
+      reader: reader(NO_TOKEN_POLICY),
+    });
+    expect(some).toMatchObject({ ok: true, allowedMcpServerIds: ['a1', 'b2'] });
+    for (const allowedMcpServerIds of [undefined, null, []]) {
+      const none = await prepareTokenCreate({ body: { allowedMcpServerIds }, tenantDbName: 't', now: NOW, reader: reader(NO_TOKEN_POLICY) });
+      expect(none).toMatchObject({ ok: true, allowedMcpServerIds: null });
+    }
+  });
+
+  it('refuses a bad MCP server restriction', async () => {
+    for (const allowedMcpServerIds of ['a1', [1], [''], ['x'.repeat(65)], Array.from({ length: 101 }, (_, i) => `s${i}`)]) {
+      const result = await prepareTokenCreate({ body: { allowedMcpServerIds }, tenantDbName: 't', now: NOW, reader: reader(NO_TOKEN_POLICY) });
+      expect(result).toMatchObject({ ok: false, status: 400, body: { code: 'invalid_mcp_servers' } });
+    }
+    expect(validateAllowedMcpServerIds(Array.from({ length: 100 }, (_, i) => `s${i}`))).toMatchObject({ ok: true });
+  });
+
   it('refuses a missing expiry when the tenant requires one', async () => {
     const result = await prepareTokenCreate({ body: {}, tenantDbName: 't', now: NOW, reader: reader(policy(null, true)) });
     expect(result).toMatchObject({ ok: false, status: 400, body: { code: 'token_expiry_required' } });
@@ -271,6 +294,19 @@ describe('prepareTokenUpdate', () => {
       const result = await prepareTokenUpdate({ body: { allowedIpRanges }, tenantDbName: 't', token, now: NOW });
       expect(result).toMatchObject({ ok: true, patch: { allowedIpRanges: null } });
     }
+  });
+
+  it('sets and clears the MCP server restriction, and refuses a bad one', async () => {
+    expect(await prepareTokenUpdate({ body: { allowedMcpServerIds: ['a1', 'a1', 'b2'] }, tenantDbName: 't', token, now: NOW }))
+      .toMatchObject({ ok: true, patch: { allowedMcpServerIds: ['a1', 'b2'] } });
+    for (const allowedMcpServerIds of [null, []]) {
+      expect(await prepareTokenUpdate({ body: { allowedMcpServerIds }, tenantDbName: 't', token, now: NOW }))
+        .toMatchObject({ ok: true, patch: { allowedMcpServerIds: null } });
+    }
+    expect(await prepareTokenUpdate({ body: { label: 'CI token' }, tenantDbName: 't', token, now: NOW }))
+      .toEqual({ ok: true, patch: { label: 'CI token' }, policy: null });
+    expect(await prepareTokenUpdate({ body: { allowedMcpServerIds: [7] }, tenantDbName: 't', token, now: NOW }))
+      .toMatchObject({ ok: false, status: 400, body: { code: 'invalid_mcp_servers' } });
   });
 
   it('refuses a short label and a bad allowlist', async () => {
@@ -390,5 +426,15 @@ describe('presentApiToken', () => {
     const flagged = presentApiToken({ ...base, allowedIpRanges: [] } as never, { policy: policy(null, true), now: NOW });
     expect(flagged.exceedsTenantPolicy).toBe(true);
     expect(flagged.allowedIpRanges).toBeNull();
+  });
+
+  it('presents the MCP server restriction to editors only, and the flag to everybody', () => {
+    const token = { ...base, allowedMcpServerIds: ['a1', 'b2'] } as never;
+    const edit = presentApiToken(token, { policy: NO_TOKEN_POLICY, now: NOW, canEdit: true });
+    expect(edit).toMatchObject({ allowedMcpServerIds: ['a1', 'b2'], mcpRestricted: true });
+    const view = presentApiToken(token, { policy: NO_TOKEN_POLICY, now: NOW });
+    expect(view).toMatchObject({ allowedMcpServerIds: null, mcpRestricted: true });
+    const legacy = presentApiToken({ ...base, allowedMcpServerIds: [] } as never, { policy: NO_TOKEN_POLICY, now: NOW, canEdit: true });
+    expect(legacy).toMatchObject({ allowedMcpServerIds: null, mcpRestricted: false });
   });
 });

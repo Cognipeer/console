@@ -457,6 +457,7 @@ export type McpAuditAction =
   | 'exposure_change'
   | 'secrets_change'
   | 'tools_refresh'
+  | 'tools_review'
   | 'playground_execute';
 
 export interface IMcpAuditLog {

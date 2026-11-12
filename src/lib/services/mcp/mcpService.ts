@@ -49,6 +49,14 @@ import { boundClientMeta } from './clientMeta';
 import { normalizeMcpInstructions, type McpDiscovery } from './discovery';
 import { isMcpToolInputError, McpServerConfigError, McpUnknownToolError, McpUpstreamError } from './errors';
 import { responseLogSummaryOf, setResponseLogSummary } from './responseLog';
+import {
+  applyToolReviewDecision,
+  getToolReview,
+  isPinnedSource,
+  isToolAwaitingReview,
+  reconcileToolDefinitions,
+  type ToolDefinitionReconcileResult,
+} from './toolSecurity';
 import { buildOpenApiRequest } from './openApiRequest';
 import { specDeclaredParameters } from './openApiSpecParameters';
 import {
@@ -74,7 +82,7 @@ import {
   isConsoleIdentityRefusal,
   type ConsoleIdentityCaller,
 } from '@/lib/iam/consoleIdentity';
-import { isStdioRunnerEnabled, stdioCallTool, stdioDiscover } from './stdioRunner';
+import { isStdioRunnerEnabled, pinnedPackageSpecError, stdioCallTool, stdioDiscover } from './stdioRunner';
 import { mcpSandboxRunner } from '@/enterprise/registry';
 import { toGuardrailMode } from '@/lib/services/guardrail/hooks/contract';
 import {
@@ -252,6 +260,37 @@ export function resolveMcpGuardrailBinding(server: IMcpServer): McpGuardrailBind
   return { mode: mode === 'disabled' ? 'off' : mode, guardrailKey };
 }
 
+/**
+ * Materialise a built-in guardrail preset a binding names: the MCP protection
+ * preset is created the first time a server binds it. Imported lazily — this
+ * module is loaded inside the guardrail registry's import phase.
+ */
+async function ensureBoundGuardrailPreset(
+  tenantDbName: string,
+  tenantId: string,
+  guardrailKey: string | undefined,
+): Promise<void> {
+  if (!guardrailKey) return;
+  const engine = await import('@/lib/services/guardrail/hooks/engine');
+  if (guardrailKey === engine.MCP_PROTECTION_GUARDRAIL_KEY) {
+    await engine.ensureMcpProtectionGuardrail(tenantDbName, tenantId);
+  }
+}
+
+/** Audit fields describing what a discovery changed in a server's tool definitions. */
+function toolDefinitionAuditChanges(
+  trust: ToolDefinitionReconcileResult | undefined,
+): Record<string, { from?: unknown; to?: unknown }> {
+  if (!trust) return {};
+  const out: Record<string, { from?: unknown; to?: unknown }> = {};
+  if (trust.added.length) out.toolsAdded = { to: trust.added };
+  if (trust.removed.length) out.toolsRemoved = { from: trust.removed };
+  if (trust.changed.length) out.toolsChanged = { to: trust.changed };
+  if (trust.newlyPending.length) out.toolsAwaitingReview = { to: trust.newlyPending };
+  if (trust.flagged.length) out.toolsFlagged = { to: trust.flagged };
+  return out;
+}
+
 /** The two binding columns as they are WRITTEN — an absent key is omitted. */
 export interface McpGuardrailBindingColumns {
   aegis?: IMcpAegisConfig;
@@ -310,15 +349,15 @@ export function getDisabledToolNames(server: Pick<IMcpServer, 'metadata'>): stri
 }
 
 export function isMcpToolEnabled(server: IMcpServer, toolName: string): boolean {
-  return !getDisabledToolNames(server).includes(toolName);
+  return !getDisabledToolNames(server).includes(toolName)
+    && !isToolAwaitingReview(server.metadata as Record<string, unknown> | undefined, toolName);
 }
 
-/** Tools visible to callers (tools/list, client APIs, agents), overrides applied. */
+/** Tools visible to callers (tools/list, client APIs, agents), overrides applied. A tool waiting for review is not one of them. */
 export function listEnabledMcpTools(server: IMcpServer): IMcpTool[] {
   const disabled = new Set(getDisabledToolNames(server));
-  const enabled = disabled.size === 0
-    ? (server.tools ?? [])
-    : (server.tools ?? []).filter((tool) => !disabled.has(tool.name));
+  const pending = getToolReview(server.metadata as Record<string, unknown> | undefined);
+  const enabled = (server.tools ?? []).filter((tool) => !disabled.has(tool.name) && !(tool.name in pending));
   return applyToolOverrides(server, enabled);
 }
 
@@ -856,6 +895,8 @@ function validateCreateInput(input: CreateMcpServerInput): McpSourceType {
     if (!['npx', 'uvx'].includes(input.stdioConfig.runtime)) {
       throw new Error('stdioConfig.runtime must be "npx" or "uvx"');
     }
+    const specError = pinnedPackageSpecError(input.stdioConfig.packageName, input.stdioConfig.runtime);
+    if (specError) throw new McpServerConfigError(specError);
     if (input.stdioConfig.executionMode === 'sandbox') {
       if (!mcpSandboxRunner.current) {
         throw new Error('Sandbox execution requires the enterprise sandbox module');
@@ -1108,6 +1149,7 @@ export async function createMcpServer(
 ): Promise<IMcpServer> {
   const sourceType = validateCreateInput(input);
   if (input.upstreamAuth?.type === CONSOLE_IDENTITY_AUTH_TYPE) await prepareConsoleIdentityKey(tenantDbName);
+  await ensureBoundGuardrailPreset(tenantDbName, tenantId, input.guardrail?.guardrailKey);
 
   const key = await generateUniqueKey(tenantDbName, projectId, input.key?.trim() || input.name);
   const endpointSlug = await resolveEndpointSlug(tenantDbName, input.endpointSlug);
@@ -1192,6 +1234,17 @@ export async function createMcpServer(
   let metadata: Record<string, unknown> | undefined = internalMetadata ? { internal: internalMetadata } : compositeMetadata;
   if (discoveredInstructions) metadata = metadataWithInstructions(metadata, 'discoveredInstructions', discoveredInstructions);
   if (input.instructions) metadata = metadataWithInstructions(metadata, 'instructions', input.instructions);
+  // The person creating the server approves the definitions they are shown; a
+  // definition the scan rates high still waits for review.
+  if (isPinnedSource(sourceType)) {
+    metadata = reconcileToolDefinitions({
+      sourceType,
+      metadata,
+      previousTools: [],
+      nextTools: tools,
+      operatorChange: true,
+    }).metadata;
+  }
 
   const server = await db.createMcpServer({
     tenantId,
@@ -1229,12 +1282,21 @@ export async function createMcpServer(
       const { tools: discovered } = await discoverToolsForServer({ ...server, stdioConfig });
       await db.switchToTenant(tenantDbName);
       forgetLastErrorWrite(server);
+      const trusted = reconcileToolDefinitions({
+        sourceType,
+        metadata: server.metadata,
+        previousTools: [],
+        nextTools: discovered,
+        operatorChange: true,
+      }).metadata;
       await db.updateMcpServer(String(server._id), {
         tools: discovered,
         toolsDiscoveredAt: new Date(),
         lastError: null,
+        metadata: trusted,
       });
       server.tools = discovered;
+      server.metadata = trusted;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await db.updateMcpServer(String(server._id), {
@@ -1398,9 +1460,13 @@ export async function updateMcpServer(
   // Either binding column sent → both written (two-way projection, one
   // release); a body that names neither leaves both untouched.
   Object.assign(updateData, projectMcpGuardrailBinding(input, existing));
+  await ensureBoundGuardrailPreset(tenantDbName, existing.tenantId, input.guardrail?.guardrailKey);
   if (input.remoteConfig !== undefined) updateData.remoteConfig = input.remoteConfig;
   if (input.stdioConfig !== undefined) {
     updateData.stdioConfig = mergeStdioConfigUpdate(existing.stdioConfig, input.stdioConfig);
+    const merged = updateData.stdioConfig as IMcpStdioConfig;
+    const specError = pinnedPackageSpecError(merged.packageName ?? '', merged.runtime);
+    if (specError) throw new McpServerConfigError(specError);
   }
   // Runtime-header passthrough policy lives in the metadata blob (no schema
   // migration needed in either DB tree).
@@ -1633,6 +1699,47 @@ export async function updateMcpServer(
     );
   }
 
+  // ── Security settings (metadata-backed) ──────────────────────────────────
+  const currentMetadata = (): Record<string, unknown> =>
+    ({ ...((updateData.metadata as Record<string, unknown> | undefined) ?? existing.metadata ?? {}) });
+  const currentTools = (updateData.tools as IMcpTool[] | undefined) ?? existing.tools ?? [];
+  let toolTrust: ToolDefinitionReconcileResult | undefined;
+  // A source the operator just changed is approved by that edit; a definition
+  // the scan rates high still waits for review.
+  if (updateData.tools !== undefined) {
+    toolTrust = reconcileToolDefinitions({
+      sourceType,
+      metadata: currentMetadata(),
+      previousTools: existing.tools ?? [],
+      nextTools: currentTools,
+      operatorChange: true,
+    });
+    updateData.metadata = toolTrust.metadata;
+  }
+  if (input.toolChangePolicy !== undefined) {
+    updateData.metadata = { ...currentMetadata(), toolChangePolicy: input.toolChangePolicy };
+  }
+  let reviewDecision: { approved: string[]; rejected: string[] } | undefined;
+  if (input.toolReview !== undefined) {
+    const decided = applyToolReviewDecision(currentMetadata(), currentTools, input.toolReview);
+    updateData.metadata = decided.metadata;
+    reviewDecision = { approved: decided.approved, rejected: decided.rejected };
+  }
+  if (input.piiProtection !== undefined) {
+    const next = currentMetadata();
+    if (input.piiProtection) next.piiProtection = { policyKey: input.piiProtection.policyKey };
+    else delete next.piiProtection;
+    updateData.metadata = next;
+  }
+  if (input.piiPassthroughTools !== undefined) {
+    const known = new Set(currentTools.map((tool) => tool.name));
+    const names = [...new Set(input.piiPassthroughTools.filter((name) => known.has(name)))];
+    const next = currentMetadata();
+    if (names.length) next.piiPassthroughTools = names;
+    else delete next.piiPassthroughTools;
+    updateData.metadata = next;
+  }
+
   const updated = await db.updateMcpServer(serverId, updateData as Partial<IMcpServer>);
 
   // The guardrail bridge caches "which guardrail is this server bound to" for a
@@ -1666,6 +1773,30 @@ export async function updateMcpServer(
       userAgent: audit?.userAgent,
     });
 
+    if (reviewDecision && (reviewDecision.approved.length || reviewDecision.rejected.length)) {
+      void logMcpAudit(tenantDbName, {
+        tenantId: existing.tenantId,
+        projectId: existing.projectId,
+        serverId,
+        serverKey: existing.key,
+        action: 'tools_review',
+        changes: {
+          ...(reviewDecision.approved.length ? { toolsApproved: { to: reviewDecision.approved } } : {}),
+          ...(reviewDecision.rejected.length ? { toolsRejected: { to: reviewDecision.rejected } } : {}),
+        },
+        performedBy: audit?.performedBy ?? userId,
+        ipAddress: audit?.ipAddress,
+        userAgent: audit?.userAgent,
+      });
+    }
+    if (toolTrust?.newlyPending.length) {
+      logger.warn('MCP tool definitions wait for review', {
+        tenantId: existing.tenantId,
+        serverKey: existing.key,
+        tools: toolTrust.newlyPending,
+      });
+    }
+
     // Composites can't nest (assertMemberUsable rejects it), so this never
     // recurses — it only ever touches composites that include `existing`.
     if (sourceType !== 'composite') {
@@ -1690,6 +1821,7 @@ export async function refreshMcpServerTools(
 
   try {
     let updated: IMcpServer | null;
+    let definitionTrust: ToolDefinitionReconcileResult | undefined;
     if (resolveSourceType(server) === 'composite') {
       // Composite tools aren't "rediscovered" from an upstream — they're
       // rebuilt from the current state of each member (which also refreshes
@@ -1718,7 +1850,23 @@ export async function refreshMcpServerTools(
           instructions,
         );
       }
+      // What the upstream changed follows the server's change policy.
+      definitionTrust = reconcileToolDefinitions({
+        sourceType: resolveSourceType(server),
+        metadata: refreshUpdate.metadata ?? server.metadata,
+        previousTools: server.tools ?? [],
+        nextTools: tools,
+        operatorChange: false,
+      });
+      refreshUpdate.metadata = definitionTrust.metadata;
       updated = await db.updateMcpServer(serverId, refreshUpdate);
+      if (definitionTrust.newlyPending.length) {
+        logger.warn('MCP tool definitions changed upstream and wait for review', {
+          tenantId: server.tenantId,
+          serverKey: server.key,
+          tools: definitionTrust.newlyPending,
+        });
+      }
     }
     void logMcpAudit(tenantDbName, {
       tenantId: server.tenantId,
@@ -1726,7 +1874,10 @@ export async function refreshMcpServerTools(
       serverId,
       serverKey: server.key,
       action: 'tools_refresh',
-      changes: { toolCount: { from: server.tools?.length ?? 0, to: updated?.tools?.length ?? 0 } },
+      changes: {
+        toolCount: { from: server.tools?.length ?? 0, to: updated?.tools?.length ?? 0 },
+        ...toolDefinitionAuditChanges(definitionTrust),
+      },
       performedBy: audit?.performedBy ?? userId,
       ipAddress: audit?.ipAddress,
       userAgent: audit?.userAgent,
@@ -2339,6 +2490,7 @@ function isMcpPolicyOutcome(error: unknown): boolean {
   const message = error instanceof Error ? error.message : '';
   return isConsoleIdentityRefusal(error)
     || /^Tool ".*" is disabled on MCP server /.test(message)
+    || /^Tool ".*" is awaiting review on MCP server /.test(message)
     || message.startsWith('Blocked by Aegis shield')
     || message.startsWith('Response blocked by Aegis shield');
 }
@@ -2606,6 +2758,9 @@ export async function executeMcpToolLocal(
     throw new McpUnknownToolError();
   }
 
+  if (isToolAwaitingReview(server.metadata as Record<string, unknown> | undefined, realToolName)) {
+    throw new Error(`Tool "${toolName}" is awaiting review on MCP server "${server.name}"`);
+  }
   if (!isMcpToolEnabled(server, realToolName)) {
     throw new Error(`Tool "${toolName}" is disabled on MCP server "${server.name}"`);
   }

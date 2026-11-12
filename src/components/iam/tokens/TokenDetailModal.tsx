@@ -17,6 +17,7 @@ import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import ExpiryField from './ExpiryField';
 import IpAllowlistField from './IpAllowlistField';
+import McpServerField from './McpServerField';
 import TokenAccessSection from './TokenAccessSection';
 import TokenDelegationSection from './TokenDelegationSection';
 import TokenStatusBadges from './TokenStatusBadges';
@@ -64,6 +65,7 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
   const [label, setLabel] = useState('');
   const [expiry, setExpiry] = useState<ExpiryChoice>({ kind: 'keep' });
   const [ipText, setIpText] = useState('');
+  const [mcpServerIds, setMcpServerIds] = useState<string[]>([]);
   const [requireUserToken, setRequireUserToken] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,6 +76,7 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
     setLabel(token.label);
     setExpiry({ kind: 'keep' });
     setIpText(allowlistToText(token.allowedIpRanges));
+    setMcpServerIds(token.allowedMcpServerIds ?? []);
     setRequireUserToken(token.requireUserToken === true);
     setError(null);
     setSaving(false);
@@ -96,8 +99,9 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
   const labelChanged = label.trim() !== token.label;
   const expiryChanged = expiry.kind !== 'keep';
   const ipChanged = !sameRanges(allowlist.ranges, token.allowedIpRanges);
+  const mcpChanged = !sameRanges(mcpServerIds, token.allowedMcpServerIds);
   const requireChanged = requireUserToken !== (token.requireUserToken === true);
-  const dirty = labelChanged || expiryChanged || ipChanged || requireChanged;
+  const dirty = labelChanged || expiryChanged || ipChanged || mcpChanged || requireChanged;
   const canSave = canEdit && dirty && labelValid && !expiryError && ipValid;
 
   const save = async () => {
@@ -106,6 +110,7 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
     if (labelChanged) body.label = label.trim();
     if (expiryChanged) Object.assign(body, expiryPayload(expiry, 'edit'));
     if (ipChanged) body.allowedIpRanges = allowlist.ranges;
+    if (mcpChanged) body.allowedMcpServerIds = mcpServerIds;
     if (requireChanged) body.requireUserToken = requireUserToken;
 
     setSaving(true);
@@ -159,6 +164,14 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
             token.allowedIpRanges && token.allowedIpRanges.length > 0
               ? t(token.allowedIpRanges.length === 1 ? 'network.countOne' : 'network.countMany', { count: token.allowedIpRanges.length })
               : t('detail.summary.anyAddress')
+          }
+        />
+        <SummaryKV
+          label="MCP servers"
+          value={
+            token.allowedMcpServerIds && token.allowedMcpServerIds.length > 0
+              ? `${token.allowedMcpServerIds.length} MCP server${token.allowedMcpServerIds.length === 1 ? '' : 's'}`
+              : token.mcpRestricted ? 'Limited' : 'All MCP servers'
           }
         />
         <SummaryKV
@@ -239,7 +252,11 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
         <IpAllowlistField text={ipText} onChange={setIpText} policy={policy} disabled={!canEdit} />
       </FormSection>
 
-      <FormSection number={4} title={t('userToken.title')} description={t('userToken.description')}>
+      <FormSection number={4} title="MCP servers" description="Limit this token to specific MCP servers. Leave empty to allow all of them.">
+        <McpServerField value={mcpServerIds} onChange={setMcpServerIds} disabled={!canEdit} />
+      </FormSection>
+
+      <FormSection number={5} title={t('userToken.title')} description={t('userToken.description')}>
         <Switch
           checked={requireUserToken}
           onChange={(event) => setRequireUserToken(event.currentTarget.checked)}
@@ -251,12 +268,12 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
       </FormSection>
 
       {canSetUpDelegation && canEdit ? (
-        <FormSection number={5} title={t('delegation.title')} description={t('delegation.sectionDescription')} collapsible defaultOpen={false}>
+        <FormSection number={6} title={t('delegation.title')} description={t('delegation.sectionDescription')} collapsible defaultOpen={false}>
           <TokenDelegationSection tokenId={token._id} />
         </FormSection>
       ) : null}
 
-      <FormSection number={canSetUpDelegation && canEdit ? 5 : 4} title={t('access.title')} description={t('access.description')} collapsible defaultOpen>
+      <FormSection number={canSetUpDelegation && canEdit ? 7 : 6} title={t('access.title')} description={t('access.description')} collapsible defaultOpen>
         <TokenAccessSection tokenId={token._id} />
       </FormSection>
     </FormShell>

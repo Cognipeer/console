@@ -205,6 +205,45 @@ function invalidIpRanges(message: string, issues: IpRangeIssueDetail[]): TokenRe
   );
 }
 
+export const MAX_ALLOWED_MCP_SERVER_IDS = 100;
+export const MAX_MCP_SERVER_ID_LENGTH = 64;
+
+export type AllowedMcpServerIdsResult = { ok: true; ids: string[] | null } | { ok: false; message: string };
+
+/**
+ * The MCP server restriction of a token as a body field. Absent / null / [] = unrestricted (null). Anything but an
+ * array of non-empty strings (at most 64 characters each, at most 100 entries) is refused; duplicates collapse.
+ */
+export function validateAllowedMcpServerIds(input: unknown): AllowedMcpServerIdsResult {
+  if (input === null || input === undefined) return { ok: true, ids: null };
+  if (!Array.isArray(input)) {
+    return { ok: false, message: 'allowedMcpServerIds must be an array of MCP server ids' };
+  }
+  if (input.length > MAX_ALLOWED_MCP_SERVER_IDS) {
+    return { ok: false, message: `At most ${MAX_ALLOWED_MCP_SERVER_IDS} MCP servers are allowed per token` };
+  }
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (let index = 0; index < input.length; index += 1) {
+    const item: unknown = input[index];
+    if (typeof item !== 'string' || item.trim() === '') {
+      return { ok: false, message: `allowedMcpServerIds entry ${index + 1} must be a non-empty string` };
+    }
+    const id = item.trim();
+    if (id.length > MAX_MCP_SERVER_ID_LENGTH) {
+      return { ok: false, message: `allowedMcpServerIds entry ${index + 1} is longer than ${MAX_MCP_SERVER_ID_LENGTH} characters` };
+    }
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return { ok: true, ids: ids.length === 0 ? null : ids };
+}
+
+function invalidMcpServerIds(message: string): TokenRequestError {
+  return requestError(400, 'invalid_mcp_servers', message);
+}
+
 // ── policy loading ──────────────────────────────────────────────────────────
 
 /** The policy could not be read. Callers answer 503 rather than minting without the rule. */
@@ -264,6 +303,7 @@ export interface PreparedTokenCreate {
   ok: true;
   expiresAt: Date | null;
   allowedIpRanges: string[] | null;
+  allowedMcpServerIds: string[] | null;
   /** Calls with the token must act for a verified person (`X-Cognipeer-User-Token`). */
   requireUserToken: boolean;
   policy: TokenPolicy;
@@ -275,6 +315,7 @@ export interface TokenRestrictionBody {
   expiresAt?: unknown;
   expiresInDays?: unknown;
   allowedIpRanges?: unknown;
+  allowedMcpServerIds?: unknown;
   requireUserToken?: unknown;
 }
 
@@ -307,6 +348,9 @@ export async function prepareTokenCreate(args: {
   const ranges = validateAllowedIpRanges(args.body.allowedIpRanges);
   if (!ranges.ok) return { ok: false, ...invalidIpRanges(ranges.message, ranges.issues) };
 
+  const mcpServers = validateAllowedMcpServerIds(args.body.allowedMcpServerIds);
+  if (!mcpServers.ok) return { ok: false, ...invalidMcpServerIds(mcpServers.message) };
+
   const requireUserToken = parseRequireUserToken(args.body.requireUserToken);
   if (!requireUserToken.ok) return requireUserToken;
 
@@ -321,13 +365,14 @@ export async function prepareTokenCreate(args: {
   const violation = checkExpiryAgainstPolicy({ policy, expiresAt, createdAt: now });
   if (violation) return { ok: false, ...violation };
 
-  return { ok: true, expiresAt, allowedIpRanges: ranges.ranges, requireUserToken: requireUserToken.value === true, policy };
+  return { ok: true, expiresAt, allowedIpRanges: ranges.ranges, allowedMcpServerIds: mcpServers.ids, requireUserToken: requireUserToken.value === true, policy };
 }
 
 export interface TokenPatch {
   label?: string;
   expiresAt?: Date | null;
   allowedIpRanges?: string[] | null;
+  allowedMcpServerIds?: string[] | null;
   requireUserToken?: boolean;
 }
 
@@ -370,6 +415,12 @@ export async function prepareTokenUpdate(args: {
     const ranges = validateAllowedIpRanges(args.body.allowedIpRanges);
     if (!ranges.ok) return { ok: false, ...invalidIpRanges(ranges.message, ranges.issues) };
     patch.allowedIpRanges = ranges.ranges;
+  }
+
+  if (args.body.allowedMcpServerIds !== undefined) {
+    const mcpServers = validateAllowedMcpServerIds(args.body.allowedMcpServerIds);
+    if (!mcpServers.ok) return { ok: false, ...invalidMcpServerIds(mcpServers.message) };
+    patch.allowedMcpServerIds = mcpServers.ids;
   }
 
   const requireUserToken = parseRequireUserToken(args.body.requireUserToken);
@@ -421,6 +472,13 @@ export function presentAllowedIpRanges(value: unknown): string[] | null {
   return list.length === 0 ? null : list;
 }
 
+/** A stored MCP server restriction as a clean array for responses (null = unrestricted). */
+export function presentAllowedMcpServerIds(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const list = value.filter((item): item is string => typeof item === 'string' && item !== '');
+  return list.length === 0 ? null : list;
+}
+
 /**
  * The JSON a token list / detail / update answers with. Never contains the
  * secret or its hash. `lastUsedAt` repeats `lastUsed` under the name the IAM
@@ -444,6 +502,8 @@ export function presentApiToken(
     // The list of ranges (an internal network map: office, CI egress...) is for whoever may edit the token.
     // Everybody sees THAT a token is restricted, which is all a badge needs.
     allowedIpRanges: options.canEdit ? presentAllowedIpRanges(token.allowedIpRanges) : null,
+    allowedMcpServerIds: options.canEdit ? presentAllowedMcpServerIds(token.allowedMcpServerIds) : null,
+    mcpRestricted: (presentAllowedMcpServerIds(token.allowedMcpServerIds)?.length ?? 0) > 0,
     // Everybody sees THAT the token needs a user token (it is how it behaves, not a secret).
     requireUserToken: token.requireUserToken === true,
     ipRestricted: (presentAllowedIpRanges(token.allowedIpRanges)?.length ?? 0) > 0,

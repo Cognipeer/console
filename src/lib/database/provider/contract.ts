@@ -402,13 +402,13 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   findApiTokenById(id: string, tenantId: string): Promise<IApiToken | null>;
   /**
    * Edit the mutable fields of a token (label, expiry, IP allowlist). Only the
-   * keys present in `data` change; `expiresAt: null` / `allowedIpRanges: null`
+   * keys present in `data` change; `expiresAt: null` / `allowedIpRanges: null` / `allowedMcpServerIds: null`
    * clear the field. Null when the token does not exist in the tenant.
    */
   updateApiToken(
     id: string,
     tenantId: string,
-    data: { label?: string; expiresAt?: Date | null; allowedIpRanges?: string[] | null; requireUserToken?: boolean },
+    data: { label?: string; expiresAt?: Date | null; allowedIpRanges?: string[] | null; allowedMcpServerIds?: string[] | null; requireUserToken?: boolean },
   ): Promise<IApiToken | null>;
   deleteApiToken(id: string, userId: string): Promise<boolean>;
   deleteTenantApiToken(id: string, tenantId: string): Promise<boolean>;

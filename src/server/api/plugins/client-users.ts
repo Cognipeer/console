@@ -38,6 +38,7 @@ import { resolveChildAllowlist } from '@/lib/services/apiTokens/ipAllowlist';
 import {
   prepareTokenCreate,
   presentAllowedIpRanges,
+  presentAllowedMcpServerIds,
   tokenExceedsPolicy,
 } from '@/lib/services/apiTokens/tokenPolicy';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
@@ -215,6 +216,7 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         expiresAt?: unknown;
         expiresInDays?: unknown;
         allowedIpRanges?: unknown;
+        allowedMcpServerIds?: unknown;
         requireUserToken?: unknown;
       }>(request);
       if (!body.label || body.label.length < 3) {
@@ -302,6 +304,20 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      // MCP server scope never goes upward either: a token confined to some servers cannot mint one that reaches
+      // others. It inherits the caller's servers unless it asks for a subset.
+      const parentMcp = presentAllowedMcpServerIds(auth.tokenRecord.allowedMcpServerIds);
+      let mcpServerIds = prepared.allowedMcpServerIds;
+      if (parentMcp) {
+        if (!mcpServerIds) mcpServerIds = parentMcp;
+        else if (mcpServerIds.some((id) => !parentMcp.includes(id))) {
+          return reply.code(403).send({
+            error: 'allowedMcpServerIds must stay inside the servers of the token that creates it',
+            code: 'mcp_servers_exceed_minter',
+          });
+        }
+      }
+
       // The requirement never goes down either: a token that must act for a person cannot mint one that does not.
       if (auth.tokenRecord.requireUserToken === true && body.requireUserToken === false) {
         return reply.code(403).send({
@@ -323,6 +339,7 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         servicePermissions,
         ...(prepared.expiresAt ? { expiresAt: prepared.expiresAt } : {}),
         ...(allowlist.ranges ? { allowedIpRanges: allowlist.ranges } : {}),
+        ...(mcpServerIds ? { allowedMcpServerIds: mcpServerIds } : {}),
         ...(requireUserToken ? { requireUserToken: true } : {}),
       });
 
@@ -335,6 +352,7 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         userId: apiToken.userId,
         expiresAt: prepared.expiresAt ? prepared.expiresAt.toISOString() : null,
         allowedIpRanges: presentAllowedIpRanges(apiToken.allowedIpRanges),
+        allowedMcpServerIds: presentAllowedMcpServerIds(apiToken.allowedMcpServerIds),
         requireUserToken: apiToken.requireUserToken === true,
         lastUsedAt: null,
         exceedsTenantPolicy: tokenExceedsPolicy(apiToken, prepared.policy),

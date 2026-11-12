@@ -18,6 +18,7 @@ export function ApiTokenMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       delete storedTokenData.token;
       // An empty allowlist is stored as "no field", exactly like every token minted before the feature.
       if (!storedTokenData.allowedIpRanges?.length) delete storedTokenData.allowedIpRanges;
+      if (!storedTokenData.allowedMcpServerIds?.length) delete storedTokenData.allowedMcpServerIds;
       // Stored only when set, like the allowlist: a missing field is every token minted before the feature.
       if (!storedTokenData.requireUserToken) delete storedTokenData.requireUserToken;
 
@@ -106,7 +107,7 @@ export function ApiTokenMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
     async updateApiToken(
       id: string,
       tenantId: string,
-      data: { label?: string; expiresAt?: Date | null; allowedIpRanges?: string[] | null; requireUserToken?: boolean },
+      data: { label?: string; expiresAt?: Date | null; allowedIpRanges?: string[] | null; allowedMcpServerIds?: string[] | null; requireUserToken?: boolean },
     ): Promise<IApiToken | null> {
       if (!/^[0-9a-fA-F]{24}$/.test(id)) return null;
       const $set: Record<string, unknown> = {};
@@ -120,6 +121,10 @@ export function ApiTokenMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         // Cleared = field removed, i.e. exactly how a never-restricted token looks.
         if (data.allowedIpRanges?.length) $set.allowedIpRanges = data.allowedIpRanges;
         else $unset.allowedIpRanges = '';
+      }
+      if (data.allowedMcpServerIds !== undefined) {
+        if (data.allowedMcpServerIds?.length) $set.allowedMcpServerIds = data.allowedMcpServerIds;
+        else $unset.allowedMcpServerIds = '';
       }
       if (data.requireUserToken !== undefined) {
         if (data.requireUserToken) $set.requireUserToken = true;

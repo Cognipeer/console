@@ -810,10 +810,14 @@ function boundedAgentRunConfig(source: ConfigSource) {
   };
 }
 
-/** On unless `MCP_STDIO_ENABLED` is explicitly `false`, `0`, `no` or `off` (any case). */
-function stdioEnabled(source: ConfigSource): boolean {
+/**
+ * `MCP_STDIO_ENABLED` when set (`false`, `0`, `no` or `off`, any case, turn it
+ * off). Unset: on for a self-hosted deployment, off for a hosted (SaaS) one,
+ * where a subprocess would run on a host shared by tenants.
+ */
+function stdioEnabled(source: ConfigSource, onPrem: boolean): boolean {
   const raw = source.get('MCP_STDIO_ENABLED');
-  if (raw === undefined) return true;
+  if (raw === undefined || raw.trim() === '') return onPrem;
   return !['false', '0', 'no', 'off'].includes(raw.trim().toLowerCase());
 }
 
@@ -823,11 +827,11 @@ function stdioEnabled(source: ConfigSource): boolean {
  * negative or unreadable value takes the default, and 0 leaves the pool as the
  * only limit.
  */
-function stdioPoolConfig(source: ConfigSource) {
+function stdioPoolConfig(source: ConfigSource, onPrem: boolean) {
   const maxConcurrent = Math.max(int(source, 'MCP_STDIO_MAX_CONCURRENT', 8), 0);
   const share = int(source, 'MCP_STDIO_MAX_CONCURRENT_PER_TENANT', -1);
   return {
-    enabled: stdioEnabled(source),
+    enabled: stdioEnabled(source, onPrem),
     maxConcurrent,
     maxConcurrentPerTenant: share >= 0 ? share : Math.max(Math.floor(maxConcurrent / 2), 1),
   };
@@ -1380,7 +1384,7 @@ function buildConfig(source: ConfigSource): AppConfig {
         maxBufferedBytes: Math.max(int(source, 'MCP_SSE_MAX_BUFFERED_BYTES', 8 * 1024 * 1024), 0),
         keepaliveMs: Math.max(int(source, 'MCP_SSE_KEEPALIVE_MS', 25_000), 0),
       },
-      stdio: stdioPoolConfig(source),
+      stdio: stdioPoolConfig(source, deploymentMode === 'onprem'),
       public: {
         ...publicRateConfig(source),
         bodyLimitBytes: Math.max(int(source, 'MCP_PUBLIC_BODY_LIMIT_BYTES', 1024 * 1024), 1024),

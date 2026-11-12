@@ -168,6 +168,11 @@ function buildChildEnv(tenantEnv: Record<string, string>): NodeJS.ProcessEnv {
     ...tenantEnv,
     // MCP servers must not inherit interactive npm prompts.
     npm_config_yes: 'true',
+    // Installing the package runs no install scripts (npm) and builds no source
+    // distribution (uv): only the server's own entry point runs. Set after the
+    // tenant env so a server's env cannot turn either back on.
+    npm_config_ignore_scripts: 'true',
+    UV_NO_BUILD: '1',
     NO_COLOR: '1',
   };
 }
@@ -185,8 +190,8 @@ export function isStdioRunnerEnabled(): boolean {
   if (enabled && !cfg.deployment.isOnPrem && !warnedStdioOnSaas) {
     warnedStdioOnSaas = true;
     logger.warn(
-      'This hosted deployment runs stdio MCP servers as subprocesses of this process. '
-      + 'The default becomes off in a later release; set MCP_STDIO_ENABLED=false to disable it now.',
+      'This hosted deployment runs stdio MCP servers as subprocesses of this process because '
+      + 'MCP_STDIO_ENABLED is set; hosted deployments default to off.',
     );
   }
   return enabled;
@@ -217,6 +222,29 @@ function assertSafePackageSpec(packageName: string, runtime: 'npx' | 'uvx'): str
     );
   }
   return spec;
+}
+
+const NPM_PINNED_SPEC_RE =
+  /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*@\d+\.\d+\.\d+(?:-[0-9a-z.-]+)?(?:\+[0-9a-z.-]+)?$/i;
+const PYPI_PINNED_SPEC_RE =
+  /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?(?:\[[a-z0-9._,-]+\])?(?:==|@)\d+(?:\.\d+)*(?:(?:a|b|rc|\.?post|\.?dev)\d+)*(?:\+[a-z0-9.]+)?$/i;
+
+/**
+ * A stdio server is saved only with an exact package version: a range, a tag
+ * such as `latest`, or no version at all would run whatever is published next.
+ * Checked when a server's package is set (create, edit); a server saved before
+ * this rule keeps running until its package is edited.
+ */
+export function pinnedPackageSpecError(packageName: string, runtime: 'npx' | 'uvx'): string | undefined {
+  const spec = packageName.trim();
+  if (!SAFE_PACKAGE_SPEC_RE.test(spec)) {
+    return 'stdioConfig.packageName is not a valid npm/PyPI package identifier';
+  }
+  const pinned = runtime === 'uvx' ? PYPI_PINNED_SPEC_RE.test(spec) : NPM_PINNED_SPEC_RE.test(spec);
+  if (pinned) return undefined;
+  return runtime === 'uvx'
+    ? 'stdioConfig.packageName must pin an exact version, e.g. "mcp-server-fetch==2025.4.7"'
+    : 'stdioConfig.packageName must pin an exact version, e.g. "@scope/mcp-server@1.2.3"';
 }
 
 function buildCommand(config: IMcpStdioConfig): { command: string; args: string[] } {

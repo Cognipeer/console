@@ -421,7 +421,8 @@ export const TENANT_SCHEMA_SQL = `
     servicePermissions TEXT,
     lastUsed TEXT,
     createdAt TEXT NOT NULL,
-    expiresAt TEXT
+    expiresAt TEXT,
+    allowedMcpServerIds TEXT
   );
 
   -- Prompts
