@@ -8,9 +8,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return { getDatabase, runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(await getDatabase())) };
+});
 
 vi.mock('@/lib/services/providers/providerService', () => ({
   createProviderConfig: vi.fn(),
@@ -31,7 +32,7 @@ vi.mock('@/lib/providers', () => ({
 vi.mock('@cognipeer/to-markdown', () => ({
   convertToMarkdown: vi.fn().mockResolvedValue('## Markdown'),
 }));
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import {
   createProviderConfig,
   getProviderConfigByKey,
@@ -99,9 +100,9 @@ describe('listFileBuckets', () => {
     (listProviderConfigs as ReturnType<typeof vi.fn>).mockResolvedValue([makeProviderView()]);
   });
 
-  it('calls switchToTenant', async () => {
+  it('runs in the tenant scope', async () => {
     await listFileBuckets(TENANT_DB, TENANT_ID, PROJECT_ID);
-    expect(db.switchToTenant).toHaveBeenCalledWith(TENANT_DB);
+    expect(runWithTenantScope).toHaveBeenCalledWith(TENANT_DB, expect.any(Function));
   });
 
   it('returns buckets with serialized id field', async () => {

@@ -15,7 +15,10 @@ const mocks = vi.hoisted(() => ({
   convert: vi.fn(),
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return { getDatabase, runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(await getDatabase()) };
+});
 vi.mock('@/lib/services/providers/providerService', () => ({
   createProviderConfig: vi.fn(),
   getProviderConfigByKey: vi.fn(),

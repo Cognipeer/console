@@ -14,6 +14,7 @@ const hoisted = vi.hoisted(() => ({ db: undefined as unknown, call: vi.fn() }));
 vi.mock('@/lib/database', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   getDatabase: async () => hoisted.db,
+  runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(hoisted.db),
 }));
 vi.mock('@/lib/core/asyncTask', () => ({ fireAndForget: vi.fn() }));
 vi.mock('@/lib/quota/serviceQuota', () => ({ enforceServiceQuota: vi.fn() }));

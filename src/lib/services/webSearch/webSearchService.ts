@@ -12,7 +12,7 @@ import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailab
 import { createLogger } from '@/lib/core/logger';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { enforceServiceQuota } from '@/lib/quota/serviceQuota';
-import { getDatabase, type IWebSearchInstance, type IWebSearchRunLog } from '@/lib/database';
+import { runWithTenantScope, type IWebSearchInstance, type IWebSearchRunLog } from '@/lib/database';
 import {
   listProviderConfigs,
   loadProviderRuntimeData,
@@ -87,19 +87,14 @@ export async function hasActiveWebSearch(
   return providers.some((p) => p.status === 'active');
 }
 
-async function withTenantDb(tenantDbName: string) {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
-}
-
 export async function listWebSearchRunLogs(
   tenantDbName: string,
   searchKey: string,
   options?: { limit?: number; skip?: number; from?: Date; to?: Date },
 ): Promise<IWebSearchRunLog[]> {
-  const db = await withTenantDb(tenantDbName);
-  return db.listWebSearchRunLogs(searchKey, options);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.listWebSearchRunLogs(searchKey, options);
+  });
 }
 
 /** The USD of a managed search from its lease, or undefined (no lease, no quote, no known rate, a throw). */
@@ -131,12 +126,13 @@ function logRun(
     ...(costUsd !== undefined ? { costUsd } : {}),
   });
   fireAndForget('log-websearch-run', async () => {
-    const db = await withTenantDb(tenantDbName);
-    await db.createWebSearchRunLog({
-      ...entry,
-      userId: attribution.userId,
-      apiTokenId: attribution.apiTokenId,
-      actorType: attribution.actorType,
+    return runWithTenantScope(tenantDbName, async (db) => {
+      await db.createWebSearchRunLog({
+        ...entry,
+        userId: attribution.userId,
+        apiTokenId: attribution.apiTokenId,
+        actorType: attribution.actorType,
+      });
     });
   });
 }

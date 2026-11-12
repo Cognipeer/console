@@ -1,7 +1,7 @@
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import slugify from 'slugify';
 import {
-  getDatabase,
+  runWithTenantScope,
   type DatabaseProvider,
   type IProviderRecord,
   type IVectorIndexRecord,
@@ -61,12 +61,6 @@ function normalizeKeyCandidate(input: string | undefined): string {
   const fallback = input && input.trim().length > 0 ? input.trim() : FALLBACK_KEY;
   const slug = slugify(fallback, SLUG_OPTIONS);
   return slug.length > 0 ? slug : FALLBACK_KEY;
-}
-
-async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
 }
 
 /**
@@ -517,50 +511,51 @@ export async function createVectorIndex(
   // On a platform provider the tenant only has the indexes it created: nothing existing is listed or attached.
   if (platform && !createInProvider) throw new VectorAttachNotAvailableError();
 
-  const db = await withTenantDb(tenantDbName);
-  const key = await generateUniqueIndexKey(
-    db,
-    request.providerKey,
-    projectId,
-    request.key ?? request.name,
-  );
-
-  let handle: VectorIndexHandle;
-  if (createInProvider) {
-    if (request.dimension === undefined) {
-      throw new Error('dimension is required to create a new index in the provider.');
-    }
-    handle = await withResilience(
-      () => runtime.createIndex({
-        name: request.name,
-        dimension: request.dimension as number,
-        metric: request.metric,
-        metadata: request.metadata,
-      }),
-      { key: `vector-create:${request.providerKey}` },
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const key = await generateUniqueIndexKey(
+      db,
+      request.providerKey,
+      projectId,
+      request.key ?? request.name,
     );
-  } else {
-    handle = await attachExistingIndex(runtime, request.providerKey, request);
-  }
 
-  // Nothing the backend reports about the index is kept on a platform provider: only what the tenant supplied.
-  const metadata = composeMetadataForCreate(platform ? undefined : handle.metadata, request.metadata);
+    let handle: VectorIndexHandle;
+    if (createInProvider) {
+      if (request.dimension === undefined) {
+        throw new Error('dimension is required to create a new index in the provider.');
+      }
+      handle = await withResilience(
+        () => runtime.createIndex({
+          name: request.name,
+          dimension: request.dimension as number,
+          metric: request.metric,
+          metadata: request.metadata,
+        }),
+        { key: `vector-create:${request.providerKey}` },
+      );
+    } else {
+      handle = await attachExistingIndex(runtime, request.providerKey, request);
+    }
 
-  const created = await db.createVectorIndex({
-    tenantId,
-    projectId,
-    providerKey: request.providerKey,
-    key,
-    name: handle.name,
-    externalId: handle.externalId,
-    dimension: handle.dimension,
-    metric: handle.metric,
-    metadata,
-    createdBy: request.createdBy,
-    updatedBy: request.createdBy,
+    // Nothing the backend reports about the index is kept on a platform provider: only what the tenant supplied.
+    const metadata = composeMetadataForCreate(platform ? undefined : handle.metadata, request.metadata);
+
+    const created = await db.createVectorIndex({
+      tenantId,
+      projectId,
+      providerKey: request.providerKey,
+      key,
+      name: handle.name,
+      externalId: handle.externalId,
+      dimension: handle.dimension,
+      metric: handle.metric,
+      metadata,
+      createdBy: request.createdBy,
+      updatedBy: request.createdBy,
+    });
+
+    return toIndexView(created, platform);
   });
-
-  return toIndexView(created, platform);
 }
 
 export async function listVectorIndexes(
@@ -580,24 +575,26 @@ export async function listVectorIndexes(
     throw new Error('Vector provider configuration not found.');
   }
 
-  const db = await withTenantDb(tenantDbName);
-  const indexes = await db.listVectorIndexes({ providerKey, projectId });
-  return indexes.map((index) => toIndexView(index, Boolean(provider.platform)));
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const indexes = await db.listVectorIndexes({ providerKey, projectId });
+    return indexes.map((index) => toIndexView(index, Boolean(provider.platform)));
+  });
 }
 
 export async function listProjectVectorIndexes(
   tenantDbName: string,
   projectId: string,
 ): Promise<VectorIndexView[]> {
-  const db = await withTenantDb(tenantDbName);
-  const indexes = await db.listVectorIndexes({ projectId });
-  const isPlatform = new Map<string, boolean>();
-  for (const index of indexes) {
-    if (isPlatform.has(index.providerKey)) continue;
-    const provider = await db.findProviderByKey(index.tenantId, index.providerKey);
-    isPlatform.set(index.providerKey, Boolean(provider?.platform));
-  }
-  return indexes.map((index) => toIndexView(index, isPlatform.get(index.providerKey) === true));
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const indexes = await db.listVectorIndexes({ projectId });
+    const isPlatform = new Map<string, boolean>();
+    for (const index of indexes) {
+      if (isPlatform.has(index.providerKey)) continue;
+      const provider = await db.findProviderByKey(index.tenantId, index.providerKey);
+      isPlatform.set(index.providerKey, Boolean(provider?.platform));
+    }
+    return indexes.map((index) => toIndexView(index, isPlatform.get(index.providerKey) === true));
+  });
 }
 
 export async function getVectorIndex(
@@ -618,13 +615,14 @@ export async function getVectorIndex(
     throw new Error('Vector provider configuration not found.');
   }
 
-  const db = await withTenantDb(tenantDbName);
-  const index = await requireVectorIndexRecord(db, providerKey, key, projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const index = await requireVectorIndexRecord(db, providerKey, key, projectId);
 
-  return {
-    index: toIndexView(index, Boolean(provider.platform)),
-    provider: attachDriverCapabilities(provider),
-  };
+    return {
+      index: toIndexView(index, Boolean(provider.platform)),
+      provider: attachDriverCapabilities(provider),
+    };
+  });
 }
 
 /**
@@ -644,18 +642,19 @@ export async function getVectorIndexCount(
   key: string,
 ): Promise<number | undefined> {
   try {
-    const db = await withTenantDb(tenantDbName);
-    const index = await requireVectorIndexRecord(db, providerKey, key, projectId);
-    const { runtime, platform } = await buildRuntimeContext(tenantDbName, tenantId, providerKey, projectId);
+    return await runWithTenantScope(tenantDbName, async (db) => {
+      const index = await requireVectorIndexRecord(db, providerKey, key, projectId);
+      const { runtime, platform } = await buildRuntimeContext(tenantDbName, tenantId, providerKey, projectId);
 
-    const result = await withResilience(
-      () => runtime.listVectors(toRuntimeHandle(index), { limit: 1 }),
-      { key: `vector-count:${providerKey}` },
-    );
-    if (platform && typeof result.total === 'number') {
-      await reconcileStoredSize(db, tenantId, index, result.total);
-    }
-    return result.total;
+      const result = await withResilience(
+        () => runtime.listVectors(toRuntimeHandle(index), { limit: 1 }),
+        { key: `vector-count:${providerKey}` },
+      );
+      if (platform && typeof result.total === 'number') {
+        await reconcileStoredSize(db, tenantId, index, result.total);
+      }
+      return result.total;
+    });
   } catch (error) {
     logger.warn('Failed to fetch live vector count for index', {
       providerKey,
@@ -685,33 +684,34 @@ export async function updateVectorIndex(
     throw new Error('Vector provider configuration not found.');
   }
 
-  const db = await withTenantDb(tenantDbName);
-  const existing = await requireVectorIndexRecord(db, providerKey, key, projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const existing = await requireVectorIndexRecord(db, providerKey, key, projectId);
 
-  // Only these fields are ever written: the provider's identifier of the index (`externalId`) and the metered size
-  // are never taken from a request.
-  const payload: Partial<IVectorIndexRecord> = {
-    updatedBy: updates.updatedBy,
-  };
+    // Only these fields are ever written: the provider's identifier of the index (`externalId`) and the metered size
+    // are never taken from a request.
+    const payload: Partial<IVectorIndexRecord> = {
+      updatedBy: updates.updatedBy,
+    };
 
-  if (updates.name !== undefined) {
-    payload.name = updates.name;
-  }
+    if (updates.name !== undefined) {
+      payload.name = updates.name;
+    }
 
-  if (updates.metadata !== undefined) {
-    payload.metadata = mergeMetadataForUpdate(existing.metadata, updates.metadata);
-  }
+    if (updates.metadata !== undefined) {
+      payload.metadata = mergeMetadataForUpdate(existing.metadata, updates.metadata);
+    }
 
-  const updated = await db.updateVectorIndex(
-    getRecordId(existing),
-    payload,
-  );
+    const updated = await db.updateVectorIndex(
+      getRecordId(existing),
+      payload,
+    );
 
-  if (!updated) {
-    throw new Error('Failed to update vector index.');
-  }
+    if (!updated) {
+      throw new Error('Failed to update vector index.');
+    }
 
-  return toIndexView(updated, Boolean(provider.platform));
+    return toIndexView(updated, Boolean(provider.platform));
+  });
 }
 
 export async function deleteVectorIndex(
@@ -731,20 +731,21 @@ export async function deleteVectorIndex(
     { cleanup: true },
   );
 
-  const db = await withTenantDb(tenantDbName);
-  const index = await requireVectorIndexRecord(db, providerKey, key, projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const index = await requireVectorIndexRecord(db, providerKey, key, projectId);
 
-  try {
-    await withResilience(
-      () => runtime.deleteIndex({ externalId: index.externalId }),
-      { key: `vector-delete:${providerKey}` },
-    );
-  } catch (error) {
-    logger.warn('Failed to delete remote vector index. Continuing with local cleanup.', { error });
-  }
+    try {
+      await withResilience(
+        () => runtime.deleteIndex({ externalId: index.externalId }),
+        { key: `vector-delete:${providerKey}` },
+      );
+    } catch (error) {
+      logger.warn('Failed to delete remote vector index. Continuing with local cleanup.', { error });
+    }
 
-  await db.deleteVectorIndex(getRecordId(index));
-  if (platform && index.storedBytes) noteStoredBytes(tenantId, -index.storedBytes);
+    await db.deleteVectorIndex(getRecordId(index));
+    if (platform && index.storedBytes) noteStoredBytes(tenantId, -index.storedBytes);
+  });
 }
 
 export async function upsertVectors(
@@ -760,45 +761,46 @@ export async function upsertVectors(
     projectId,
   );
 
-  const db = await withTenantDb(tenantDbName);
-  const index = await resolveVectorIndexRecord(
-    db,
-    request.providerKey,
-    request,
-    projectId,
-  );
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const index = await resolveVectorIndexRecord(
+      db,
+      request.providerKey,
+      request,
+      projectId,
+    );
 
-  // One request names an id once: the last item for it wins.
-  const items = platform ? dedupeUpsertItems(request.vectors) : request.vectors;
-  validateVectors(index, items);
+    // One request names an id once: the last item for it wins.
+    const items = platform ? dedupeUpsertItems(request.vectors) : request.vectors;
+    validateVectors(index, items);
 
-  const write = () => withResilience(
-    () => runtime.upsertVectors(toRuntimeHandle(index), items),
-    { key: `vector-upsert:${request.providerKey}` },
-  );
-  if (!platform) {
-    await write();
-    return;
-  }
-
-  // What a platform provider stores counts against the plan storage: what the write adds is checked and held for it,
-  // then counted on the index. A new id adds its estimate and one vector; a replaced id adds the difference to what it
-  // was counted at (it may shrink the index) and no vector. Which ids the write replaces is asked first (unknown:
-  // every id counts as new, the high side). One index meters one write at a time: two that replace the same id
-  // would each take its old size off.
-  await meteredInTurn(`${tenantId}:${request.providerKey}:${index.key}`, async () => {
-    const existing = await findExistingSizes(runtime, index, items.map((item) => String(item.id))) ?? new Map<string, number>();
-    let bytes = 0;
-    let vectors = 0;
-    for (const item of items) {
-      const before = existing.get(String(item.id));
-      bytes += estimateUpsertBytes(index.dimension, [item]) - (before ?? 0);
-      if (before === undefined) vectors += 1;
-    }
-    const source: PlanLimitSource = request.updatedBy ? { type: 'user', id: request.updatedBy } : { type: 'system' };
-    await withStorageReservation({ tenantId, incomingBytes: bytes, source }, async () => {
+    const write = () => withResilience(
+      () => runtime.upsertVectors(toRuntimeHandle(index), items),
+      { key: `vector-upsert:${request.providerKey}` },
+    );
+    if (!platform) {
       await write();
-      await adjustStoredSize(db, tenantId, index, bytes, vectors);
+      return;
+    }
+
+    // What a platform provider stores counts against the plan storage: what the write adds is checked and held for it,
+    // then counted on the index. A new id adds its estimate and one vector; a replaced id adds the difference to what it
+    // was counted at (it may shrink the index) and no vector. Which ids the write replaces is asked first (unknown:
+    // every id counts as new, the high side). One index meters one write at a time: two that replace the same id
+    // would each take its old size off.
+    await meteredInTurn(`${tenantId}:${request.providerKey}:${index.key}`, async () => {
+      const existing = await findExistingSizes(runtime, index, items.map((item) => String(item.id))) ?? new Map<string, number>();
+      let bytes = 0;
+      let vectors = 0;
+      for (const item of items) {
+        const before = existing.get(String(item.id));
+        bytes += estimateUpsertBytes(index.dimension, [item]) - (before ?? 0);
+        if (before === undefined) vectors += 1;
+      }
+      const source: PlanLimitSource = request.updatedBy ? { type: 'user', id: request.updatedBy } : { type: 'system' };
+      await withStorageReservation({ tenantId, incomingBytes: bytes, source }, async () => {
+        await write();
+        await adjustStoredSize(db, tenantId, index, bytes, vectors);
+      });
     });
   });
 }
@@ -821,37 +823,38 @@ export async function deleteVectors(
     { cleanup: true },
   );
 
-  const db = await withTenantDb(tenantDbName);
-  const index = await resolveVectorIndexRecord(
-    db,
-    request.providerKey,
-    request,
-    projectId,
-  );
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const index = await resolveVectorIndexRecord(
+      db,
+      request.providerKey,
+      request,
+      projectId,
+    );
 
-  const ids = platform ? [...new Set(request.ids.map(String))] : request.ids;
-  const remove = () => withResilience(
-    () => runtime.deleteVectors(toRuntimeHandle(index), ids),
-    { key: `vector-delete-vectors:${request.providerKey}` },
-  );
-  if (!platform) {
-    await remove();
-    return;
-  }
-
-  await meteredInTurn(`${tenantId}:${request.providerKey}:${index.key}`, async () => {
-    // Only vectors that exist are metered out, each by its own size: made-up or repeated ids must not shrink the
-    // meter. Asked before the delete.
-    const existing = await findExistingSizes(runtime, index, ids);
-    await remove();
-    if (!existing) {
-      logger.debug('Vector delete not metered: the provider cannot confirm which ids exist', { indexKey: index.key });
+    const ids = platform ? [...new Set(request.ids.map(String))] : request.ids;
+    const remove = () => withResilience(
+      () => runtime.deleteVectors(toRuntimeHandle(index), ids),
+      { key: `vector-delete-vectors:${request.providerKey}` },
+    );
+    if (!platform) {
+      await remove();
       return;
     }
-    const vectors = Math.min(existing.size, index.storedVectors ?? 0);
-    let bytes = 0;
-    for (const size of existing.values()) bytes += size;
-    await adjustStoredSize(db, tenantId, index, -bytes, -vectors);
+
+    await meteredInTurn(`${tenantId}:${request.providerKey}:${index.key}`, async () => {
+      // Only vectors that exist are metered out, each by its own size: made-up or repeated ids must not shrink the
+      // meter. Asked before the delete.
+      const existing = await findExistingSizes(runtime, index, ids);
+      await remove();
+      if (!existing) {
+        logger.debug('Vector delete not metered: the provider cannot confirm which ids exist', { indexKey: index.key });
+        return;
+      }
+      const vectors = Math.min(existing.size, index.storedVectors ?? 0);
+      let bytes = 0;
+      for (const size of existing.values()) bytes += size;
+      await adjustStoredSize(db, tenantId, index, -bytes, -vectors);
+    });
   });
 }
 
@@ -1158,58 +1161,59 @@ export async function getVectorIndexQueryStats(
     tenantId?: string;
   },
 ): Promise<VectorIndexQueryStats> {
-  const db = await withTenantDb(tenantDbName);
-  const indexKey = await resolveStatsIndexKey(
-    db,
-    params.externalId,
-    params.providerKey,
-    projectId,
-  );
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const indexKey = await resolveStatsIndexKey(
+      db,
+      params.externalId,
+      params.providerKey,
+      projectId,
+    );
 
-  const [stats, vectorCount] = await Promise.all([
-    db.aggregateVectorQueryStats({
-      indexKey,
-      from: params.from,
-      to: params.to,
-    }),
-    params.providerKey && params.tenantId
-      ? getVectorIndexCount(tenantDbName, params.tenantId, projectId ?? '', params.providerKey, indexKey)
-      : Promise.resolve(undefined),
-  ]);
+    const [stats, vectorCount] = await Promise.all([
+      db.aggregateVectorQueryStats({
+        indexKey,
+        from: params.from,
+        to: params.to,
+      }),
+      params.providerKey && params.tenantId
+        ? getVectorIndexCount(tenantDbName, params.tenantId, projectId ?? '', params.providerKey, indexKey)
+        : Promise.resolve(undefined),
+    ]);
 
-  const byDate = new Map(stats.daily.map((row) => [row.date, row]));
-  const daily: VectorIndexQueryStats['daily'] = [];
-  const dayStart = new Date(params.from);
-  dayStart.setHours(0, 0, 0, 0);
+    const byDate = new Map(stats.daily.map((row) => [row.date, row]));
+    const daily: VectorIndexQueryStats['daily'] = [];
+    const dayStart = new Date(params.from);
+    dayStart.setHours(0, 0, 0, 0);
 
-  for (let offset = 0; offset < params.days; offset += 1) {
-    const day = new Date(dayStart);
-    day.setDate(dayStart.getDate() + offset);
-    const date = day.toISOString().substring(0, 10);
-    const row = byDate.get(date);
+    for (let offset = 0; offset < params.days; offset += 1) {
+      const day = new Date(dayStart);
+      day.setDate(dayStart.getDate() + offset);
+      const date = day.toISOString().substring(0, 10);
+      const row = byDate.get(date);
 
-    daily.push({
-      date,
-      queryCount: row?.queryCount ?? 0,
-      avgLatencyMs: Math.round(row?.avgLatencyMs ?? 0),
-      avgScore: parseFloat((row?.avgScore ?? 0).toFixed(4)),
-      filterCount: row?.filterCount ?? 0,
-    });
-  }
+      daily.push({
+        date,
+        queryCount: row?.queryCount ?? 0,
+        avgLatencyMs: Math.round(row?.avgLatencyMs ?? 0),
+        avgScore: parseFloat((row?.avgScore ?? 0).toFixed(4)),
+        filterCount: row?.filterCount ?? 0,
+      });
+    }
 
-  return {
-    daily,
-    totals: {
-      totalQueries: stats.totals.totalQueries,
-      avgLatencyMs: Math.round(stats.totals.avgLatencyMs ?? 0),
-      minLatencyMs: stats.totals.minLatencyMs ?? 0,
-      maxLatencyMs: stats.totals.maxLatencyMs ?? 0,
-      avgScore: parseFloat((stats.totals.avgScore ?? 0).toFixed(4)),
-    },
-    topKDistribution: stats.topKDistribution,
-    days: params.days,
-    vectorCount,
-  };
+    return {
+      daily,
+      totals: {
+        totalQueries: stats.totals.totalQueries,
+        avgLatencyMs: Math.round(stats.totals.avgLatencyMs ?? 0),
+        minLatencyMs: stats.totals.minLatencyMs ?? 0,
+        maxLatencyMs: stats.totals.maxLatencyMs ?? 0,
+        avgScore: parseFloat((stats.totals.avgScore ?? 0).toFixed(4)),
+      },
+      topKDistribution: stats.topKDistribution,
+      days: params.days,
+      vectorCount,
+    };
+  });
 }
 
 export async function queryVectorIndex(
@@ -1226,50 +1230,83 @@ export async function queryVectorIndex(
     projectId,
   );
 
-  const db = await withTenantDb(tenantDbName);
-  const index = await resolveVectorIndexRecord(
-    db,
-    request.providerKey,
-    request,
-    projectId,
-  );
-
-  // Upserts are dimension-checked but queries were not: a mismatch surfaced
-  // either as an opaque provider 500 or (on in-process providers) as silently
-  // meaningless scores. Fail with something the caller can act on instead.
-  if (Array.isArray(request.query?.vector) && request.query.vector.length !== index.dimension) {
-    throw new Error(
-      `Query vector has ${request.query.vector.length} values but index "${index.name}" expects ${index.dimension}. `
-      + 'The embedding model likely differs from the one the index was built with.',
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const index = await resolveVectorIndexRecord(
+      db,
+      request.providerKey,
+      request,
+      projectId,
     );
-  }
 
-  const filter = resolveVectorFilter(driver, request.query.filter);
+    // Upserts are dimension-checked but queries were not: a mismatch surfaced
+    // either as an opaque provider 500 or (on in-process providers) as silently
+    // meaningless scores. Fail with something the caller can act on instead.
+    if (Array.isArray(request.query?.vector) && request.query.vector.length !== index.dimension) {
+      throw new Error(
+        `Query vector has ${request.query.vector.length} values but index "${index.name}" expects ${index.dimension}. `
+        + 'The embedding model likely differs from the one the index was built with.',
+      );
+    }
 
-  const { text, hybrid, ...rest } = request.query;
-  const keywordsRequested = typeof text === 'string' && text.trim().length > 0;
-  // A driver that cannot fuse never sees `text`: leaving it on the input would
-  // let an adapter drop it silently, and a caller has no way to tell a fused
-  // result set from a dense one by looking at it.
-  const keywordsAccepted = keywordsRequested && supportsHybridSearch(driver);
-  const runtimeQuery: VectorQueryInput = {
-    ...rest,
-    filter,
-    ...(keywordsAccepted ? { text, hybrid } : {}),
-  };
+    const filter = resolveVectorFilter(driver, request.query.filter);
 
-  const startedAt = Date.now();
+    const { text, hybrid, ...rest } = request.query;
+    const keywordsRequested = typeof text === 'string' && text.trim().length > 0;
+    // A driver that cannot fuse never sees `text`: leaving it on the input would
+    // let an adapter drop it silently, and a caller has no way to tell a fused
+    // result set from a dense one by looking at it.
+    const keywordsAccepted = keywordsRequested && supportsHybridSearch(driver);
+    const runtimeQuery: VectorQueryInput = {
+      ...rest,
+      filter,
+      ...(keywordsAccepted ? { text, hybrid } : {}),
+    };
 
-  let result: VectorQueryResult;
-  try {
-    result = await withResilience(
-      () => runtime.queryVectors(toRuntimeHandle(index), runtimeQuery),
-      { key: `vector-query:${request.providerKey}`, ...(options?.signal ? { signal: options.signal } : {}) },
-    );
-  } catch (error) {
-    // A failed search still counts against the index's usage, and the rollup
-    // tracks it as an error so the failure rate stays visible. Off the critical
-    // path: bookkeeping must not delay the error the caller is waiting for.
+    const startedAt = Date.now();
+
+    let result: VectorQueryResult;
+    try {
+      result = await withResilience(
+        () => runtime.queryVectors(toRuntimeHandle(index), runtimeQuery),
+        { key: `vector-query:${request.providerKey}`, ...(options?.signal ? { signal: options.signal } : {}) },
+      );
+    } catch (error) {
+      // A failed search still counts against the index's usage, and the rollup
+      // tracks it as an error so the failure rate stays visible. Off the critical
+      // path: bookkeeping must not delay the error the caller is waiting for.
+      fireAndForget('vector-query-log', () => recordVectorQuery(db, {
+        tenantDbName,
+        tenantId,
+        projectId,
+        providerKey: request.providerKey,
+        index,
+        topK: request.query.topK,
+        filterApplied: Boolean(filter),
+        hybrid: false,
+        matches: [],
+        latencyMs: Date.now() - startedAt,
+        status: 'error',
+      }));
+      throw error;
+    }
+
+    // The adapter is the only party that knows whether the keyword channel really
+    // ran: an index may predate the searchable text field, or the store may need
+    // a full-text index nobody created. Trust its report, never the request.
+    const hybridRan = result.usage?.hybrid === true;
+
+    if (keywordsRequested && !keywordsAccepted) {
+      result = {
+        ...result,
+        usage: {
+          ...(result.usage ?? {}),
+          ...describeHybrid({ ran: false, reason: 'driver' }),
+        },
+      };
+    }
+
+    // Telemetry must not sit on the query's critical path — awaiting it added a
+    // full DB round trip (usage rollup + query log) to every search.
     fireAndForget('vector-query-log', () => recordVectorQuery(db, {
       tenantDbName,
       tenantId,
@@ -1278,50 +1315,18 @@ export async function queryVectorIndex(
       index,
       topK: request.query.topK,
       filterApplied: Boolean(filter),
-      hybrid: false,
-      matches: [],
+      hybrid: hybridRan,
+      matches: result.matches,
       latencyMs: Date.now() - startedAt,
-      status: 'error',
+      status: 'success',
     }));
-    throw error;
-  }
 
-  // The adapter is the only party that knows whether the keyword channel really
-  // ran: an index may predate the searchable text field, or the store may need
-  // a full-text index nobody created. Trust its report, never the request.
-  const hybridRan = result.usage?.hybrid === true;
-
-  if (keywordsRequested && !keywordsAccepted) {
-    result = {
-      ...result,
-      usage: {
-        ...(result.usage ?? {}),
-        ...describeHybrid({ ran: false, reason: 'driver' }),
-      },
-    };
-  }
-
-  // Telemetry must not sit on the query's critical path — awaiting it added a
-  // full DB round trip (usage rollup + query log) to every search.
-  fireAndForget('vector-query-log', () => recordVectorQuery(db, {
-    tenantDbName,
-    tenantId,
-    projectId,
-    providerKey: request.providerKey,
-    index,
-    topK: request.query.topK,
-    filterApplied: Boolean(filter),
-    hybrid: hybridRan,
-    matches: result.matches,
-    latencyMs: Date.now() - startedAt,
-    status: 'success',
-  }));
-
-  // On a platform provider the driver's notes can carry the backend's identifiers (index ARN, bucket): only an
-  // allowlist leaves.
-  if (platform) {
-    const usage = publicQueryUsage(result.usage);
-    return { ...result, ...(usage ? { usage } : {}) };
-  }
-  return result;
+    // On a platform provider the driver's notes can carry the backend's identifiers (index ARN, bucket): only an
+    // allowlist leaves.
+    if (platform) {
+      const usage = publicQueryUsage(result.usage);
+      return { ...result, ...(usage ? { usage } : {}) };
+    }
+    return result;
+  });
 }

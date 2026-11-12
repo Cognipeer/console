@@ -6,7 +6,7 @@
  * provider visibility `listWebSearchProviders` uses: assigned by projectId / projectIds, platform records included).
  */
 
-import { getDatabase, type IProviderRecord, type IWebSearchInstance } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider, type IProviderRecord, type IWebSearchInstance } from '@/lib/database';
 import { isManagedProviderRecord } from '@/enterprise/managed-credits';
 import { createLogger } from '@/lib/core/logger';
 import { PROVIDER_KEY_EXISTS, ProviderKeyExistsError, ProviderSettingsError } from '@/lib/providers/errors';
@@ -62,14 +62,6 @@ export interface UpdateWebSearchInstanceInput {
   updatedBy?: string;
 }
 
-async function withTenantDb(tenantDbName: string) {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
-}
-
-type TenantDb = Awaited<ReturnType<typeof withTenantDb>>;
-
 function isDuplicateKeyError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
   const code = (error as { code?: unknown }).code;
@@ -88,7 +80,7 @@ function assignedTo(provider: Pick<IProviderRecord, 'projectId' | 'projectIds'>,
 }
 
 /** Keys of the websearch providers visible in a project (every one when no project is given). */
-async function visibleProviderKeys(db: TenantDb, tenantId: string, projectId?: string): Promise<Set<string>> {
+async function visibleProviderKeys(db: DatabaseProvider, tenantId: string, projectId?: string): Promise<Set<string>> {
   const providers = await db.listProviders(tenantId, { type: 'websearch', ...(projectId ? { projectId } : {}) });
   return new Set(providers.map((p) => p.key));
 }
@@ -102,7 +94,7 @@ function isInProject(instance: Pick<IWebSearchInstance, 'projectId'>, projectId?
  * project (for a tenant-wide instance: visible somewhere is enough).
  */
 async function assertProviderUsable(
-  db: TenantDb,
+  db: DatabaseProvider,
   tenantId: string,
   providerKey: string,
   projectId?: string | null,
@@ -185,36 +177,37 @@ export async function createWebSearchInstance(
   }
   const projectId = input.projectId || null;
 
-  const db = await withTenantDb(tenantDbName);
-  if (await db.findWebSearchInstanceByKey(tenantId, input.key)) {
-    throw new WebSearchInstanceKeyExistsError(input.key);
-  }
-  // A search key resolves to an instance before a provider: an instance under a provider's key would hide it.
-  if ((await db.findProviderByKey(tenantId, input.key))?.type === 'websearch') {
-    throw new ProviderKeyExistsError(input.key);
-  }
-  const provider = await assertProviderUsable(db, tenantId, input.providerKey, projectId);
-  const settings = await validateBehavior(tenantDbName, tenantId, provider, projectId, input.settings);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    if (await db.findWebSearchInstanceByKey(tenantId, input.key)) {
+      throw new WebSearchInstanceKeyExistsError(input.key);
+    }
+    // A search key resolves to an instance before a provider: an instance under a provider's key would hide it.
+    if ((await db.findProviderByKey(tenantId, input.key))?.type === 'websearch') {
+      throw new ProviderKeyExistsError(input.key);
+    }
+    const provider = await assertProviderUsable(db, tenantId, input.providerKey, projectId);
+    const settings = await validateBehavior(tenantDbName, tenantId, provider, projectId, input.settings);
 
-  try {
-    // `platform` is never read from the input: only the hosting layer writes it, through the database API.
-    return await db.createWebSearchInstance({
-      tenantId,
-      projectId,
-      key: input.key,
-      name: input.name.trim(),
-      description: input.description,
-      providerKey: input.providerKey,
-      status: input.status ?? 'active',
-      settings,
-      metadata: input.metadata,
-      createdBy: input.createdBy,
-      updatedBy: input.createdBy,
-    });
-  } catch (error) {
-    if (isDuplicateKeyError(error)) throw new WebSearchInstanceKeyExistsError(input.key);
-    throw error;
-  }
+    try {
+      // `platform` is never read from the input: only the hosting layer writes it, through the database API.
+      return await db.createWebSearchInstance({
+        tenantId,
+        projectId,
+        key: input.key,
+        name: input.name.trim(),
+        description: input.description,
+        providerKey: input.providerKey,
+        status: input.status ?? 'active',
+        settings,
+        metadata: input.metadata,
+        createdBy: input.createdBy,
+        updatedBy: input.createdBy,
+      });
+    } catch (error) {
+      if (isDuplicateKeyError(error)) throw new WebSearchInstanceKeyExistsError(input.key);
+      throw error;
+    }
+  });
 }
 
 export async function updateWebSearchInstance(
@@ -223,31 +216,32 @@ export async function updateWebSearchInstance(
   key: string,
   input: UpdateWebSearchInstanceInput,
 ): Promise<IWebSearchInstance> {
-  const db = await withTenantDb(tenantDbName);
-  const existing = await db.findWebSearchInstanceByKey(tenantId, key);
-  if (!existing) throw new WebSearchInstanceNotFoundError(key);
-  assertNotPlatform(existing);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const existing = await db.findWebSearchInstanceByKey(tenantId, key);
+    if (!existing) throw new WebSearchInstanceNotFoundError(key);
+    assertNotPlatform(existing);
 
-  if (input.name !== undefined && input.name.trim() === '') {
-    throw new ProviderSettingsError('name', 'The instance name is required.');
-  }
-  const providerKey = input.providerKey ?? existing.providerKey;
-  const provider = await assertProviderUsable(db, tenantId, providerKey, existing.projectId);
-  const settings = input.settings !== undefined || providerKey !== existing.providerKey
-    ? await validateBehavior(tenantDbName, tenantId, provider, existing.projectId, input.settings ?? existing.settings)
-    : undefined;
+    if (input.name !== undefined && input.name.trim() === '') {
+      throw new ProviderSettingsError('name', 'The instance name is required.');
+    }
+    const providerKey = input.providerKey ?? existing.providerKey;
+    const provider = await assertProviderUsable(db, tenantId, providerKey, existing.projectId);
+    const settings = input.settings !== undefined || providerKey !== existing.providerKey
+      ? await validateBehavior(tenantDbName, tenantId, provider, existing.projectId, input.settings ?? existing.settings)
+      : undefined;
 
-  const updated = await db.updateWebSearchInstance(String(existing._id), {
-    ...(input.name !== undefined ? { name: input.name.trim() } : {}),
-    ...(input.description !== undefined ? { description: input.description } : {}),
-    ...(input.providerKey !== undefined ? { providerKey } : {}),
-    ...(input.status !== undefined ? { status: input.status } : {}),
-    ...(settings !== undefined ? { settings } : {}),
-    ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-    ...(input.updatedBy !== undefined ? { updatedBy: input.updatedBy } : {}),
+    const updated = await db.updateWebSearchInstance(String(existing._id), {
+      ...(input.name !== undefined ? { name: input.name.trim() } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.providerKey !== undefined ? { providerKey } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(settings !== undefined ? { settings } : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      ...(input.updatedBy !== undefined ? { updatedBy: input.updatedBy } : {}),
+    });
+    if (!updated) throw new WebSearchInstanceNotFoundError(key);
+    return updated;
   });
-  if (!updated) throw new WebSearchInstanceNotFoundError(key);
-  return updated;
 }
 
 export async function deleteWebSearchInstance(
@@ -255,11 +249,12 @@ export async function deleteWebSearchInstance(
   tenantId: string,
   key: string,
 ): Promise<boolean> {
-  const db = await withTenantDb(tenantDbName);
-  const existing = await db.findWebSearchInstanceByKey(tenantId, key);
-  if (!existing) return false;
-  assertNotPlatform(existing);
-  return db.deleteWebSearchInstance(String(existing._id));
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const existing = await db.findWebSearchInstanceByKey(tenantId, key);
+    if (!existing) return false;
+    assertNotPlatform(existing);
+    return db.deleteWebSearchInstance(String(existing._id));
+  });
 }
 
 /** The instance when it is visible in the project, else null. */
@@ -269,11 +264,12 @@ export async function getWebSearchInstance(
   key: string,
   projectId?: string,
 ): Promise<IWebSearchInstance | null> {
-  const db = await withTenantDb(tenantDbName);
-  const instance = await db.findWebSearchInstanceByKey(tenantId, key);
-  if (!instance || !isInProject(instance, projectId)) return null;
-  const providers = await visibleProviderKeys(db, tenantId, projectId);
-  return providers.has(instance.providerKey) ? instance : null;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const instance = await db.findWebSearchInstanceByKey(tenantId, key);
+    if (!instance || !isInProject(instance, projectId)) return null;
+    const providers = await visibleProviderKeys(db, tenantId, projectId);
+    return providers.has(instance.providerKey) ? instance : null;
+  });
 }
 
 /** Instances visible in the project (every tenant instance when no project is given), sorted by key. */
@@ -283,18 +279,19 @@ export async function listWebSearchInstances(
   projectId?: string,
   filters?: { providerKey?: string },
 ): Promise<IWebSearchInstance[]> {
-  const db = await withTenantDb(tenantDbName);
-  const [instances, providers] = await Promise.all([
-    db.listWebSearchInstances(tenantId, filters),
-    visibleProviderKeys(db, tenantId, projectId),
-  ]);
-  const visible = instances.filter((i) => isInProject(i, projectId) && providers.has(i.providerKey));
-  if (visible.length < instances.length) {
-    logger.debug('Web search instances hidden by project or provider visibility', {
-      tenantId,
-      projectId,
-      hidden: instances.length - visible.length,
-    });
-  }
-  return visible.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const [instances, providers] = await Promise.all([
+      db.listWebSearchInstances(tenantId, filters),
+      visibleProviderKeys(db, tenantId, projectId),
+    ]);
+    const visible = instances.filter((i) => isInProject(i, projectId) && providers.has(i.providerKey));
+    if (visible.length < instances.length) {
+      logger.debug('Web search instances hidden by project or provider visibility', {
+        tenantId,
+        projectId,
+        hidden: instances.length - visible.length,
+      });
+    }
+    return visible.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  });
 }

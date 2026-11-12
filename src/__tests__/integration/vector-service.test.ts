@@ -9,9 +9,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return { getDatabase, runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(await getDatabase())) };
+});
 
 vi.mock('@/lib/services/usage/usageEvents', () => ({
   recordUsageEvent: vi.fn(() => ({
@@ -44,7 +45,7 @@ vi.mock('@/lib/providers', async (importOriginal) => ({
   },
 }));
 
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import {
   loadProviderRuntimeData,
   listProviderConfigs,
@@ -188,10 +189,10 @@ describe('listVectorIndexes', () => {
     db.listVectorIndexes.mockResolvedValue([MOCK_INDEX_RECORD]);
   });
 
-  it('switches to tenant DB and calls db.listVectorIndexes', async () => {
+  it('runs in the tenant scope and calls db.listVectorIndexes', async () => {
     const result = await listVectorIndexes(TENANT_DB, TENANT_ID, PROJECT_ID, PROVIDER_KEY);
 
-    expect(db.switchToTenant).toHaveBeenCalledWith(TENANT_DB);
+    expect(runWithTenantScope).toHaveBeenCalledWith(TENANT_DB, expect.any(Function));
     expect(db.listVectorIndexes).toHaveBeenCalledWith(
       expect.objectContaining({ providerKey: PROVIDER_KEY }),
     );
