@@ -6,7 +6,6 @@
  */
 
 import { getFlowsHost, FlowsUnavailableError, type FlowAgentTurnActivity } from '@/enterprise/flows';
-import { getChannelToolsHost, isChannelToolName } from '@/enterprise/channel-tools';
 import type { AgentFlowReplyMeta } from '@/lib/flows/agentTypes';
 import { channelFromSource, getRoutingCaller, noteRoutingRun, runWithRoutingCaller, type RoutingCallerContext } from '@/lib/services/models/routingCallerContext';
 
@@ -14,32 +13,31 @@ import { createLogger } from '@/lib/core/logger';
 import { routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { agentEntityId } from './agentEntityId';
-import type { AgentInvokeResult as AgentSdkInvokeResult, Message as AgentSdkMessage, SmartAgentEvent as AgentSdkEvent, SubagentDef as AgentSdkSubagentDef, ToolInterface as AgentSdkToolInterface } from '@cognipeer/agent-sdk';
-import {
-    jsonSchemaToZod,
-    toolInputSchemaToZod,
-    resolveAgentRuntimeOptions,
-    resolveAgentSkillPolicy,
-    resolveTurnOutputSchema,
-} from './agentRuntimeConfig';
+import type {
+    AgentInvokeResult as AgentSdkInvokeResult,
+    Message as AgentSdkMessage,
+    SmartAgentEvent as AgentSdkEvent,
+    ToolInterface as AgentSdkToolInterface,
+} from '@cognipeer/agent-sdk';
+import { resolveAgentRuntimeOptions, resolveAgentSkillPolicy, resolveTurnOutputSchema } from './agentRuntimeConfig';
 import { buildAgentSkills } from './agentSkillService';
 import { buildAgentMemoryOption } from './agentMemoryAdapter';
 import { resolveAgentMemoryStore } from './agentMemoryStore';
-import type { IAgentConversationMessage, IAgentSubagent } from '@/lib/database/provider/types.domain';
+import type { IAgentConversationMessage } from '@/lib/database/provider/types.domain';
+import { buildPromptVariables } from './promptVariables';
+import { hasKnowledgeConfigured } from './agentKnowledgeBindings';
+import { applyServiceAvailability, assertAgentsEnabled } from './agentServiceAvailability';
 import {
-    buildPromptVariables,
-    renderPromptTemplate,
-    shouldRenderInlinePrompt,
-    type RenderedPrompt,
-    type ResolvedPromptVariables,
-} from './promptVariables';
-import { hasKnowledgeConfigured, type KnowledgeBindingSource } from './agentKnowledgeBindings';
-import { applyServiceAvailability, assertAgentsEnabled, filterChildSources } from './agentServiceAvailability';
-import { getDisabledServices } from '@/lib/services/availability/serviceAvailability';
-import { getDatabase, runWithTenantScope, type AgentResponseFormat, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentVersion, type IPiiProtectionConfig } from '@/lib/database';
-import { getModelByKey } from '@/lib/services/models/modelService';
-import { getRagModule } from '@/lib/services/rag/ragService';
-import { KnowledgeExposure, kbCallerFromRuntime, kbReaderOfFollowUp, noteRestrictedKnowledge, restrictedKnowledgeTagsOf, runWithKnowledgeExposure, type KbCaller } from '@/lib/services/rag/access';
+    getDatabase,
+    type AgentResponseFormat,
+    type IAgent,
+    type IAgentConfig,
+    type IAgentConversation,
+    type IAgentMessageAttachment,
+    type IAgentPendingAction,
+    type IAgentPendingActionResolution,
+} from '@/lib/database';
+import { KnowledgeExposure, kbReaderOfFollowUp, runWithKnowledgeExposure } from '@/lib/services/rag/access';
 // Imported BY PATH because the barrel does not re-export it. `resolveBindings`
 // is the ONE implementation of "which guardrails run on this hook"; a
 // hand-rolled legacy fallback here would drift from the gateway's and produce a
@@ -47,32 +45,14 @@ import { KnowledgeExposure, kbCallerFromRuntime, kbReaderOfFollowUp, noteRestric
 // it attached.
 import { resolveBindings } from '@/lib/services/guardrail/hooks/binding';
 import type { PluginMessageRewrite } from '@/lib/services/guardrail/sdkAdapter';
-import type { BaseChatModel } from '@cognipeer/agent-sdk';
 import type { GuardrailBindingSource } from '@/lib/services/guardrail/hooks/binding';
-import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/services/mcp';
 import { consoleIdentityCallerOf, consoleIdentityOfPausedTurn, consoleIdentityPersonOf, type ConsoleIdentityCaller, type ConsoleIdentityPerson } from '@/lib/iam/consoleIdentity';
-// By path: the barrel does not export it, and it is the ONE reader of a
-// server's `guardrail` / legacy `aegis` columns (`mcpService.ts`).
-import { getToolAnnotationOverrides, resolveMcpGuardrailBinding, resolveSourceType } from '@/lib/services/mcp/mcpService';
-import { defaultAnnotationsForSource } from '@/lib/services/mcp/toolAnnotations';
 import { runWithTurnSignal } from '@/lib/core/turnSignal';
-import { addSecretValues, executeToolAction, logToolRequest, toolRequestSecretValues } from '@/lib/services/tools';
-import { resolveAgentBindingMcpServer, resolveAgentBindingTool } from './bindingResolution';
-import { deleteAgentOwnedResources } from './agentOwnedResources';
-import { resolveBrowser, createBrowserSession, buildBrowserAgentTools, closeBrowserSession } from '@/lib/services/browser';
-import { buildWebSearchAgentTools } from '@/lib/services/webSearch';
-import { buildWebFetchAgentTools } from '@/lib/services/crawler';
 import { type TraceToolDefinition } from '@/lib/services/tracingToolDefinitions';
-import {
-    describeRuntimeAuth,
-    resolveRuntimeHeaders,
-    runtimeHeaderPolicyFromMetadata,
-    type AgentRuntimeContext,
-} from '@/lib/services/runtimeContext';
+import { resolveRuntimeHeaders, type AgentRuntimeContext } from '@/lib/services/runtimeContext';
 import { invokeExternalAgent } from './externalAgent';
 import { addPlaygroundUsage, normalizePlaygroundUsage, pausedLegsUsage } from './playgroundUsage';
-import { buildGatewayChatModel, isDynamicModel, type NativeAgentReasoning } from './gatewayChatModel';
-import { createOutputLimitTap, markOutputLimitNotice, type OutputLimitTap } from './outputLimitNotice';
+import { createOutputLimitTap } from './outputLimitNotice';
 import { createImageAwareTokenCounter } from './imageTokenCounter';
 import { withSessionImages, type SessionImagesOptions } from './sessionImages';
 import {
@@ -82,13 +62,18 @@ import {
     type ToolMediaContext,
 } from './toolMedia';
 import { buildReadTool, readToolDefinition, READ_TOOL } from './readTool';
-import { isToolOutput } from '@/lib/services/tools/toolOutput';
-import { effectiveActionAnnotations, mcpToolMarkings } from '@/lib/services/tools/actionAnnotations';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
-import { detachConnectorTriggers } from './agentTriggerConnectorHost';
-import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
-import { outputFileEventData, toClientOutputFiles, toClientPendingAction, toFileAnnotations } from './clientWire';
-import { agentTakesAttachments, assembleTurnAttachments, attachmentsAvailability, attachmentsUnavailableMessage, buildSessionFileTools, buildUserTurnContent, conversationFileFacts, createSessionImageSource, deleteConversationFiles, findUnsentSessionFiles, resolveAttachmentsConfig, resolveTurnAttachments, sessionFileToolDefinitions, NO_ATTACHMENTS, type AssembledAttachments } from './sessionFiles';
+import { annotateAgentRunError } from './agentErrors';
+import { toClientOutputFiles, toClientPendingAction, toFileAnnotations } from './clientWire';
+import {
+    agentTakesAttachments,
+    buildSessionFileTools,
+    buildUserTurnContent,
+    conversationFileFacts,
+    createSessionImageSource,
+    resolveAttachmentsConfig,
+    sessionFileToolDefinitions,
+} from './sessionFiles';
 import { neutralizeAttachmentMarker } from './sessionAttachmentText';
 import { resolveModelCapabilities } from '@/lib/services/models/modelCapabilities';
 import {
@@ -99,20 +84,18 @@ import {
 } from './agentSpendLimits';
 import {
     activeSessionBudget,
-    agentSessionBudget,
     endsInAnswer,
     isSessionBudgetBreach,
     planSessionBudget,
     sessionBudgetInvokeOptions,
     startSessionSpendAccount,
-    withSessionSpend,
     settleSessionBudget,
     type SessionBudgetSettlement,
 } from './sessionBudget';
 import { addSessionTurnSpend, recordSessionTurnSpend } from './sessionBudgetService';
 import { enforceAgentRunQuota, settleAgentRun } from './agentQuota';
 import { createRunUsageSink, runWithUsageSink } from './runUsage';
-import { buildAgentSandboxTools, destroyConversationSandbox } from './agentSandboxTools';
+import { buildAgentSandboxTools } from './agentSandboxTools';
 import { withSandboxOutputsPrompt } from './agentSandboxOutputs';
 import { buildFileOutputTools, fileOutputsPrompt, mergeOutputCollectors, type FileOutputTools } from './agentFileOutputTools';
 import { buildReminderTools, reminderApprovalMode, reminderNoteText, remindersPrompt, type ReminderTools, type ReminderWake } from './agentReminderTools';
@@ -120,13 +103,9 @@ import { resolveRemindersConfig } from './agentRemindersConfig';
 import { getConfig } from '@/lib/core/config';
 import { inspectFileBucket } from './sessionFilesBucket';
 import { outputsAvailability } from './sessionFilesConfig';
-import { sealAgentConfigSecrets } from './agentSandboxSecrets';
-import { mayUseSharedResource } from './sharedResourceAccess';
-import { stripLegacyExecutionConfig } from './agentCallbackConfig';
 import {
     buildTurnInputState,
     compactedToolResults,
-    describeTurnOutcome,
     endedByCallerAbort,
     buildContinueInputState,
     loadConversationState,
@@ -136,11 +115,11 @@ import {
 } from './agentTurnState';
 import { toSessionStopReason, type SessionStopReason } from './sessionEvents';
 import { startSessionTurnEvents, type SessionTurnEvents } from './sessionTurnEvents';
-import { delegatedSubagentName, delegationFailure, isSubagentEvent, resumedDelegationIds } from './subagentEvents';
-import { createTurnFlowTracker, subagentTargets, type TurnFlowTracker } from './turnFlowTracker';
-import { delegationCallIdOf, type AgentCompactionEvent, type AgentPlanEvent, type AgentSubagentEvent } from '@/lib/shared/agentTurnFlow';
+import { delegatedSubagentName, delegationFailure, resumedDelegationIds } from './subagentEvents';
+import { createTurnFlowTracker, subagentTargets } from './turnFlowTracker';
+import { type AgentCompactionEvent, type AgentPlanEvent, type AgentSubagentEvent } from '@/lib/shared/agentTurnFlow';
 import { resolveAgentConfig } from './agentConfigResolution';
-import { activeSubagentEntries, resolveSubagentTarget } from './subagentRoster';
+import { activeSubagentEntries } from './subagentRoster';
 import {
     buildClientTools,
     checkEmbeddedClientTools,
@@ -158,16 +137,11 @@ import { messageIdOf } from './messageIds';
 import {
     applyToolApprovals,
     applyToolBlocks,
-    classifyTool,
     clientApprovalConfig,
     denyUnattendedTools,
-    gateChildTools,
     resolveHitlConfig,
     resolveHitlRunMode,
     sessionAllowedTools,
-    type ChildApprovalSide,
-    type HitlRunMode,
-    type ResolvedHitlConfig,
 } from './agentHumanInTheLoop';
 import { createHitlCallLog, type HitlCallLog } from './agentHitlExceptions';
 import { additionalModelKeys, applyAgentModelChoice, type AgentModelChoice } from './agentModelSelection';
@@ -178,7 +152,6 @@ import {
     migrateAgentReasoning,
 } from './agentReasoning';
 import type { NormalizedReasoning } from '@/lib/services/models/reasoning';
-import { normalizeStaleRunningStatus, normalizeStaleRunningStatuses } from './sessionRuntime';
 import {
     AgentResumeError,
     PAUSE_UNAVAILABLE_WARNING,
@@ -195,45 +168,43 @@ import {
     type PausedTurnOptions,
     type PublicPendingAction,
 } from './agentPendingActions';
-import { composeUserMessageWithVariables, delegatedVariableValues } from './agentVariables';
-import { agentToolPolicyName, createAgentToolGuard, protectBuiltTool, type AgentToolGuard } from './agentToolGuard';
+import { composeUserMessageWithVariables } from './agentVariables';
+import { createAgentToolGuard, protectBuiltTool, type AgentToolGuard } from './agentToolGuard';
 import { CALLER_ABORT_DETAIL, agentRelayOptions, agentRunCallerOf, bridgeCancellationCell, captureStreamedText, incompleteReason, isCancellationCellTripped, toToolCallEvent, type AgentChatRequest, type AgentChatResponse, type AgentPlaygroundChatRequest, type AgentPlaygroundChatResult, type AgentPlaygroundStep, type AgentRunCancellationCell, type AgentToolCallEvent } from './agentChatTypes';
-import { budgetAwareOutcome, buildAgentCostEstimator, priceAgentTurn, type PricedModel } from './agentCost';
+import { budgetAwareOutcome, buildAgentCostEstimator, priceAgentTurn } from './agentCost';
 import { KNOWLEDGE_FIRST_INSTRUCTION, bindKnowledgeExposure, buildAgentKnowledgeTools, knowledgeCallerOf } from './agentKnowledgeTools';
 import { evaluateBoundGuardrails, warnUnservableStreamBinding, buildAgentGuardrailPlugins, MessageRewriteLedger, agentMessageText, persistedUserTurn, warnUnservableExternalBindings, guardrailDenial, guardrailBlockedError } from './agentGuardrails';
-import { extractAgentReasoning, buildTracingMetadata, reconcileTraceTotals, markTraceSessionFailed, createInternalTracingSink } from './agentTracing';
+import { buildTracingMetadata, reconcileTraceTotals, markTraceSessionFailed, createInternalTracingSink } from './agentTracing';
+import { resolveAgentPrompt } from './agentPrompt';
+import { assertOwnedAgentReachable, ownedAgentFlowTags, buildAgentSubagents } from './agentSubagents';
+import { buildBoundTools, runBoundToolCleanup } from './agentBoundTools';
+import { endRunsOfDroppedPause, MAX_PREVIOUS_VERSIONS, buildAgentChatModel, describeRunOutcome } from './agentRecords';
+import {
+    answeredWithMetadata,
+    textStreamOptions,
+    createReasoningTap,
+    liveStreamOptions,
+    createTurnFlowSink,
+    turnFlowRecord,
+    turnReasoning,
+} from './agentStreamTaps';
+import { resolveMessageAttachments, assembleMessageAttachments, earlierAttachments, outputFileEvents, mergeSessionRuntimeContext } from './agentAttachments';
 export { knowledgeCallerOf, buildAgentKnowledgeTools } from './agentKnowledgeTools';
 export { incompleteReason, agentRelayCallbacks } from './agentChatTypes';
 export type { AgentRunCancellationCell, AgentChatRequest, AgentToolCallEvent, AgentPlaygroundChatRequest, AgentPlaygroundStep, AgentPlaygroundChatResult, ResponseOutputText, ResponseOutputMessage, ResponseReasoningItem, ResponseOutputItem, ResponseUsage, AgentChatResponse } from './agentChatTypes';
 export { createAgentToolGuard } from './agentToolGuard';
 export { AgentGuardrailBlockedError } from './agentGuardrails';
 export { extractAgentReasoning, buildTracingMetadata, reconcileTraceTotals, markTraceSessionFailed, createInternalTracingSink, extractInternalTraceDiagnostics } from './agentTracing';
+export { assertOwnedAgentReachable, buildAgentSubagents, buildSubagentModel } from './agentSubagents';
+export type { AgentModelCaller, SubagentOutputOptions } from './agentSubagents';
+export { buildBoundTools } from './agentBoundTools';
+export { createAgentRecord, updateAgentRecord, deleteAgentRecord, getAgentById, getAgentByKey, listAgents, publishAgent, getAgentVersion, listAgentVersions, resolveAgentVoiceVersion, buildAgentChatModel, checkAgentModel } from './agentRecords';
+export type { AgentModelCheckResult, AgentModelCall } from './agentRecords';
+export { createConversation, getConversationById, listConversations, deleteConversation } from './agentConversations';
+export type { AgentConversationSource } from './agentConversations';
+export { createReasoningTap } from './agentStreamTaps';
 
 const logger = createLogger('agents');
-
-/**
- * A new message dropped the session's pause (`cancel_pending`): the run that
- * waited on it ends `canceled`, with its notifications, instead of staying
- * `requires_action` for good. Never fails the turn.
- */
-async function endRunsOfDroppedPause(
-    db: Awaited<ReturnType<typeof getDatabase>>,
-    scope: { tenantId: string; projectId: string; conversationId: string },
-): Promise<void> {
-    try {
-        // Loaded here: agentRunService imports this module.
-        const { cancelPausedAgentRuns } = await import('./agentRunService');
-        await cancelPausedAgentRuns(db, scope);
-    } catch (error) {
-        logger.warn('Could not end the paused run of a dropped pause', {
-            conversationId: scope.conversationId,
-            error: error instanceof Error ? error.message : String(error),
-        });
-    }
-}
-
-/** How many replaced answers a regenerated message remembers. */
-const MAX_PREVIOUS_VERSIONS = 5;
 
 /**
  * EXPORTED FOR TESTS ONLY. These are module-private helpers whose whole job is
@@ -256,1325 +227,9 @@ export const __testables = {
     priceAgentTurn,
 };
 
-/**
- * A hidden agent a flow owns runs only for the flow that owns it (`source: 'flow'`) and for the editor's playground
- * (`source: 'playground'`): the client API, A2A, portals, channels and every other surface see it as missing.
- * `source` is stamped by the server, never taken from a caller.
- */
-export function assertOwnedAgentReachable(agent: Pick<IAgent, 'key' | 'owner'>, runtimeContext: AgentRuntimeContext | undefined): void {
-    if (!agent.owner) return;
-    if (runtimeContext?.source === 'flow' || runtimeContext?.source === 'playground') return;
-    throw new Error(`Agent "${agent.key}" not found`);
-}
-
-/** The `flowId` / `flowKey` / `flowName` trace tags of an agent a flow owns (the flow row is read; missing = no tags). */
-async function ownedAgentFlowTags(tenantDbName: string, agent: Pick<IAgent, 'owner' | 'tenantId' | 'projectId'>): Promise<Record<string, string> | undefined> {
-    if (!agent.owner) return undefined;
-    const flow = await getFlowsHost()
-        ?.describeFlow({ tenantDbName, tenantId: agent.tenantId, projectId: agent.projectId }, { id: agent.owner.flowId })
-        .catch(() => null);
-    return {
-        flowId: agent.owner.flowId,
-        ...(flow ? { flowKey: flow.key, flowName: flow.name } : {}),
-    };
-}
-
-/**
- * Logs which prompt placeholders came from the caller and which nobody filled.
- *
- * An unfilled placeholder renders empty, which is exactly the failure this
- * whole module exists to make visible: the prompt still "works", it just quietly
- * says less than its author wrote. A warn line is the cheapest way for an
- * operator to find that from a trace.
- */
-function reportPromptVariables(
-    rendered: RenderedPrompt,
-    context: { agentKey: string; promptKey?: string },
-): void {
-    if (rendered.unresolved.length > 0) {
-        logger.warn('Prompt has unresolved variables; they rendered empty', {
-            ...context,
-            unresolved: rendered.unresolved,
-        });
-    }
-    if (rendered.fromCaller.length > 0) {
-        logger.debug('Prompt variables filled from caller runtime context', {
-            ...context,
-            variables: rendered.fromCaller,
-        });
-    }
-}
-
-/**
- * The system prompt an agent runs with: its own text (or the one the caller
- * hands in), else the Prompts-module template its `promptKey` names, rendered
- * with the run's prompt variables. An inline prompt is rendered only when the
- * agent opted in or the text references a built-in (`shouldRenderInlinePrompt`),
- * so a literal `{{` in an existing prompt is left alone. Used for the agent's own
- * run and, with the referenced agent's own config, for a sub-agent that is
- * another agent: the same text it would run with on its own.
- */
-async function resolveAgentPrompt(input: {
-    db: Pick<Awaited<ReturnType<typeof getDatabase>>, 'findPromptByKey'>;
-    projectId: string;
-    agentKey: string;
-    config: IAgentConfig;
-    systemPrompt: string | undefined;
-    variables: ResolvedPromptVariables;
-}): Promise<string | undefined> {
-    const { config, agentKey } = input;
-    let systemPrompt = input.systemPrompt;
-    if (!systemPrompt && config.promptKey) {
-        const prompt = await input.db.findPromptByKey(config.promptKey, input.projectId);
-        if (prompt) {
-            const rendered = renderPromptTemplate(prompt.template, input.variables);
-            systemPrompt = rendered.text;
-            reportPromptVariables(rendered, { agentKey, promptKey: config.promptKey });
-        }
-    } else if (systemPrompt && shouldRenderInlinePrompt(config, systemPrompt)) {
-        const rendered = renderPromptTemplate(systemPrompt, input.variables);
-        systemPrompt = rendered.text;
-        reportPromptVariables(rendered, { agentKey });
-    }
-    return systemPrompt;
-}
-
-// ── Sub-agent registry ──────────────────────────────────────────────
-
-/** Who a model call is made for: rides on its usage row and its Dynamic LLM caller conditions. */
-export interface AgentModelCaller {
-    agentKey?: string;
-    /** The Session / API conversation. */
-    sessionId?: string;
-    userId?: string;
-    /** The agent's reversible PII protection: every model call of the run carries it. */
-    piiProtection?: IPiiProtectionConfig | null;
-}
-
-/** What a sub-agent's own model call is told about output tokens (see `buildSubagentModel`). */
-export type SubagentOutputOptions = { maxTokens?: number; maxTotalOutputTokens?: number };
-
-type BuildSubagentsInput = {
-    db: Awaited<ReturnType<typeof getDatabase>>;
-    tenantDbName: string;
-    tenantId: string;
-    projectId: string;
-    /** The parent agent: an inline child's bindings may use its own MCP servers (`IAgentResourceOwner`). */
-    agentId?: string;
-    /** The entries that can run (`activeSubagentEntries`): a roster switched off is never built. */
-    subagents: IAgentSubagent[];
-    createToolFn: typeof import('@cognipeer/agent-sdk').createTool;
-    zod: typeof import('zod').z;
-    guard: AgentToolGuard;
-    runtimeContext?: AgentRuntimeContext;
-    /** Who the run is for (Console identity); a referenced child acts under its own agent key. */
-    identity?: ConsoleIdentityCaller;
-    /** Who a child's knowledge tools read for: the parent run's caller (default: from `runtimeContext`). */
-    kbCaller?: KbCaller;
-    /** Who a sub-agent model's spend is attributed to (tenant spend limits). */
-    spend?: AgentSpendScope;
-    /** The session's images, read at a sub-agent's own model call (see `sessionImages.ts`). */
-    images?: SessionImagesOptions;
-    /** The run's tool-image store: a child's tools show their images the same way (judged by the child's own model). */
-    toolMedia?: ToolMediaContext;
-    /** The parent's model takes images: what a child without a model of its own runs on. */
-    modelTakesImages?: boolean;
-    /** Whose run this is, for the usage rows of a sub-agent's model calls. */
-    caller?: AgentModelCaller;
-    /**
-     * The parent's output settings, which a sub-agent's own model call carries as the parent's
-     * does: the per-call `max_tokens` and the run's `maxTotalOutputTokens` (a raised retry's budget).
-     */
-    output?: SubagentOutputOptions;
-    /**
-     * Reasoning of a sub-agent's model: the parent's selection for the same
-     * model (when it is one the parent picked), then Model Hub, then the request.
-     */
-    reasoning?: { config: IAgentConfig; request?: NormalizedReasoning };
-    /** What a child's system prompt is rendered from. */
-    prompt: {
-        /** The parent's config and prompt variables: a prompt written in its config (an inline child's) renders as the parent's own does. */
-        parent: { config: IAgentConfig; variables: ResolvedPromptVariables };
-        /** The parent run's validated agent variables: a referenced agent's variables of the same name take their values. */
-        variables?: Record<string, unknown>;
-        variablesInPrompt?: boolean;
-        userId?: string;
-    };
-    /** Reports, once, a child that was skipped or runs short of what its author set up. */
-    onWarning?: (message: string) => void;
-    /**
-     * How the delegating run answers tool approvals, so a child's tools are gated like the parent's own:
-     * the parent's settings and mode, and (for a `ref` child) its agent's settings under the same run.
-     */
-    approvals?: {
-        hitl: ResolvedHitlConfig;
-        mode: HitlRunMode;
-        run: { unattended?: boolean; canPause?: boolean };
-        allowedTools: ReadonlySet<string>;
-        /** Where the gates record what they decided (why a call waits, what an exception let through or refused). */
-        log?: HitlCallLog;
-    };
-};
-
-/**
- * Turns `config.subagents` into the SDK's sub-agent registry.
- *
- * `inline` children are defined entirely in the parent's config. `ref` children
- * borrow another console agent's prompt, model and tools — resolved from that
- * agent's PUBLISHED config unless a version is pinned, so editing a draft can
- * never change what a parent delegates to mid-flight.
- *
- * A `ref` child's own sub-agents are deliberately dropped: the SDK already
- * enforces a depth budget, and expanding a reference tree here would let one
- * edit in a leaf agent silently multiply every parent's tool surface. Nesting
- * beyond one level is expressed with the SDK's own `maxDepth`, not by inlining.
- */
-export async function buildAgentSubagents(
-    input: BuildSubagentsInput,
-): Promise<{ subagents: AgentSdkSubagentDef[]; cleanupTasks: Array<() => Promise<void>>; models: PricedModel[] }> {
-    const entries = input.subagents;
-    if (entries.length === 0) return { subagents: [], cleanupTasks: [], models: [] };
-    // A child is an agent run of the same tenant: refused with the agents service,
-    // and its own knowledge and tools lose what a switched-off service provided.
-    await assertAgentsEnabled({ tenantId: input.tenantId, tenantDbName: input.tenantDbName });
-    const disabledServices = await getDisabledServices(input.tenantId);
-
-    const subagents: AgentSdkSubagentDef[] = [];
-    const cleanupTasks: Array<() => Promise<void>> = [];
-    // The models the children were given, as the turn's cost estimator needs them.
-    const models: PricedModel[] = [];
-    const seen = new Set<string>();
-
-    for (const entry of entries) {
-        if (!entry.name || seen.has(entry.name)) {
-            const message = entry.name
-                ? `Sub-agent name "${entry.name}" is used more than once: only the first one is available.`
-                : 'A sub-agent has no name, so it was skipped.';
-            logger.warn(message, { name: entry.name });
-            input.onWarning?.(message);
-            continue;
-        }
-
-        let systemPrompt: string | undefined;
-        let toolBindings = entry.toolBindings;
-        let childAgentId: string | undefined;
-        let knowledgeSource: KnowledgeBindingSource = { knowledgeEngineKey: entry.knowledgeEngineKey };
-        let modelKey = entry.modelKey;
-        let targetHitl: ResolvedHitlConfig | undefined;
-        // The parent's output settings, unless the child states its own (its agent's `maxTokens`, its own limits).
-        const output: SubagentOutputOptions = { ...input.output };
-        if (Number(entry.limits?.maxTotalOutputTokens) > 0) output.maxTotalOutputTokens = Number(entry.limits?.maxTotalOutputTokens);
-
-        if (entry.kind === 'ref') {
-            const target = await resolveSubagentTarget(input.tenantDbName, input.projectId, entry);
-            if (!target.ok) {
-                logger.warn(target.message, { name: entry.name, agentKey: entry.agentKey, reason: target.reason });
-                input.onWarning?.(target.message);
-                continue;
-            }
-            systemPrompt = await resolveChildPrompt(input, entry, target);
-            toolBindings = target.config.toolBindings;
-            childAgentId = target.agent._id ? String(target.agent._id) : undefined;
-            knowledgeSource = {
-                knowledgeEngineKey: target.config.knowledgeEngineKey,
-                knowledgeBindings: target.config.knowledgeBindings,
-                knowledgeToolMode: target.config.knowledgeToolMode,
-            };
-            modelKey = entry.modelKey ?? target.config.modelKey;
-            targetHitl = resolveHitlConfig(target.config.humanInTheLoop);
-            if (target.config.maxTokens !== undefined) output.maxTokens = target.config.maxTokens;
-        }
-
-        if (entry.kind !== 'ref') systemPrompt = await resolveChildPrompt(input, entry);
-
-        // A child nobody gave instructions runs as its name and header say, which is what the SDK
-        // would make of it too (older SDKs left it the generic base prompt), and the owner is told.
-        if (!systemPrompt?.trim()) {
-            systemPrompt = `You are ${entry.title || entry.name}. ${entry.header || entry.title || entry.name}`;
-            input.onWarning?.(`Sub-agent "${entry.name}" has no instructions of its own${
-                entry.kind === 'ref' ? ` ("${entry.agentKey}" has no system prompt, or its prompt could not be found)` : ''
-            }, so it runs on its name and header alone.`);
-        }
-
-        const childTools: AgentSdkToolInterface[] = [];
-        ({ knowledge: knowledgeSource, toolBindings } = filterChildSources(knowledgeSource, toolBindings, disabledServices));
-        if (hasKnowledgeConfigured(knowledgeSource)) {
-            const knowledge = await buildAgentKnowledgeTools(
-                input.tenantDbName,
-                input.tenantId,
-                input.projectId,
-                knowledgeSource,
-                input.guard,
-                // A child reads for the same caller as the run that delegated to it.
-                { caller: input.kbCaller ?? kbCallerFromRuntime(input.runtimeContext) },
-            );
-            childTools.push(...knowledge.tools);
-        }
-        if (toolBindings && toolBindings.length > 0) {
-            const bound = await buildBoundTools(
-                input.tenantDbName,
-                input.tenantId,
-                input.projectId,
-                toolBindings,
-                input.createToolFn,
-                input.zod,
-                input.guard,
-                input.runtimeContext,
-                input.identity && entry.kind === 'ref' && entry.agentKey
-                    ? { ...input.identity, agentKey: entry.agentKey }
-                    : input.identity,
-                undefined,
-                // Whose own MCP servers the child's bindings may use: the referenced agent's, or (inline) its parent's.
-                entry.kind === 'ref' ? childAgentId : input.agentId,
-            );
-            childTools.push(...bound.tools);
-            cleanupTasks.push(...bound.cleanupTasks);
-        }
-
-        if (input.approvals && childTools.length > 0) {
-            const { hitl, mode, run, allowedTools, log } = input.approvals;
-            const sides: ChildApprovalSide[] = [{ hitl, mode }];
-            if (targetHitl) sides.push({ hitl: targetHitl, mode: resolveHitlRunMode(targetHitl, run) });
-            childTools.splice(0, childTools.length, ...gateChildTools(childTools, sides, allowedTools, log));
-        }
-
-        let childModel: unknown;
-        let childTakesImages = input.modelTakesImages === true;
-        if (modelKey) {
-            const built = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images, input.reasoning, input.caller, output);
-            if (built.ok) {
-                childModel = built.chatModel;
-                // Its model is only wrapped to resolve image references when the run has image options.
-                childTakesImages = built.takesImages && Boolean(input.images);
-                models.push(built.model);
-            } else {
-                input.onWarning?.(`Sub-agent "${entry.name}" runs on this agent's model: ${built.message}.`);
-            }
-        }
-
-        // Taken only now that the entry will be built: a reference that could not run must not
-        // make a later, working one of the same name look like the duplicate.
-        seen.add(entry.name);
-        subagents.push({
-            name: entry.name,
-            ...(entry.title ? { title: entry.title } : {}),
-            header: entry.header || entry.title || entry.name,
-            systemPrompt,
-            ...(childTools.length > 0
-                ? { tools: input.toolMedia ? childTools.map((tool) => withToolMedia(tool, { ...input.toolMedia!, modelTakesImages: childTakesImages })) : childTools }
-                : {}),
-            ...(childModel ? { model: childModel } : {}),
-            ...(entry.limits ? { limits: entry.limits } : {}),
-            ...(entry.childContextPolicy ? { childContextPolicy: entry.childContextPolicy } : {}),
-            ...(entry.outputSchema
-                ? { outputSchema: jsonSchemaToZod(entry.outputSchema) }
-                : {}),
-            metadata: { kind: entry.kind, ...(entry.agentKey ? { agentKey: entry.agentKey } : {}) },
-        });
-    }
-
-    return { subagents, cleanupTasks, models };
-}
-
-/**
- * The system prompt a sub-agent runs with, resolved the way its own agent's run
- * would resolve it. A `ref` entry that sets no prompt of its own runs the prompt
- * of the agent it points at: that agent's `promptKey` template, or its inline
- * text, rendered with ITS prompt variables (identity, defaults, and the delegating
- * run's values for the variables it declares). A prompt written in the delegating
- * agent's own config — an inline child's, or a `ref` entry's override — renders the
- * way that agent's own prompt does. Undefined when there is none.
- */
-async function resolveChildPrompt(
-    input: BuildSubagentsInput,
-    entry: IAgentSubagent,
-    target?: Extract<Awaited<ReturnType<typeof resolveSubagentTarget>>, { ok: true }>,
-): Promise<string | undefined> {
-    const { parent } = input.prompt;
-    const authored = entry.systemPrompt?.trim() ? entry.systemPrompt : undefined;
-    if (authored || !target) {
-        if (!authored) return undefined;
-        if (!shouldRenderInlinePrompt(parent.config, authored)) return authored;
-        const rendered = renderPromptTemplate(authored, parent.variables);
-        reportPromptVariables(rendered, { agentKey: input.caller?.agentKey ?? '' });
-        return rendered.text;
-    }
-    const agentKey = entry.agentKey ?? '';
-    return resolveAgentPrompt({
-        db: input.db,
-        projectId: input.projectId,
-        agentKey,
-        config: target.config,
-        systemPrompt: target.config.systemPrompt,
-        variables: buildPromptVariables({
-            config: target.config,
-            agentKey,
-            agentName: target.agent.name,
-            version: target.resolvedVersion,
-            runtimeContext: input.runtimeContext,
-            userId: input.prompt.userId,
-            variables: delegatedVariableValues(target.config.variables, input.prompt.variables),
-            variablesInPrompt: input.prompt.variablesInPrompt,
-        }),
-    });
-}
-
-/**
- * Builds the gateway chat model for a sub-agent's model override. Answers why
- * when the key no longer resolves (or the model cannot be set up), which makes
- * the child fall back to the parent's model rather than failing the whole run;
- * the caller reports it.
- *
- * Like every agent model it is a call into the gateway (gatewayChatModel.ts), so the
- * model's own guardrails, cache, pool and routing apply to the child too, and its
- * usage row (`agent.subagent`) lands on ITS model.
- */
-export async function buildSubagentModel(
-    tenantDbName: string,
-    tenantId: string,
-    projectId: string,
-    modelKey: string,
-    spend?: AgentSpendScope,
-    images?: SessionImagesOptions,
-    reasoning?: BuildSubagentsInput['reasoning'],
-    caller?: AgentModelCaller,
-    output?: SubagentOutputOptions,
-): Promise<{ ok: true; chatModel: unknown; model: PricedModel; takesImages: boolean } | { ok: false; message: string }> {
-    try {
-        const model = await getModelByKey(tenantDbName, modelKey, projectId);
-        if (!model || model.category !== 'llm') {
-            logger.warn('Sub-agent model override is not a chat model of this project; falling back to parent model', { modelKey });
-            return { ok: false, message: `model "${modelKey}" does not exist in this project or is not a chat model` };
-        }
-        const agentPick = agentReasoningForModel(reasoning?.config, modelKey);
-        const chatModel = await buildGatewayChatModel({
-            tenantDbName,
-            tenantId,
-            projectId,
-            model,
-            route: 'agent.subagent',
-            // Like the main agent's model: the per-call limit rides as the call's own setting, and the
-            // run's output budget bounds a raised retry.
-            ...(output?.maxTokens !== undefined ? { overrides: { max_tokens: output.maxTokens } } : {}),
-            ...(output?.maxTotalOutputTokens !== undefined && output.maxTotalOutputTokens > 0 ? { maxTotalOutputTokens: output.maxTotalOutputTokens } : {}),
-            ...(caller?.agentKey ? { agentKey: caller.agentKey } : {}),
-            ...(caller?.sessionId ? { sessionId: caller.sessionId } : {}),
-            ...(caller?.userId ? { userId: caller.userId } : {}),
-            ...(caller?.piiProtection ? { piiProtection: caller.piiProtection } : {}),
-            ...(agentPick ? { reasoning: agentPick } : {}),
-            ...(reasoning?.request ? { requestReasoning: reasoning.request } : {}),
-            ...(reasoning?.config && !agentShowsReasoning(reasoning.config) ? { showReasoning: false } : {}),
-            ...(spend ? { onCost: agentSpendSettler(spend, model.key) } : {}),
-        });
-        // A sub-agent can be handed the parent's context, image references included.
-        return {
-            ok: true,
-            chatModel: images ? withSessionImages(chatModel, images) : chatModel,
-            model: { key: model.key, modelId: model.modelId, providerKey: model.providerKey, providerDriver: model.providerDriver, pricing: model.pricing },
-            takesImages: resolveModelCapabilities(model).inputModalities.includes('image'),
-        };
-    } catch (error) {
-        logger.warn('Sub-agent model override could not be built; falling back to parent model', {
-            modelKey,
-            error: error instanceof Error ? error.message : String(error),
-        });
-        return { ok: false, message: `model "${modelKey}" could not be set up` };
-    }
-}
-
-// ── Tool Bridge ─────────────────────────────────────────────────────
-
-/**
- * Converts IAgentToolBinding entries into agent-sdk ToolInterface instances.
- * Supports two source types:
- *   - 'tool'  – unified tool system (OpenAPI / MCP sources)
- *   - 'mcp'   – legacy direct MCP server bindings (backward compat)
- *
- * Also returns trace `definitions` for the bound tools — the menu recorded on
- * each model-call event's `tool_definitions` section. `parameters` carries the
- * source JSON schema (action/MCP inputSchema), and the SDK binding is built
- * from that same schema (`toolInputSchemaToZod`), so the trace and the model
- * see one contract.
- *
- * ── WHERE `tool.pre` / `tool.post` FIRE, AND WHERE THEY MUST NOT ───────────
- * `guard` wraps the 'tool' and 'system' branches. It deliberately does NOT
- * wrap the 'mcp' branch: `executeMcpTool` routes to `executeMcpToolLocal`,
- * which fires both hooks itself around the dispatch
- * (`mcpService.ts` — `guardrail.beforeToolCall` / `guardrail.afterToolCall`,
- * bound to the SERVER's own guardrail via `resolveMcpGuardrailBinding`).
- * Wrapping here as well would evaluate every MCP call twice, write two
- * evaluation-log rows per hook, and bill the model-backed families twice — and
- * the second evaluation would carry a DIFFERENT tool name, since the MCP layer
- * names the call `<serverKey>/<toolName>` after resolving any rename override.
- * One call, one name, one evaluation.
- *
- * THE EXCEPTION is a server with NO binding at all (`resolveMcpGuardrailBinding`
- * answers `mode: 'off'`, the default for a server nobody configured): the MCP
- * layer then evaluates nothing, so the agent's own `tool.pre`/`tool.post`
- * bindings would be bypassed by the simple act of attaching such a server. For
- * that case — and only that case — the 'mcp' branch wraps the tool with `guard`
- * under the SAME canonical name the MCP layer would have used, so it is still
- * one call, one name, one evaluation. Which layer evaluates is decided per
- * server, never both.
- *
- * EXPORTED FOR TESTS — see `createAgentToolGuard`.
- */
-export async function buildBoundTools(
-    tenantDbName: string,
-    tenantId: string,
-    projectId: string,
-    bindings: { source: string; sourceKey: string; toolNames: string[]; config?: Record<string, unknown> }[] | undefined,
-    createToolFn: typeof import('@cognipeer/agent-sdk').createTool,
-    zod: typeof import('zod').z,
-    guard: AgentToolGuard,
-    runtimeContext?: AgentRuntimeContext,
-    /** Who the run is for, as MCP servers set up for Console identity are told (default: from `runtimeContext`). */
-    identity?: ConsoleIdentityCaller,
-    /** What a Flow tool (`source: 'flow'`) copies onto its run: the Session it belongs to, and whether anyone is there to answer. */
-    flowCaller?: { conversationId?: string; unattended?: boolean; accountableUserId?: string },
-    /** The agent the bindings belong to: its own MCP servers resolve, another agent's do not (`IAgentResourceOwner`). */
-    agentId?: string,
-): Promise<{
-    cleanupTasks: Array<() => Promise<void>>;
-    tools: AgentSdkToolInterface[];
-    definitions: TraceToolDefinition[];
-}> {
-    if (!bindings || bindings.length === 0) return { cleanupTasks: [], tools: [], definitions: [] };
-    const mcpIdentity = identity ?? consoleIdentityCallerOf(runtimeContext, { projectId });
-
-    const tools: AgentSdkToolInterface[] = [];
-    const definitions: TraceToolDefinition[] = [];
-    const cleanupTasks: Array<() => Promise<void>> = [];
-
-    for (const binding of bindings) {
-        if (binding.source === 'tool') {
-            // ── Unified tool system ──────────────────────────────
-            const toolRecord = await resolveAgentBindingTool(tenantDbName, binding.sourceKey, projectId);
-            if (!toolRecord || toolRecord.status !== 'active') {
-                logger.warn('Skipping inactive/missing tool', { key: binding.sourceKey });
-                continue;
-            }
-
-            const toolRuntimeHeaders = resolveRuntimeHeaders(
-                runtimeContext,
-                'tool',
-                toolRecord.key,
-                runtimeHeaderPolicyFromMetadata(toolRecord.metadata),
-            );
-            const toolRuntimeAuth = describeRuntimeAuth(runtimeContext, toolRuntimeHeaders);
-            const toolSecretValues = toolRequestSecretValues(toolRecord, toolRuntimeHeaders);
-
-            for (const actionName of binding.toolNames) {
-                const action = toolRecord.actions.find(
-                    (a) => a.key === actionName || a.name === actionName,
-                );
-                if (!action) {
-                    logger.warn('Tool action not found, skipping', {
-                        tool: binding.sourceKey,
-                        action: actionName,
-                    });
-                    continue;
-                }
-
-                const description = action.description || `Call ${action.name} on ${toolRecord.name}`;
-                const log = (
-                    status: 'success' | 'error',
-                    latencyMs: number,
-                    args: Record<string, unknown>,
-                    response?: Record<string, unknown>,
-                    error?: string,
-                ) => logToolRequest(
-                    tenantDbName, tenantId, toolRecord.projectId,
-                    toolRecord.key, action.key, action.name,
-                    status, latencyMs, args, response, error,
-                    'agent', runtimeContext?.tokenId, toolRuntimeAuth, toolSecretValues,
-                );
-                const tool = createToolFn({
-                    name: action.name,
-                    description,
-                    // The action's real input schema, not an empty passthrough —
-                    // see toolInputSchemaToZod.
-                    schema: toolInputSchemaToZod(action.inputSchema),
-                    // The guard wraps the WHOLE executor, tool-request logging
-                    // included, so a `tool.pre` redaction reaches the upstream
-                    // call and the request log identically, and `tool.post`
-                    // sees the exact string that will reach the model rather
-                    // than the object graph behind it.
-                    //
-                    // A blocked call therefore writes NO tool-request log. That
-                    // is deliberate: the log's status vocabulary is
-                    // success | error, and recording a policy decision as an
-                    // 'error' would corrupt this tool's failure rate. The
-                    // guardrail evaluation log is where a block is recorded.
-                    func: guard.protect(
-                        {
-                            name: agentToolPolicyName('tool', toolRecord.key, action.key),
-                            requestedName: action.name,
-                        },
-                        async (args: Record<string, unknown>) => {
-                            try {
-                                const { result, latencyMs, isError } = await executeToolAction(
-                                    toolRecord, action.key, args, toolRuntimeHeaders,
-                                    { onSecrets: (values) => addSecretValues(toolSecretValues, values) },
-                                );
-                                // An MCP `isError` result is a failed call: logged as one, the text still reaches the model.
-                                log(
-                                    isError ? 'error' : 'success', latencyMs, args,
-                                    typeof result === 'object' ? (result as Record<string, unknown>) : { value: result },
-                                    isError ? (typeof result === 'string' ? result : 'Tool reported an error') : undefined,
-                                );
-                                // A result with media stays an object: `withToolMedia` shows its images to the model.
-                                if (isToolOutput(result)) return result;
-                                return typeof result === 'string' ? result : JSON.stringify(result);
-                            } catch (execError) {
-                                const errorMessage = execError instanceof Error ? execError.message : 'Failed to execute tool action';
-                                log('error', 0, args, undefined, errorMessage);
-                                throw execError;
-                            }
-                        },
-                    ),
-                });
-                // Whether the call asks for approval is decided from the action's markings (`classifyTool`).
-                tools.push(Object.assign(tool, { hitlKind: classifyTool(action.name, effectiveActionAnnotations(action)) }));
-                definitions.push({ name: action.name, description, parameters: action.inputSchema });
-            }
-        } else if (binding.source === 'mcp') {
-            // ── Legacy MCP server bindings ───────────────────────
-            const server = await resolveAgentBindingMcpServer(tenantDbName, binding.sourceKey, projectId, agentId);
-            if (!server || server.status !== 'active') {
-                logger.warn('Skipping inactive/missing MCP server', { key: binding.sourceKey });
-                continue;
-            }
-            // The server's access list decides for the person this run is made for (managed:access:*); a server they
-            // may not use is left out, so the model never sees its tools.
-            const mayUse = await mayUseSharedResource(
-                { tenantDbName, tenantId, caller: mcpIdentity, source: runtimeContext?.source },
-                { type: 'mcp-server', id: String(server._id ?? ''), key: server.key, projectId: server.projectId, access: server.access },
-            );
-            if (!mayUse) {
-                logger.info('MCP server is not open to the person this run is made for; its tools are left out', { key: binding.sourceKey });
-                continue;
-            }
-
-            const mcpRuntimeHeaders = resolveRuntimeHeaders(
-                runtimeContext,
-                'mcp',
-                server.key,
-                runtimeHeaderPolicyFromMetadata(server.metadata),
-            );
-
-            // WHO GUARDS THIS SERVER'S TOOLS. A server with its own binding is
-            // guarded one layer down by `executeMcpToolLocal` (see the note on
-            // this function), and wrapping it here too would double-evaluate.
-            // A server with NO binding (`mode: 'off'` — the default for a server
-            // an operator never configured) evaluates NOTHING down there, so the
-            // agent's own `tool.pre`/`tool.post` bindings would be walked around
-            // simply by attaching an MCP server: the model calls
-            // `<server>/delete_records`, no hook fires, the allow-list is
-            // bypassed and the log shows nothing. For that case the agent's
-            // guard wraps the tool under the MCP CANONICAL spelling
-            // `<serverKey>/<toolName>` — the name `mcpHook` would have used —
-            // so a stored `tool_access` policy matches it the same way on
-            // either layer. `guard` is the no-op when the agent binds nothing.
-            const mcpBinding = resolveMcpGuardrailBinding(server);
-            const guardAtAgent = mcpBinding.mode === 'off';
-            const annotationOverrides = getToolAnnotationOverrides(server);
-            const sourceAnnotations = defaultAnnotationsForSource(resolveSourceType(server));
-
-            for (const toolName of binding.toolNames) {
-                const mcpToolDef = server.tools.find((t) => t.name === toolName);
-                if (!mcpToolDef) {
-                    logger.warn('MCP tool not found, skipping', {
-                        server: binding.sourceKey,
-                        tool: toolName,
-                    });
-                    continue;
-                }
-                if (!isMcpToolEnabled(server, toolName)) {
-                    logger.warn('MCP tool disabled on server, skipping', {
-                        server: binding.sourceKey,
-                        tool: toolName,
-                    });
-                    continue;
-                }
-
-                const dispatch = async (args: Record<string, unknown>) => {
-                    const { result, logSummary } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders, mcpIdentity);
-                    // A knowledge base tool that ran on another node marked only its own work: mark the run's here.
-                    await noteRestrictedKnowledge(restrictedKnowledgeTagsOf(logSummary?.restrictedKnowledge));
-                    if (isToolOutput(result)) return result;
-                    return typeof result === 'string' ? result : JSON.stringify(result);
-                };
-                const description = mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`;
-                const tool = createToolFn({
-                    name: mcpToolDef.name,
-                    description,
-                    schema: toolInputSchemaToZod(mcpToolDef.inputSchema),
-                    // Wrapped in `guard` ONLY when the server has no binding of
-                    // its own; otherwise `executeMcpTool` -> `executeMcpToolLocal`
-                    // already fires `tool.pre` and `tool.post` around the dispatch
-                    // and a second wrap would double-evaluate. See `guardAtAgent`.
-                    func: guardAtAgent
-                        ? guard.protect(
-                            { name: `${server.key}/${toolName}`, requestedName: mcpToolDef.name },
-                            dispatch,
-                        )
-                        : dispatch,
-                });
-                const markings = mcpToolMarkings(
-                    mcpToolDef,
-                    Object.hasOwn(annotationOverrides, toolName) ? annotationOverrides[toolName] : undefined,
-                    sourceAnnotations,
-                );
-                tools.push(Object.assign(tool, { hitlKind: classifyTool(mcpToolDef.name, markings) }));
-                definitions.push({ name: mcpToolDef.name, description, parameters: mcpToolDef.inputSchema });
-            }
-        } else if (binding.source === 'system' && binding.sourceKey === 'browser_use') {
-            // ── System tool: Browser Use ───────────────────────
-            const browserId = typeof binding.config?.browserId === 'string'
-                ? (binding.config.browserId as string)
-                : undefined;
-            if (!browserId) {
-                logger.warn('browser_use binding missing browserId, skipping');
-                continue;
-            }
-            try {
-                const browser = await resolveBrowser(
-                    { tenantDbName, tenantId, projectId },
-                    browserId,
-                );
-                if (!browser || browser.status !== 'active') {
-                    logger.warn('browser_use binding refers to inactive/missing browser', { browserId });
-                    continue;
-                }
-                const session = await createBrowserSession(
-                    { tenantDbName, tenantId, projectId },
-                    {
-                        browserId: String(browser._id ?? ''),
-                        createdBy: 'agent-runtime',
-                        metadata: { source: 'agent-system-tool', binding: 'browser_use' },
-                    },
-                );
-                const browserTools = adoptBuiltTools(guard, 'browser', buildBrowserAgentTools({
-                    tenantDbName,
-                    tenantId,
-                    projectId,
-                    sessionKey: session.sessionKey,
-                    createdBy: 'agent-runtime',
-                }));
-                tools.push(...browserTools.tools);
-                definitions.push(...browserTools.definitions);
-                cleanupTasks.push(async () => {
-                    await closeBrowserSession(
-                        { tenantDbName, tenantId, projectId },
-                        session.sessionKey,
-                    ).catch(() => undefined);
-                });
-            } catch (err) {
-                logger.error('Failed to bind browser_use system tool', {
-                    browserId,
-                    error: err instanceof Error ? err.message : String(err),
-                });
-            }
-        } else if (binding.source === 'system' && binding.sourceKey === 'web_search') {
-            // ── System tool: Web Search ─────────────────────────
-            // No session to open ahead of time — `runWebSearch` resolves the
-            // instance (pinned or the project's single active one) per call.
-            const providerKey = typeof binding.config?.providerKey === 'string'
-                ? (binding.config.providerKey as string)
-                : undefined;
-            const webSearchTools = adoptBuiltTools(guard, 'websearch', buildWebSearchAgentTools({
-                tenantDbName,
-                tenantId,
-                projectId,
-                providerKey,
-            }));
-            tools.push(...webSearchTools.tools);
-            definitions.push(...webSearchTools.definitions);
-        } else if (binding.source === 'system' && binding.sourceKey === 'crawler') {
-            // ── System tool: Web Fetch (single page through a crawler) ──
-            // Stateless like web_search; the crawler is loaded per call so an
-            // edit or deactivation takes effect without rebinding.
-            const crawlerKey = typeof binding.config?.crawlerKey === 'string'
-                ? (binding.config.crawlerKey as string)
-                : undefined;
-            if (!crawlerKey) {
-                logger.warn('crawler binding missing crawlerKey, skipping');
-                continue;
-            }
-            const webFetchTools = adoptBuiltTools(guard, 'crawler', buildWebFetchAgentTools({
-                tenantDbName,
-                tenantId,
-                projectId,
-                crawlerKey,
-            }));
-            tools.push(...webFetchTools.tools);
-            definitions.push(...webFetchTools.definitions);
-        } else if (binding.source === 'system' && binding.sourceKey === 'channel') {
-            // ── System tool: Channels (write to Slack / Teams as the agent's own bot) ──
-            // The Channels module builds them for the agent's deployments that allow it, and decides
-            // who and where they may write to; an edition without it binds nothing.
-            const channelHost = getChannelToolsHost();
-            if (!channelHost) {
-                logger.warn('channel tool binding skipped: Channels are not part of this edition');
-                continue;
-            }
-            const toolNames = binding.toolNames.filter(isChannelToolName);
-            if (toolNames.length === 0) continue;
-            try {
-                const built = await channelHost.buildTools({
-                    tenantDbName,
-                    tenantId,
-                    projectId,
-                    ...(mcpIdentity.agentKey ? { agentKey: mcpIdentity.agentKey } : {}),
-                    toolNames,
-                    ...((flowCaller?.accountableUserId ?? mcpIdentity.userId) ? { userId: flowCaller?.accountableUserId ?? mcpIdentity.userId } : {}),
-                    ...(flowCaller?.conversationId ? { conversationId: flowCaller.conversationId } : {}),
-                    ...(runtimeContext ? { runtimeContext } : {}),
-                    createToolFn: createToolFn as unknown as Parameters<typeof channelHost.buildTools>[0]['createToolFn'],
-                    zod,
-                });
-                const channelTools = adoptBuiltTools(guard, 'channel', built);
-                tools.push(...channelTools.tools);
-                definitions.push(...channelTools.definitions);
-            } catch (err) {
-                logger.error('Failed to bind channel system tools', {
-                    error: err instanceof Error ? err.message : String(err),
-                });
-            }
-        } else if (binding.source === 'flow') {
-            // ── Flow as a tool ──────────────────────────────────
-            // The tool name is what the HITL policy is keyed by, and the call is guarded under
-            // `agent.flow.<flowKey>` like any other tool. A binding whose flow is gone is skipped.
-            const flowsHost = getFlowsHost();
-            if (!flowsHost) {
-                logger.warn('flow tool binding skipped: Flows are not part of this edition', { flow: binding.sourceKey });
-                continue;
-            }
-            const flowTools = await flowsHost.buildToolBindings({
-                tenantDbName,
-                tenantId,
-                projectId,
-                binding: { sourceKey: binding.sourceKey, toolNames: binding.toolNames, config: binding.config },
-                buildTool: (definition) => createToolFn(definition as Parameters<typeof createToolFn>[0]),
-                guard,
-                caller: {
-                    ...(mcpIdentity.agentKey ? { agentKey: mcpIdentity.agentKey } : {}),
-                    ...(mcpIdentity.userId ? { userId: mcpIdentity.userId } : {}),
-                    ...(mcpIdentity.tokenId ? { tokenId: mcpIdentity.tokenId } : {}),
-                    ...(flowCaller?.accountableUserId ? { accountableUserId: flowCaller.accountableUserId } : {}),
-                    ...(flowCaller?.conversationId ? { conversationId: flowCaller.conversationId, sessionId: flowCaller.conversationId } : {}),
-                    ...(flowCaller?.unattended !== undefined ? { unattended: flowCaller.unattended } : {}),
-                },
-            });
-            tools.push(...(flowTools.tools as AgentSdkToolInterface[]));
-            definitions.push(...(flowTools.definitions as TraceToolDefinition[]));
-        }
-    }
-
-    return { cleanupTasks, tools, definitions };
-}
-
-/**
- * Guards system tools built elsewhere (browser, web search, web fetch, channels) after the fact,
- * under `agent.<surface>.<toolName>`. The browser tools are the agent's only
- * tools that navigate and type into a live browser, i.e. the surface
- * `tool_access.sideEffects` most wants to name.
- *
- * These tools carry zod schemas only, so their trace entries record name +
- * description and no parameters.
- */
-function adoptBuiltTools(
-    guard: AgentToolGuard,
-    surface: 'browser' | 'websearch' | 'crawler' | 'channel',
-    built: readonly unknown[],
-): { tools: AgentSdkToolInterface[]; definitions: TraceToolDefinition[] } {
-    const tools = (built as AgentSdkToolInterface[]).map((tool) => protectBuiltTool(
-        guard,
-        { name: agentToolPolicyName(surface, tool.name), requestedName: tool.name },
-        tool,
-    ));
-    const definitions = tools.map((tool) => ({
-        name: tool.name,
-        ...(typeof tool.description === 'string' && tool.description ? { description: tool.description } : {}),
-    }));
-    return { tools, definitions };
-}
-
-async function runBoundToolCleanup(
-    cleanupTasks: Array<() => Promise<void>>,
-    context: { agentKey: string; mode: 'chat' | 'playground' },
-): Promise<void> {
-    if (cleanupTasks.length === 0) return;
-
-    const results = await Promise.allSettled(cleanupTasks.map((task) => task()));
-    const failures = results.filter((result) => result.status === 'rejected').length;
-    if (failures > 0) {
-        logger.warn('Bound tool cleanup completed with failures', {
-            agentKey: context.agentKey,
-            failures,
-            mode: context.mode,
-        });
-    }
-}
-
-// ── Utility ──────────────────────────────────────────────────────────
-
-function generateAgentKey(name: string): string {
-    const slug = name
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '');
-    const suffix = Math.random().toString(36).substring(2, 8);
-    return `${slug}-${suffix}`;
-}
-
-// ── Agent CRUD ───────────────────────────────────────────────────────
-
-export async function createAgentRecord(
-    tenantDbName: string,
-    tenantId: string,
-    projectId: string,
-    userId: string,
-    data: {
-        name: string;
-        description?: string;
-        config: IAgent['config'];
-        status?: IAgent['status'];
-        /** A key chosen by the caller (checked for uniqueness below). Default: the name as a slug plus a random suffix. */
-        key?: string;
-        /** Where the agent came from (`metadata.template` for an agent made from a template). */
-        metadata?: IAgent['metadata'];
-        /** Makes it a hidden agent owned by a flow node (never listed; see `flows/ownedAgents.ts`). */
-        owner?: IAgent['owner'];
-    },
-): Promise<IAgent> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-
-    const key = data.key ?? generateAgentKey(data.name);
-
-    // Verify uniqueness
-    const existing = await db.findAgentByKey(key, projectId);
-    if (existing) {
-        throw new Error(`Agent key "${key}" already exists`);
-    }
-
-    const agent = await db.createAgent({
-        tenantId,
-        projectId,
-        key,
-        name: data.name,
-        description: data.description,
-        // Sandbox secrets are sealed here, the one write path every creator
-        // (dashboard, client API) goes through.
-        config: sealAgentConfigSecrets(migrateAgentReasoning(data.config), undefined),
-        status: data.status || 'active',
-        ...(data.metadata ? { metadata: data.metadata } : {}),
-        ...(data.owner ? { owner: data.owner } : {}),
-        createdBy: userId,
-    });
-
-    logger.info('Agent created', { key, projectId });
-    return agent;
-}
-
-export async function updateAgentRecord(
-    tenantDbName: string,
-    agentId: string,
-    data: Partial<Omit<IAgent, 'tenantId' | 'key' | 'createdBy'>>,
-    userId: string,
-): Promise<IAgent | null> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    // Old Advanced-tab reasoning moves next to the model on every save.
-    if (data.config) data = { ...data, config: migrateAgentReasoning(data.config) };
-    if (data.config?.sandbox || data.config?.callback !== undefined) {
-        // `config` replaces the stored one wholesale; masked secret values
-        // must resolve against what is stored, not be saved as the mask —
-        // and a plaintext secret (sandbox secrets, the callback secret) must
-        // be sealed before it is written. A callback sent without a URL (or
-        // as `null`) is the way to remove it: the field is dropped here.
-        const current = await db.findAgentById(agentId);
-        data = { ...data, config: sealAgentConfigSecrets(data.config, current?.config) };
-    } else if (data.config) {
-        // The removed Execution settings a stored config may still carry go on save.
-        data = { ...data, config: stripLegacyExecutionConfig(data.config) };
-    }
-    return db.updateAgent(agentId, { ...data, updatedBy: userId });
-}
-
-export async function deleteAgentRecord(
-    tenantDbName: string,
-    agentId: string,
-): Promise<boolean> {
-    return runWithTenantScope(tenantDbName, async (db) => {
-        const agent = await db.findAgentById(agentId);
-        const deleted = await db.deleteAgent(agentId);
-        // Its triggers (and their webhook delivery logs) go with it: nothing could fire them any more.
-        if (deleted && agent) {
-            const triggers = await db.listAgentTriggers({ tenantId: agent.tenantId, projectId: agent.projectId, agentKey: agent.key });
-            // A connector trigger gives up its subscription while its row still exists.
-            await detachConnectorTriggers({ tenantId: agent.tenantId, tenantDbName }, triggers);
-            for (const trigger of triggers) await db.deleteAgentTriggerDeliveries(String(trigger._id));
-            await db.deleteAgentTriggersForAgent(agent.tenantId, agent.projectId, agent.key);
-        }
-        return deleted;
-    }).then(async (deleted) => {
-        // The MCP servers and skills created inside the agent were part of it, so they go too.
-        if (deleted) await deleteAgentOwnedResources(tenantDbName, agentId);
-        return deleted;
-    });
-}
-
-export async function getAgentById(
-    tenantDbName: string,
-    agentId: string,
-): Promise<IAgent | null> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return withMigratedReasoning(await db.findAgentById(agentId));
-}
-
-/**
- * An agent by key, for the API surfaces that look agents up by name (the client API, A2A, the OpenAI
- * bridge, triggers, analysis...). A hidden agent owned by a flow node is NOT found here - it is not
- * addressable from outside its flow - unless the caller is the machinery behind the owning flow
- * (`includeOwned`: trace sessions, approval and session access checks).
- */
-export async function getAgentByKey(
-    tenantDbName: string,
-    key: string,
-    projectId?: string,
-    options: { includeOwned?: boolean } = {},
-): Promise<IAgent | null> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const agent = await db.findAgentByKey(key, projectId);
-    if (agent?.owner && !options.includeOwned) return null;
-    return withMigratedReasoning(agent);
-}
-
-/** Read-side half of the `runtime.reasoning` migration (the save side is in create/update). */
-function withMigratedReasoning(agent: IAgent | null): IAgent | null {
-    if (!agent?.config) return agent;
-    const config = migrateAgentReasoning(agent.config);
-    return config === agent.config ? agent : { ...agent, config };
-}
-
-export async function listAgents(
-    tenantDbName: string,
-    // Hidden agents owned by a flow node are left out unless `owned` asks for them (see the provider's `listAgents`).
-    filters?: { projectId?: string; status?: IAgent['status']; search?: string; owned?: 'include' | 'only'; ownerFlowId?: string },
-): Promise<IAgent[]> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db.listAgents(filters);
-}
-
-// ── Agent Publish & Versioning ───────────────────────────────────────
-
-/**
- * Publishes the current agent config as a new immutable version.
- * After publishing, API/SDK calls will use this version by default.
- */
-export async function publishAgent(
-    tenantDbName: string,
-    agentId: string,
-    userId: string,
-    changelog?: string,
-): Promise<IAgentVersion> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-
-    const agent = await db.findAgentById(agentId);
-    if (!agent) throw new Error(`Agent "${agentId}" not found`);
-
-    // Keep versioning monotonic even if agent.latestVersion was not persisted
-    // correctly in older SQLite writes.
-    const latestPublishedSnapshot = await db.findLatestAgentVersion(String(agent._id));
-    const latestKnownVersion = Math.max(
-      agent.latestVersion ?? 0,
-      agent.publishedVersion ?? 0,
-      latestPublishedSnapshot?.version ?? 0,
-    );
-    const nextVersion = latestKnownVersion + 1;
-
-    // An imported agent waits as a draft until someone reviews and publishes it, so
-    // publishing turns it on. An agent someone switched off stays inactive.
-    const status = agent.status === 'draft' ? 'active' : agent.status;
-
-    const version = await db.createAgentVersion({
-        tenantId: agent.tenantId,
-        projectId: agent.projectId,
-        agentId: String(agent._id),
-        agentKey: agent.key,
-        version: nextVersion,
-        snapshot: {
-            name: agent.name,
-            description: agent.description,
-            config: agent.config,
-            status,
-        },
-        changelog,
-        publishedBy: userId,
-    });
-
-    // Update agent with latest published version
-    await db.updateAgent(agentId, {
-        publishedVersion: nextVersion,
-        latestVersion: nextVersion,
-        ...(status !== agent.status ? { status } : {}),
-        updatedBy: userId,
-    });
-
-    logger.info('Agent published', {
-        agentId,
-        agentKey: agent.key,
-        version: nextVersion,
-    });
-
-    return version;
-}
-
-export async function getAgentVersion(
-    tenantDbName: string,
-    agentId: string,
-    version: number,
-): Promise<IAgentVersion | null> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db.findAgentVersion(agentId, version);
-}
-
-export async function listAgentVersions(
-    tenantDbName: string,
-    agentId: string,
-    options?: { limit?: number; skip?: number },
-): Promise<{ versions: IAgentVersion[]; total: number }> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db.listAgentVersions(agentId, options);
-}
-
 // Lives in agentConfigResolution.ts (the spend pre-flight and the sub-agent roster need it without
 // importing this module); the name stays here for every caller.
 export { resolveAgentConfig } from './agentConfigResolution';
-
-/**
- * Which version of an agent a realtime (voice) session should run, as the
- * `version` to hand `executePlaygroundChat` — undefined means the draft.
- *
- * Realtime presets default to `'published'`: a phone line is production
- * traffic and must not change under it each time someone edits the draft.
- * With nothing published (or the snapshot missing) it falls back to the draft,
- * the same rule `resolveAgentConfig` applies to API calls. An unknown agent
- * resolves to undefined rather than throwing: the run that follows fails with
- * the proper "not found" error on the path that already reports it.
- */
-export async function resolveAgentVoiceVersion(params: {
-    tenantDbName: string;
-    projectId?: string;
-    agentKey: string;
-    prefer: 'published' | 'draft';
-}): Promise<number | undefined> {
-    if (params.prefer === 'draft') return undefined;
-    const db = await getDatabase();
-    await db.switchToTenant(params.tenantDbName);
-    const agent = await db.findAgentByKey(params.agentKey, params.projectId);
-    if (!agent) {
-        logger.warn('Voice version lookup: agent not found', { agentKey: params.agentKey });
-        return undefined;
-    }
-    if (!agent.publishedVersion) return undefined;
-    const snapshot = await db.findAgentVersion(String(agent._id), agent.publishedVersion);
-    return snapshot ? snapshot.version : undefined;
-}
-
-// ── Model connection check ───────────────────────────────────────────
-
-export interface AgentModelCheckResult {
-    ok: boolean;
-    latencyMs: number;
-    /** Set when the check failed — see `classifyAgentRunError`. */
-    error?: { message: string; type: string; code?: string | null };
-}
-
-/**
- * The chat model an agent run (or the model check, or a title) talks to: an
- * agent-sdk chat model whose every call is a call into the gateway
- * (gatewayChatModel.ts) - so whatever is configured on the Model Hub record applies
- * to the agent too. A Dynamic LLM is no different: the gateway routes it per call.
- */
-export async function buildAgentChatModel(
-    tenantDbName: string,
-    tenantId: string,
-    projectId: string,
-    modelKey: string,
-    overrides: Record<string, unknown> = {},
-    /** What the agent selected for this model (wins over everything). */
-    reasoning?: NativeAgentReasoning,
-    /** What the API request asked for (lowest rung; see agentReasoning.ts). */
-    requestReasoning?: NativeAgentReasoning,
-    /** What this call is for and who it is made for: the usage row's route and attribution, spend, routing. */
-    call: AgentModelCall = {},
-) {
-    const model = await getModelByKey(tenantDbName, modelKey, projectId);
-    if (!model) throw new Error(`Model "${modelKey}" not found`);
-    if (model.category !== 'llm') throw new Error('Configured model is not compatible with chat');
-
-    // Top P, Max Tokens, `unsupportedParams` and `requestDefaults` take effect inside
-    // the gateway, exactly as for any other caller of the model.
-    const passthrough: Record<string, unknown> = {};
-    for (const key of ['temperature', 'top_p', 'max_tokens'] as const) {
-        if (overrides[key] !== undefined) passthrough[key] = overrides[key];
-    }
-    const chatModel = await buildGatewayChatModel({
-        tenantDbName,
-        tenantId,
-        projectId,
-        model,
-        overrides: passthrough,
-        ...(reasoning ? { reasoning } : {}),
-        ...(requestReasoning ? { requestReasoning } : {}),
-        ...call,
-    });
-    return { model, chatModel };
-}
-
-/** The usage-row side of `buildAgentChatModel`. */
-export type AgentModelCall = AgentModelCaller & Pick<Parameters<typeof buildGatewayChatModel>[0], 'route' | 'purpose' | 'showReasoning' | 'onReasoning' | 'onCost' | 'onRouted' | 'maxTotalOutputTokens' | 'outputLimitTap'>;
-
-/**
- * `describeTurnOutcome` for a run of the agent's own model: it is told how the model's last call
- * ended at its output limit, and a limit notice is flagged in the run's state so the next turn
- * does not replay it to the model (outputLimitNotice.ts).
- */
-function describeRunOutcome(
-    result: Parameters<typeof describeTurnOutcome>[0],
-    inputMessageCount: number,
-    outputLimit: OutputLimitTap,
-): AgentTurnOutcome {
-    const report = outputLimit.latest();
-    markOutputLimitNotice(result.state, report);
-    return describeTurnOutcome(result, inputMessageCount, report);
-}
-
-/**
- * One tiny completion through exactly the path an agent run uses (the model's
- * provider runtime and invocation settings), so a wrong API key or a deleted
- * deployment shows up on the Configure page — not as an agent that "doesn't
- * answer" in its first session.
- */
-export async function checkAgentModel(
-    tenantDbName: string,
-    tenantId: string,
-    projectId: string,
-    modelKey: string,
-): Promise<AgentModelCheckResult> {
-    const startedAt = Date.now();
-    try {
-        const { model, chatModel } = await buildAgentChatModel(
-            tenantDbName, tenantId, projectId, modelKey, {}, undefined, undefined,
-            { route: 'agent.check', purpose: 'model-check' },
-        );
-        await chatModel
-            .invoke([{ role: 'user', content: 'Reply with the single word OK.' }])
-            .catch((error: unknown) => {
-                throw annotateAgentRunError(error, { modelKey: model.key, providerKey: model.providerKey });
-            });
-        return { ok: true, latencyMs: Date.now() - startedAt };
-    } catch (error) {
-        logger.info('Agent model check failed', {
-            modelKey,
-            error: error instanceof Error ? error.message : String(error),
-        });
-        return { ok: false, latencyMs: Date.now() - startedAt, error: classifyAgentRunError(error, { exposeInternal: true }).error };
-    }
-}
-
-// ── Conversation CRUD ────────────────────────────────────────────────
-
-/**
- * Where a conversation came from, stored as `metadata.source`. Only
- * `console` sessions — the ones a person started from the dashboard to try the
- * agent — can be continued from the UI; the rest are real traffic (or a
- * run's own bookkeeping) and are shown read-only. Records written before this
- * existed carry no source. `portal` is end-user traffic through an enterprise
- * portal page (/p/<key>): real usage, so read-only in the Studio like the rest.
- */
-export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'trigger' | 'evaluation' | 'redteam' | 'portal' | 'slack' | 'teams';
-
-export async function createConversation(
-    tenantDbName: string,
-    tenantId: string,
-    projectId: string,
-    userId: string,
-    agentKey: string,
-    title?: string,
-    /** Session-level context — applied to every turn, see `executePlaygroundChatLocal`. */
-    metadata?: Record<string, unknown>,
-    /**
-     * The session's spend budget. Absent = the agent's own default
-     * (`config.budget`); `null` = none, whatever the agent's default.
-     */
-    budget?: IAgentSessionBudget | null,
-): Promise<IAgentConversation> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-
-    const sessionBudget = budget === undefined
-        ? agentSessionBudget((await db.findAgentByKey(agentKey, projectId))?.config)
-        : budget ?? undefined;
-
-    return db.createAgentConversation({
-        tenantId,
-        projectId,
-        agentKey,
-        title: title || 'New conversation',
-        messages: [],
-        ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
-        ...(sessionBudget ? { budget: sessionBudget, spentUsd: 0 } : {}),
-        createdBy: userId,
-    });
-}
-
-export async function getConversationById(
-    tenantDbName: string,
-    conversationId: string,
-): Promise<IAgentConversation | null> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const conversation = await db.findAgentConversationById(conversationId);
-    // A "running" session whose turn died (process crash) reads as ended.
-    return conversation ? withSessionSpend(await normalizeStaleRunningStatus(db, conversation)) : null;
-}
-
-export async function listConversations(
-    tenantDbName: string,
-    agentKey: string,
-    filters?: { projectId?: string; limit?: number; skip?: number; createdBy?: string },
-): Promise<IAgentConversation[]> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return normalizeStaleRunningStatuses(db, await db.listAgentConversations(agentKey, filters));
-}
-
-export async function deleteConversation(
-    tenantDbName: string,
-    conversationId: string,
-): Promise<boolean> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    // A persistent agent sandbox belongs to its conversation and goes with it.
-    const conversation = await db.findAgentConversationById(conversationId);
-    if (conversation?.metadata?.sandbox) {
-        await destroyConversationSandbox({ tenantDbName, tenantId: conversation.tenantId, conversation });
-    }
-    // So do the files attached to it (object, markdown and row).
-    if (conversation) await deleteConversationFiles(tenantDbName, conversation);
-    return db.deleteAgentConversation(conversationId);
-}
 
 // ── Agent Chat Execution ─────────────────────────────────────────────
 
@@ -2475,217 +1130,6 @@ async function buildLocalAgentRun(input: {
     };
 }
 
-/** `metadata` of a stored assistant message: the model that answered (see IAgentConversationMessage.metadata). */
-function answeredWithMetadata(modelKey: string, offered: boolean, routedModel: string | undefined) {
-    if (!offered && !routedModel) return {};
-    return { metadata: { model: modelKey, ...(routedModel ? { routedModel } : {}) } };
-}
-
-/**
- * Invoke options that forward the answer's deltas to `onTextChunk`.
- *
- * `stream: true` is what actually turns provider deltas on — with only
- * `onStream` the SDK fires it exactly once, at the end, with the whole answer.
- * That terminal `isFinal` call repeats the FULL content, so forwarding it
- * would print the answer twice: once streamed, once again in one burst.
- */
-function textStreamOptions(onTextChunk: ((text: string) => void) | undefined, agentKey: string) {
-    if (!onTextChunk) return {};
-    return {
-        stream: true,
-        onStream: (chunk: { text?: string; isFinal?: boolean }) => {
-            // The SDK passes a sub-agent's deltas up only when asked to (the console never asks), stamped
-            // with the sub-agent. They are its text, not this answer's: appended, they would read as the
-            // parent's words and end up in the partial answer of an aborted turn.
-            if (chunk.isFinal || !chunk.text || isSubagentEvent(chunk)) return;
-            try {
-                onTextChunk(chunk.text);
-            } catch (callbackError) {
-                logger.warn('onTextChunk callback failed', { agentKey, error: callbackError });
-            }
-        },
-    };
-}
-
-/**
- * Taps the SDK's `reasoning` events of one turn: forwards each piece to the
- * caller and keeps the whole text.
- *
- * The SDK emits them only while the model call streams (`stream: true`), one
- * event per provider delta and no marker between model steps; a step boundary
- * (a tool call, or answer text) is therefore remembered and the next piece
- * starts a new paragraph, so a turn that thought before and after a tool call
- * reads as two thoughts rather than one run-on. `enabled: false` swallows
- * everything (the agent hides its reasoning).
- */
-export function createReasoningTap(
-    onReasoningChunk: ((text: string) => void) | undefined,
-    agentKey: string,
-    enabled = true,
-): {
-    listening: boolean;
-    onEvent: (event: AgentSdkEvent) => void;
-    text: () => string;
-} {
-    let collected = '';
-    let boundary = false;
-    return {
-        listening: Boolean(onReasoningChunk) && enabled,
-        onEvent: (event) => {
-            if (!enabled) return;
-            // A sub-agent's thinking, tool calls and text reach this tap too, stamped with the sub-agent:
-            // none of it is this turn's thinking or a boundary between this turn's model steps.
-            if (isSubagentEvent(event)) return;
-            if (event.type === 'tool_call' || event.type === 'stream') {
-                if (collected) boundary = true;
-                return;
-            }
-            if (event.type !== 'reasoning' || typeof event.text !== 'string' || !event.text) return;
-            const piece = boundary ? `\n\n${event.text}` : event.text;
-            boundary = false;
-            collected += piece;
-            if (!onReasoningChunk) return;
-            try {
-                onReasoningChunk(piece);
-            } catch (callbackError) {
-                logger.warn('onReasoningChunk callback failed', { agentKey, error: callbackError });
-            }
-        },
-        text: () => collected,
-    };
-}
-
-/**
- * `textStreamOptions` plus the switch for reasoning: a caller that wants only
- * the thinking still needs the model call to stream, or the SDK emits nothing.
- */
-function liveStreamOptions(
-    onTextChunk: ((text: string) => void) | undefined,
-    reasoningTap: { listening: boolean },
-    agentKey: string,
-) {
-    const text = textStreamOptions(onTextChunk, agentKey);
-    return reasoningTap.listening ? { ...text, stream: true } : text;
-}
-
-/**
- * A sub-agent event that names the delegation CALL it belongs to. The SDK keys each
- * child of `spawn_subagents_parallel` `<call>#<index>` (its pause store is keyed by
- * it), while the group a run is shown in, the call it is anchored on and the card
- * that asks for its approval are all matched by the call itself: the suffix is cut
- * here, once, before the tracker, the session log and the live callbacks see the event.
- */
-function onDelegationCall<T extends object>(event: T): T {
-    const parent = (event as { parentToolCallId?: unknown }).parentToolCallId;
-    if (typeof parent !== 'string') return event;
-    const call = delegationCallIdOf(parent);
-    return call === parent ? event : { ...event, parentToolCallId: call };
-}
-
-/**
- * Feeds one invoke leg's SDK events to its flow tracker and passes on what the
- * tracker makes of them: the session log rows, and the live callbacks of the
- * caller (when it listens). The three invoke paths (background/API, playground,
- * resume) call this for every event, so they record the turn the same way.
- *
- * What the tracker keeps apart is what keeps the turn honest: a delegated child's
- * tool calls and summarization passes are told live and logged with the child's
- * name, but never counted as the agent's own steps or compactions (a child
- * compacting its own context did not shorten this turn's messages). A child whose
- * run the tracker had no room for (past its cap) is not told or logged at all: a
- * viewer would show a run that never ends.
- */
-function createTurnFlowSink(options: {
-    tracker: TurnFlowTracker;
-    turnEvents: Pick<SessionTurnEvents, 'onSdkEvent' | 'onCompaction' | 'onPlan' | 'onSubagent'> | undefined;
-    agentKey: string;
-    /** The delegation calls this leg re-enters (marked on their `start`). */
-    resumedCalls?: ReadonlySet<string>;
-    onToolEvent?: (event: AgentToolCallEvent) => void;
-    onCompaction?: (compaction: AgentCompactionEvent) => void;
-    onPlan?: (plan: AgentPlanEvent) => void;
-    onSubagent?: (event: AgentSubagentEvent) => void;
-}): (event: AgentSdkEvent) => void {
-    const { tracker, turnEvents, agentKey } = options;
-    /** A caller's callback must never break the run. */
-    const tell = <T>(name: string, callback: ((value: T) => void) | undefined, value: T) => {
-        if (!callback) return;
-        try {
-            callback(value);
-        } catch (callbackError) {
-            logger.warn(`${name} callback failed`, { agentKey, error: callbackError });
-        }
-    };
-    return (event) => {
-        switch (event.type) {
-            case 'tool_call': {
-                const { stamp, dropped } = tracker.noteToolCall(event);
-                if (dropped) return;
-                turnEvents?.onSdkEvent(event, stamp);
-                if (!options.onToolEvent) return;
-                const payload = toToolCallEvent(event, options.resumedCalls);
-                if (!payload) return;
-                tell('onToolEvent', options.onToolEvent, stamp ? { ...payload, subagent: stamp } : payload);
-                return;
-            }
-            case 'plan': {
-                const plan = tracker.notePlan(event);
-                if (!plan) return;
-                turnEvents?.onPlan(plan);
-                tell('onPlan', options.onPlan, plan);
-                return;
-            }
-            case 'subagent': {
-                const lifecycle = tracker.noteSubagent(onDelegationCall(event));
-                if (!lifecycle) return;
-                turnEvents?.onSubagent(lifecycle);
-                tell('onSubagent', options.onSubagent, lifecycle);
-                return;
-            }
-            case 'summarization': {
-                const note = tracker.noteCompaction(event);
-                if (!note) return;
-                if (note.persist) turnEvents?.onCompaction(note.event);
-                tell('onCompaction', options.onCompaction, note.event);
-                return;
-            }
-            default:
-                return;
-        }
-    };
-}
-
-/**
- * What a leg's tracker recorded, as the fields of the assistant message (and of
- * the playground result): only those that happened, so a turn without a plan or
- * a sub-agent stores nothing extra. A turn that called its plan tool and wrote
- * no version (a read) stores an empty `plans`: the field says the turn records its
- * plan versions, so a reader leaves that call out as the live view does, where a
- * turn without any plan call (or stored before plans were recorded) keeps every
- * call it made. `compactedToolsOf` finds the whole leg's replaced
- * tool results by diffing the transcript (see `compactedToolResults`); it is asked
- * only when a pass happened, and the tracker hands each result to the pass that made it.
- */
-function turnFlowRecord(
-    tracker: TurnFlowTracker,
-    compactedToolsOf: () => Array<{ toolName: string; toolCallId: string }>,
-): Pick<IAgentConversationMessage, 'plans' | 'subagentRuns' | 'subagentRunsDropped' | 'compactions' | 'compactedTools'> {
-    const { plans, planCalls, subagentRuns, subagentRunsDropped, compactions: passes } = tracker.snapshot();
-    const compactedTools = passes.length > 0 ? compactedToolsOf() : [];
-    const compactions = tracker.finalizeCompactedTools(compactedTools);
-    return {
-        ...(compactions.length > 0 ? { compactions, ...(compactedTools.length > 0 ? { compactedTools: [...compactedTools] } : {}) } : {}),
-        ...(plans.length > 0 || planCalls > 0 ? { plans } : {}),
-        ...(subagentRuns.length > 0 ? { subagentRuns } : {}),
-        ...(subagentRunsDropped > 0 ? { subagentRunsDropped } : {}),
-    };
-}
-
-/** The reasoning of a finished turn: what streamed (every model step), else the last message's. */
-function turnReasoning(result: AgentSdkInvokeResult, reasoningTap: { text: () => string }): string | undefined {
-    return reasoningTap.text() || extractAgentReasoning(result);
-}
-
 /**
  * Whether an agent's answer may reach `onTextChunk` while it is generated.
  *
@@ -2700,125 +1144,6 @@ function turnReasoning(result: AgentSdkInvokeResult, reasoningTap: { text: () =>
  */
 export function agentMayStreamAnswer(config: GuardrailBindingSource): boolean {
     return resolveBindings(config, 'output.pre').length === 0;
-}
-
-/**
- * The runtime context a turn runs with: the session's own (`metadata.runtimeContext`,
- * entered once when the session was started) UNDER the caller's, so a
- * per-message value still wins. Headers and metadata merge key by key.
- */
-function mergeSessionRuntimeContext(
-    conversation: Pick<IAgentConversation, 'metadata'> | null | undefined,
-    requestContext: AgentRuntimeContext | undefined,
-): AgentRuntimeContext | undefined {
-    const sessionContext = conversation?.metadata?.runtimeContext as AgentRuntimeContext | undefined;
-    if (!sessionContext) return requestContext;
-    return {
-        ...sessionContext,
-        ...requestContext,
-        headers: { ...sessionContext.headers, ...requestContext?.headers },
-        metadata: { ...sessionContext.metadata, ...requestContext?.metadata },
-    };
-}
-
-/**
- * The files a message attaches, checked against the session BEFORE anything
- * runs (a refusal must not mark the session running or leave tools open).
- * Throws `AgentAttachmentError`; empty when the message attaches nothing.
- *
- * That is the files it names, plus — when the agent's `attachNewUploads` is on
- * (the default) — the files uploaded to the session that no message has carried
- * yet. Every channel that starts a turn gets that here, so "create a session,
- * upload, ask" works the same from the dashboard, the Responses API, a
- * background run or a portal.
- */
-async function resolveMessageAttachments(input: {
-    tenantDbName: string;
-    tenantId: string;
-    projectId: string;
-    conversation: IAgentConversation | null;
-    config: IAgentConfig;
-    fileIds: string[] | undefined;
-}): Promise<IFileRecord[]> {
-    const named = input.fileIds ?? [];
-    const availability = attachmentsAvailability(input.config);
-    if (named.length > 0) {
-        if (!input.conversation) {
-            throw new AgentAttachmentError(400, 'attachment_not_found', 'Attachments belong to a session; start one and upload the files to it first.');
-        }
-        if (!availability.available) {
-            throw new AgentAttachmentError(403, 'attachments_disabled', attachmentsUnavailableMessage(availability.reason));
-        }
-    }
-    const scope = { tenantDbName: input.tenantDbName, tenantId: input.tenantId, projectId: input.projectId };
-    const records = input.conversation && named.length > 0
-        ? await resolveTurnAttachments(scope, String(input.conversation._id), named)
-        : [];
-
-    if (input.conversation && availability.available && availability.cfg.attachNewUploads) {
-        const carried = new Set(records.map((record) => String(record._id)));
-        for (const record of await findUnsentSessionFiles(scope, input.conversation)) {
-            if (!carried.has(String(record._id))) records.push(record);
-        }
-    }
-    return records;
-}
-
-/**
- * The attached files made ready for the model — in the turn, or readable with
- * the session file tools, images as parts when the model takes them. Never
- * fails the turn: what could not be read is a warning.
- */
-async function assembleMessageAttachments(input: {
-    tenantDbName: string;
-    tenantId: string;
-    projectId: string;
-    records: IFileRecord[];
-    config: IAgentConfig;
-    model: Parameters<typeof resolveModelCapabilities>[0];
-    warnings: Set<string>;
-}): Promise<AssembledAttachments> {
-    if (input.records.length === 0) return NO_ATTACHMENTS;
-    const assembled = await assembleTurnAttachments({
-        scope: { tenantDbName: input.tenantDbName, tenantId: input.tenantId, projectId: input.projectId },
-        records: input.records,
-        cfg: resolveAttachmentsConfig(input.config.attachments),
-        supportsVision: resolveModelCapabilities(input.model).inputModalities.includes('image'),
-    });
-    for (const warning of assembled.warnings) input.warnings.add(warning);
-    return assembled;
-}
-
-/**
- * How the files of EARLIER messages reach the model again (`buildTurnInputState`):
- * a transcript replay rebuilds each message with its attachments, and the last
- * `attachments.carryRecentImages` messages with images are shown again when the
- * agent's own context no longer holds them. Absent for a stateless call, which
- * has no session and so no files.
- */
-async function earlierAttachments(input: {
-    db: Awaited<ReturnType<typeof getDatabase>>;
-    conversation: IAgentConversation | null;
-    config: IAgentConfig;
-    model: Parameters<typeof resolveModelCapabilities>[0];
-}): Promise<NonNullable<Parameters<typeof buildTurnInputState>[0]['attachments']> | undefined> {
-    if (!input.conversation) return undefined;
-    const cfg = resolveAttachmentsConfig(input.config.attachments);
-    const supportsVision = resolveModelCapabilities(input.model).inputModalities.includes('image');
-    const carryRecentImages = supportsVision && agentTakesAttachments(input.config) ? cfg.carryRecentImages : 0;
-    let availableFileIds: Set<string> | undefined;
-    if (carryRecentImages > 0 && input.conversation.messages?.some((message) => message.attachments?.length)) {
-        try {
-            const records = await input.db.listFileRecordsByConversation(String(input.conversation._id));
-            availableFileIds = new Set(records.map((record) => String(record._id)));
-        } catch (error) {
-            logger.debug('Could not list the session files to carry images from', { error: error instanceof Error ? error.message : String(error) });
-        }
-    }
-    // The window the SDK builds each request from: a picture counts as still seen only inside it.
-    const { policy, lastTurnsToKeep } = resolveAgentRuntimeOptions(input.config).context ?? {};
-    const window = policy && lastTurnsToKeep ? { policy, lastTurnsToKeep } : undefined;
-    return { supportsVision, carryRecentImages, ...(availableFileIds ? { availableFileIds } : {}), ...(window ? { window } : {}) };
 }
 
 /**
@@ -2854,15 +1179,6 @@ function sessionStopReason(
     // (`pauseUnavailableOutcome`); this fallback only guards a caller that did not.
     if (outcome === 'paused') return pause ? 'requires_action' : 'error';
     return toSessionStopReason(outcome);
-}
-
-/**
- * The OpenAI Responses–shaped reply to one exchange. `outcome` is absent for a
- * connected agent, which reports no stop reason at all.
- */
-/** `agent.output_file` event payloads of a turn's output attachments. */
-function outputFileEvents(conversationId: string, attachments: ReadonlyArray<IAgentMessageAttachment>): Array<Record<string, unknown>> {
-    return toClientOutputFiles(conversationId, attachments).map(outputFileEventData);
 }
 
 /** What a continuation must apply again: the turn's own structured output and variables, and who the turn is for. */
