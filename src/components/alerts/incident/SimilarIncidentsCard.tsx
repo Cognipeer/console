@@ -1,14 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { Text } from '@mantine/core';
 import { DetailCard } from '@/components/common/ui/DetailShell';
 import { formatRelative } from '@/components/iam/timeFormat';
+import { useSimilarIncidents } from '@/lib/api/queries/alertIncidents';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import { formatDurationMs } from '../inbox/inboxModel';
 import { statusBadgeClass } from '../incidentUi';
-import type { SimilarIncidentsDto } from '../alertTypes';
 
 /** The server stops counting here; show "200+" rather than a figure that looks exact. */
 const COUNT_CEILING = 200;
@@ -17,26 +16,9 @@ const COUNT_CEILING = 200;
 export default function SimilarIncidentsCard({ incidentId, relatedPath }: { incidentId: string; relatedPath: string }) {
   const t = useTranslations('incidents');
   const locale = useLocale();
-  const [data, setData] = useState<SimilarIncidentsDto | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setData(null);
-    setFailed(false);
-    fetch(`/api/alerts/incidents/${encodeURIComponent(incidentId)}/similar`, { signal: controller.signal, cache: 'no-store' })
-      .then(async (res) => {
-        if (!res.ok) throw new Error('similar');
-        return (await res.json()) as SimilarIncidentsDto;
-      })
-      .then((body) => {
-        if (!controller.signal.aborted) setData(body);
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) setFailed(true);
-      });
-    return () => controller.abort();
-  }, [incidentId]);
+  const query = useSimilarIncidents(incidentId);
+  const data = query.data ?? null;
+  const failed = query.isError;
 
   return (
     <DetailCard title={t('ux.similar.title')} description={t('ux.similar.description')}>

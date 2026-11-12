@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useMemo, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { Badge, Button, Center, Stack, Text, Textarea, Timeline } from '@mantine/core';
@@ -23,7 +23,7 @@ import DetailShell, { DetailCard, DetailTwoCol } from '@/components/common/ui/De
 import { DetailSkeleton } from '@/components/common/ui/Skeletons';
 import { formatDateTime } from '@/components/iam/timeFormat';
 import LoadError from '@/components/alerts/LoadError';
-import { isAbortError, readApiError } from '@/components/alerts/apiError';
+import { apiErrorMessage } from '@/components/alerts/apiError';
 import {
   entityHref,
   entityOf,
@@ -40,7 +40,7 @@ import {
 import { useAlertMeta } from '@/components/alerts/useAlertMeta';
 import { pluralKey } from '@/components/alerts/plural';
 import { userLabel as resolveUserLabel, useUserDirectory } from '@/components/alerts/useUserDirectory';
-import type { IncidentDto, IncidentStatus } from '@/components/alerts/alertTypes';
+import type { IncidentStatus } from '@/components/alerts/alertTypes';
 import {
   INCIDENT_TRANSITIONS,
   describeRowValue,
@@ -53,6 +53,8 @@ import {
   translateServerNotes,
   type TimelineEntry,
 } from '@/components/alerts/incidentUi';
+import { isApiError } from '@/lib/api/client';
+import { useAddIncidentNote, useIncident, useUpdateIncident } from '@/lib/api/queries/alertIncidents';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import DeliveryTimeline from '@/components/alerts/incident/DeliveryTimeline';
 import InvestigateCard from '@/components/alerts/incident/InvestigateCard';
@@ -91,14 +93,18 @@ export default function IncidentDetailPage() {
   const { catalog } = useAlertMeta();
   const directory = useUserDirectory();
 
-  const [incident, setIncident] = useState<IncidentDto | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notFound, setNotFound] = useState(false);
   const [noteContent, setNoteContent] = useState('');
-  const [noteLoading, setNoteLoading] = useState(false);
   const [inflight, setInflight] = useState<string | null>(null);
+
+  const incidentQuery = useIncident(incidentId);
+  const incident = incidentQuery.data ?? null;
+  // A 404 is an answer ("no such incident"); a retry from the error screen shows the skeleton again.
+  const notFound = isApiError(incidentQuery.error) && incidentQuery.error.status === 404;
+  const loading = incidentQuery.isPending || (incidentQuery.isFetching && !incident);
+  const refreshing = incidentQuery.isFetching && !loading;
+  const error = incidentQuery.isError && !notFound ? apiErrorMessage(incidentQuery.error, t('loadError')) : null;
+  const { refetch: refetchIncident } = incidentQuery;
+  const reload = () => void refetchIncident();
 
   const { rule, setRule } = useIncidentRule(incident?.ruleId);
   const linkEntities = useMemo(() => {
@@ -110,60 +116,14 @@ export default function IncidentDetailPage() {
   }, [incident]);
   const entityLinks = useEntityLinks(linkEntities, incident?.projectId);
 
-  const controllerRef = useRef<AbortController | null>(null);
-  const load = useCallback(
-    async (silent = false) => {
-      if (!incidentId) return;
-      controllerRef.current?.abort();
-      const controller = new AbortController();
-      controllerRef.current = controller;
-      if (silent) setRefreshing(true);
-      else setLoading(true);
-      try {
-        const res = await fetch(`/api/alerts/incidents/${encodeURIComponent(incidentId)}`, { cache: 'no-store', signal: controller.signal });
-        if (res.status === 404) {
-          setNotFound(true);
-          setIncident(null);
-          return;
-        }
-        if (!res.ok) throw new Error(await readApiError(res, t('loadError')));
-        const data = (await res.json()) as { incident: IncidentDto };
-        setIncident(data.incident);
-        setNotFound(false);
-        setError(null);
-      } catch (err) {
-        if (isAbortError(err) || controller.signal.aborted) return;
-        setError(err instanceof Error ? err.message : t('loadError'));
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-          setRefreshing(false);
-        }
-      }
-    },
-    [incidentId, t],
-  );
-
-  useEffect(() => {
-    void load();
-    return () => controllerRef.current?.abort();
-  }, [load]);
-
+  const updateIncident = useUpdateIncident();
   const patchIncident = async (body: Record<string, unknown>, key: string, failure: string) => {
     if (!incident) return;
     setInflight(key);
     try {
-      const res = await fetch(`/api/alerts/incidents/${incident._id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(await readApiError(res, failure));
-      const data = (await res.json()) as { incident: IncidentDto };
-      setIncident(data.incident);
-      return data.incident;
+      return await updateIncident.mutateAsync({ id: incident._id, body });
     } catch (err) {
-      notifications.show({ color: 'red', title: t('error'), message: err instanceof Error ? err.message : failure });
+      notifications.show({ color: 'red', title: t('error'), message: apiErrorMessage(err, failure) });
     } finally {
       setInflight(null);
     }
@@ -191,24 +151,16 @@ export default function IncidentDetailPage() {
     }
   };
 
+  const addIncidentNote = useAddIncidentNote();
+  const noteLoading = addIncidentNote.isPending;
   const addNote = async () => {
     if (!incident || !noteContent.trim()) return;
-    setNoteLoading(true);
     try {
-      const res = await fetch(`/api/alerts/incidents/${incident._id}/notes`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: noteContent }),
-      });
-      if (!res.ok) throw new Error(await readApiError(res, t('noteError')));
-      const data = (await res.json()) as { incident: IncidentDto };
-      setIncident(data.incident);
+      await addIncidentNote.mutateAsync({ id: incident._id, content: noteContent });
       setNoteContent('');
       notifications.show({ color: 'teal', title: t('noteAdded'), message: t('noteAddedMessage') });
     } catch (err) {
-      notifications.show({ color: 'red', title: t('error'), message: err instanceof Error ? err.message : t('noteError') });
-    } finally {
-      setNoteLoading(false);
+      notifications.show({ color: 'red', title: t('error'), message: apiErrorMessage(err, t('noteError')) });
     }
   };
 
@@ -218,7 +170,7 @@ export default function IncidentDetailPage() {
     return (
       <Center py="xl">
         <Stack gap="sm" align="center">
-          {error ? <LoadError message={error} onRetry={() => void load()} /> : <Text c="dimmed">{t('notFound')}</Text>}
+          {error ? <LoadError message={error} onRetry={reload} /> : <Text c="dimmed">{t('notFound')}</Text>}
           <Button leftSection={<IconArrowLeft size={16} />} onClick={() => router.push('/dashboard/alerts/incidents')}>
             {t('backToIncidents')}
           </Button>
@@ -282,7 +234,7 @@ export default function IncidentDetailPage() {
 
   const actions = (
     <>
-      <Button variant="default" size="sm" leftSection={<IconRefresh size={14} stroke={1.7} />} loading={refreshing} onClick={() => void load(true)}>
+      <Button variant="default" size="sm" leftSection={<IconRefresh size={14} stroke={1.7} />} loading={refreshing} onClick={reload}>
         {t('refresh')}
       </Button>
       {INCIDENT_TRANSITIONS[incident.status].map((status) => {
@@ -378,7 +330,7 @@ export default function IncidentDetailPage() {
       </div>
       {error ? (
         <div style={{ marginBottom: 12 }}>
-          <LoadError message={error} onRetry={() => void load(true)} />
+          <LoadError message={error} onRetry={reload} />
         </div>
       ) : null}
       <DetailTwoCol narrowAside>

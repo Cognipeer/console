@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useAlertRule, useSetAlertRule } from '@/lib/api/queries/alerts';
 import type { AlertRuleDto } from '../alertTypes';
 
 /**
@@ -12,28 +12,7 @@ export function useIncidentRule(ruleId: string | undefined): {
   setRule: (rule: AlertRuleDto | null) => void;
   reload: () => void;
 } {
-  const [rule, setRule] = useState<AlertRuleDto | null>(null);
-  const [attempt, setAttempt] = useState(0);
-  const lastId = useRef<string | undefined>(undefined);
-
-  useEffect(() => {
-    if (!ruleId) return;
-    if (lastId.current !== ruleId) {
-      lastId.current = ruleId;
-      setRule(null);
-    }
-    const controller = new AbortController();
-    fetch(`/api/alerts/rules/${encodeURIComponent(ruleId)}`, { signal: controller.signal, cache: 'no-store' })
-      .then(async (res) => (res.ok ? ((await res.json()) as { rule?: AlertRuleDto }) : null))
-      .then((data) => {
-        if (data?.rule && !controller.signal.aborted) setRule(data.rule);
-      })
-      .catch(() => {
-        // the rule is context for the page, not required by it
-      });
-    return () => controller.abort();
-  }, [ruleId, attempt]);
-
-  const reload = useCallback(() => setAttempt((value) => value + 1), []);
-  return { rule, setRule, reload };
+  const query = useAlertRule(ruleId);
+  const setRule = useSetAlertRule();
+  return { rule: query.data ?? null, setRule, reload: () => void query.refetch() };
 }

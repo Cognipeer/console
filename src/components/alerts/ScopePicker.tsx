@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import { Select, TextInput } from '@mantine/core';
+import { useScopeItems } from '@/lib/api/queries/alerts';
 import { useTranslations } from '@/lib/i18n';
 import type { ScopeField } from './ruleForm';
 
@@ -20,11 +21,6 @@ const SCOPE_SOURCES: Record<ScopeField, ScopeSource> = {
   mcpServerKey: { url: '/api/mcp', list: 'servers' },
 };
 
-interface ScopeItem {
-  key: string;
-  name?: string;
-}
-
 export interface ScopePickerProps {
   field: ScopeField;
   value: string;
@@ -40,32 +36,11 @@ export interface ScopePickerProps {
  */
 export default function ScopePicker({ field, value, onChange, label, disabled }: ScopePickerProps) {
   const t = useTranslations('alerts');
-  const [items, setItems] = useState<ScopeItem[] | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    const source = SCOPE_SOURCES[field];
-    setLoading(true);
-    setFailed(false);
-    fetch(source.url, { signal: controller.signal })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(String(res.status));
-        const data = (await res.json()) as Record<string, unknown>;
-        const list = Array.isArray(data[source.list]) ? (data[source.list] as ScopeItem[]) : [];
-        setItems(list.filter((item) => typeof item?.key === 'string' && item.key));
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-        setItems(null);
-        setFailed(true);
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, [field]);
+  const source = SCOPE_SOURCES[field];
+  const query = useScopeItems(source.url, source.list);
+  const items = query.data ?? null;
+  const loading = query.isPending;
+  const failed = query.isError;
 
   const data = useMemo(() => {
     const options = (items ?? []).map((item) => ({ value: item.key, label: item.name ? `${item.name} (${item.key})` : item.key }));

@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { Text } from '@mantine/core';
 import { DetailCard } from '@/components/common/ui/DetailShell';
 import { formatDateTime } from '@/components/iam/timeFormat';
+import { useIncidentDeliveries } from '@/lib/api/queries/alertIncidents';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import {
   DELIVERY_RETENTION_DAYS,
@@ -34,26 +35,9 @@ export default function DeliveryTimeline({ incidentId, firedAt, refreshKey }: Pr
   const t = useTranslations('incidents');
   const ta = useTranslations('alerts');
   const locale = useLocale();
-  const [rows, setRows] = useState<DeliveryDto[] | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    fetch(`/api/alerts/incidents/${encodeURIComponent(incidentId)}/deliveries`, { signal: controller.signal, cache: 'no-store' })
-      .then(async (res) => {
-        if (!res.ok) throw new Error('deliveries');
-        return (await res.json()) as { deliveries?: DeliveryDto[] };
-      })
-      .then((data) => {
-        if (controller.signal.aborted) return;
-        setRows(data.deliveries ?? []);
-        setFailed(false);
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) setFailed(true);
-      });
-    return () => controller.abort();
-  }, [incidentId, refreshKey]);
+  const query = useIncidentDeliveries(incidentId, refreshKey);
+  const rows = query.data ?? null;
+  const failed = query.isError;
 
   const groups = useMemo(() => groupDeliveries(rows ?? []), [rows]);
   const kindLabel = (kind: string) => {

@@ -1,16 +1,16 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Button, Text } from '@mantine/core';
 import { IconChevronRight, IconShieldCheck } from '@tabler/icons-react';
 import { CardSkeleton } from '@/components/common/ui/Skeletons';
 import { formatRelative } from '@/components/iam/timeFormat';
+import { isApiError } from '@/lib/api/client';
+import { useIncidentList } from '@/lib/api/queries/alertIncidents';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import LoadError from './LoadError';
-import { isAbortError, readApiError } from './apiError';
+import { apiErrorMessage } from './apiError';
 import { entityOf, metricLabel } from './alertCatalog';
-import type { IncidentDto } from './alertTypes';
 import { describeRowValue, severityBadgeClass } from './incidentUi';
 import { useAlertMeta } from './useAlertMeta';
 
@@ -35,41 +35,13 @@ export default function ActiveIncidentsCard({ limit = 5, compact = false, hideWh
   const t = useTranslations('alerts');
   const locale = useLocale();
   const { catalog } = useAlertMeta();
-  const [incidents, setIncidents] = useState<IncidentDto[]>([]);
-  const [openCount, setOpenCount] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [hidden, setHidden] = useState(false);
-  const controllerRef = useRef<AbortController | null>(null);
-
-  const load = useCallback(async () => {
-    controllerRef.current?.abort();
-    const controller = new AbortController();
-    controllerRef.current = controller;
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/alerts/incidents?status=open&limit=${limit}`, { signal: controller.signal });
-      if (res.status === 401 || res.status === 403 || res.status === 404) {
-        setHidden(true);
-        return;
-      }
-      if (!res.ok) throw new Error(await readApiError(res, t('activeIncidents.loadError')));
-      const data = (await res.json()) as { incidents?: IncidentDto[]; openCount?: number };
-      setIncidents(data.incidents ?? []);
-      setOpenCount(data.openCount ?? data.incidents?.length ?? 0);
-      setError(null);
-    } catch (err) {
-      if (isAbortError(err) || controller.signal.aborted) return;
-      setError(err instanceof Error ? err.message : t('activeIncidents.loadError'));
-    } finally {
-      if (!controller.signal.aborted) setLoading(false);
-    }
-  }, [limit, t]);
-
-  useEffect(() => {
-    void load();
-    return () => controllerRef.current?.abort();
-  }, [load]);
+  const query = useIncidentList(`status=open&limit=${limit}`);
+  // A viewer without access to the alerts service sees nothing at all.
+  const hidden = isApiError(query.error) && [401, 403, 404].includes(query.error.status);
+  const incidents = query.data?.incidents ?? [];
+  const openCount = query.data ? query.data.openCount ?? incidents.length : 0;
+  const loading = query.isPending;
+  const error = query.isError && !hidden ? apiErrorMessage(query.error, t('activeIncidents.loadError')) : null;
 
   if (hidden) return null;
   if (hideWhenEmpty && (error || incidents.length === 0)) return null;
@@ -88,7 +60,7 @@ export default function ActiveIncidentsCard({ limit = 5, compact = false, hideWh
       </div>
 
       {error ? (
-        <LoadError bare message={error} onRetry={() => void load()} />
+        <LoadError bare message={error} onRetry={() => void query.refetch()} />
       ) : incidents.length === 0 ? (
         <div className="ds-row" style={{ gap: 8 }}>
           <IconShieldCheck size={16} stroke={1.7} color="var(--ds-ok)" />

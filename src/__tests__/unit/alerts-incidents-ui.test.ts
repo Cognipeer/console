@@ -11,7 +11,6 @@ import {
   installApiMock,
   installDomStubs,
   jsonResponse,
-  mount,
   q,
   qa,
   setInput,
@@ -20,6 +19,10 @@ import {
   type ApiMock,
   type Mounted,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
+
+/** `mount`, inside a query client (the screens read through React Query). */
+const mount = (element: Parameters<typeof renderWithQuery>[0], locale = 'en') => renderWithQuery(element, { locale });
 
 const nav = vi.hoisted(() => ({ search: '' }));
 const push = vi.hoisted(() => vi.fn());
@@ -464,9 +467,11 @@ describe('ActiveIncidentsCard', () => {
     mounted = await mount(createElement(ActiveIncidentsCard));
     await settle(100);
     expect(text()).toContain('boom');
+    // the client asks once more after a server error, so a retry is a further request, whatever the count so far
+    const before = api.to('GET', '/api/alerts/incidents').length;
     await click(buttonByText('Retry'));
     await settle(50);
-    expect(api.to('GET', '/api/alerts/incidents')).toHaveLength(2);
+    expect(api.to('GET', '/api/alerts/incidents').length).toBeGreaterThan(before);
   });
 });
 

@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import Link from 'next/link';
 import { Text } from '@mantine/core';
-import { EntityHealthCharts, buildFailingSessionsHref, type EntityHealthSeriesPayload } from '@/components/tracing/health';
+import { EntityHealthCharts, buildFailingSessionsHref } from '@/components/tracing/health';
 import { formatDateTime } from '@/components/iam/timeFormat';
+import { useIncidentHealthSeries } from '@/lib/api/queries/alerts';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import { DetailCard } from '@/components/common/ui/DetailShell';
 import { CardSkeleton } from '@/components/common/ui/Skeletons';
@@ -28,35 +29,14 @@ export default function IncidentMetricChart({ incident, catalog, entity }: Props
   const t = useTranslations('incidents');
   const ta = useTranslations('alerts');
   const locale = useLocale();
-  const [series, setSeries] = useState<EntityHealthSeriesPayload | null>(null);
-  const [state, setState] = useState<'idle' | 'loading' | 'error'>('idle');
   const supported = entity?.type === 'agent' && Boolean(entity.key);
   const range = useMemo(() => incidentChartRange(incident), [incident]);
-  const rangeKey = range ? `${range.fromMs}:${range.toMs}` : '';
   const agent = supported ? entity!.key : '';
-
-  useEffect(() => {
-    if (!agent || !range) return;
-    const controller = new AbortController();
-    setState('loading');
-    const query = new URLSearchParams({ from: new Date(range.fromMs).toISOString(), to: new Date(range.toMs).toISOString() });
-    fetch(`/api/tracing/agents/${encodeURIComponent(agent)}/health?${query.toString()}`, { signal: controller.signal, cache: 'no-store' })
-      .then(async (res) => {
-        if (!res.ok) throw new Error('health');
-        return (await res.json()) as EntityHealthSeriesPayload;
-      })
-      .then((data) => {
-        if (controller.signal.aborted) return;
-        setSeries(data);
-        setState('idle');
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) setState('error');
-      });
-    return () => controller.abort();
-    // the range is covered by its key
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agent, rangeKey]);
+  const fromIso = range ? new Date(range.fromMs).toISOString() : '';
+  const toIso = range ? new Date(range.toMs).toISOString() : '';
+  const query = useIncidentHealthSeries(agent, fromIso, toIso, Boolean(agent && range));
+  const series = query.data ?? null;
+  const state = query.isError ? 'error' : query.isFetching ? 'loading' : 'idle';
 
   const withMarker = useMemo(() => {
     if (!series) return null;

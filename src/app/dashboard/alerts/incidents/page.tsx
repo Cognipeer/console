@@ -28,7 +28,7 @@ import TabsBar from '@/components/common/ui/TabsBar';
 import { useConfirm } from '@/components/common/confirm';
 import { formatDateTime, formatRelative } from '@/components/iam/timeFormat';
 import LoadError from '@/components/alerts/LoadError';
-import { isAbortError, readApiError } from '@/components/alerts/apiError';
+import { apiErrorMessage } from '@/components/alerts/apiError';
 import {
   authorableModules,
   entityHref,
@@ -43,7 +43,7 @@ import {
 import { useAlertMeta } from '@/components/alerts/useAlertMeta';
 import { pluralKey } from '@/components/alerts/plural';
 import { userLabel as resolveUserLabel, useUserDirectory } from '@/components/alerts/useUserDirectory';
-import type { IncidentCounts, IncidentDto, IncidentSeverity, IncidentStatsDto, IncidentStatus } from '@/components/alerts/alertTypes';
+import type { IncidentDto, IncidentSeverity, IncidentStatus } from '@/components/alerts/alertTypes';
 import {
   INCIDENT_SEVERITIES,
   INCIDENT_STATUSES,
@@ -94,13 +94,19 @@ import {
 } from '@/components/alerts/inbox/inboxModel';
 import { SnoozeDialog } from '@/components/alerts/incident/SnoozeMenu';
 import { useEntityLinks } from '@/components/alerts/incident/useEntityLinks';
+import {
+  useBulkIncidents,
+  useIncident,
+  useIncidentList,
+  useIncidentProbe,
+  useIncidentStats,
+  useUpdateIncident,
+} from '@/lib/api/queries/alertIncidents';
 import { useLocale, useTranslations } from '@/lib/i18n';
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
 const HIGHLIGHT_MS = 2500;
 const FLASH_MS = 4000;
-const POLL_MS = 15_000;
-const STATS_REFRESH_MS = 60_000;
 const SEARCH_DEBOUNCE_MS = 350;
 const INBOX_PATH = '/dashboard/alerts/incidents';
 
@@ -144,18 +150,7 @@ export default function IncidentsPage() {
   const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]!);
   const [live, setLive] = useState(true);
 
-  const [incidents, setIncidents] = useState<IncidentDto[]>([]);
-  const [counts, setCounts] = useState<IncidentCounts | null>(null);
-  const [total, setTotal] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [pinned, setPinned] = useState<IncidentDto | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [stats, setStats] = useState<IncidentStatsDto | null>(null);
-  const [statsFailed, setStatsFailed] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   const [tick, setTick] = useState(0);
   const [flash, setFlash] = useState<Set<string>>(new Set());
@@ -206,107 +201,76 @@ export default function IncidentsPage() {
   }, [searchInput, filters.q, patchFilters]);
 
   // ── Data ──────────────────────────────────────────────────────────────────
-  const controllerRef = useRef<AbortController | null>(null);
-  const load = useCallback(
-    async (silent = false) => {
-      controllerRef.current?.abort();
-      const controller = new AbortController();
-      controllerRef.current = controller;
-      if (silent) setRefreshing(true);
-      else setLoading(true);
-      try {
-        const res = await fetch(`/api/alerts/incidents?${listQuery(filters, page, pageSize).toString()}`, { signal: controller.signal });
-        if (!res.ok) throw new Error(await readApiError(res, t('loadError')));
-        const data = (await res.json()) as { incidents?: IncidentDto[]; total?: number; hasMore?: boolean; counts?: IncidentCounts; serverTime?: string };
-        const rows = data.incidents ?? [];
-        if (silent) {
-          const changed = changedIds(previousRows.current, rows);
-          if (changed.size > 0) {
-            setFlash(changed);
-            if (flashTimer.current) window.clearTimeout(flashTimer.current);
-            flashTimer.current = window.setTimeout(() => setFlash(new Set()), FLASH_MS);
-          }
-        }
-        previousRows.current = rows;
-        serverTime.current = data.serverTime ?? new Date().toISOString();
-        setIncidents(rows);
-        setTotal(data.total ?? 0);
-        setHasMore(Boolean(data.hasMore));
-        setCounts(data.counts ?? null);
-        setUpdatedAt(Date.now());
-        setLoadError(null);
-      } catch (error) {
-        if (isAbortError(error) || controller.signal.aborted) return;
-        setLoadError(error instanceof Error ? error.message : t('loadError'));
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-          setRefreshing(false);
-        }
+  const listParams = useMemo(() => listQuery(filters, page, pageSize).toString(), [filters, page, pageSize]);
+  const list = useIncidentList(listParams);
+  const listData = list.data;
+  const incidents = useMemo(() => listData?.incidents ?? [], [listData]);
+  const counts = listData?.counts ?? null;
+  const total = listData?.total ?? 0;
+  const hasMore = Boolean(listData?.hasMore);
+  // A new filter or page shows the loading state over the rows it replaces; a reload of the page on screen refreshes in place.
+  const loading = list.isPending || list.isPlaceholderData;
+  const refreshing = list.isFetching && !loading;
+  const loadError = list.isError ? apiErrorMessage(list.error, t('loadError')) : null;
+  const { refetch: refetchList } = list;
+
+  // Each answer: remember the rows and the server's clock, and flag the rows a reload of the same page changed.
+  const answeredKey = useRef<string | null>(null);
+  const answeredAt = list.dataUpdatedAt;
+  useEffect(() => {
+    if (!listData || list.isPlaceholderData) return;
+    const rows = listData.incidents ?? [];
+    if (answeredKey.current === listParams) {
+      const changed = changedIds(previousRows.current, rows);
+      if (changed.size > 0) {
+        setFlash(changed);
+        if (flashTimer.current) window.clearTimeout(flashTimer.current);
+        flashTimer.current = window.setTimeout(() => setFlash(new Set()), FLASH_MS);
       }
-    },
-    [filters, page, pageSize, t],
-  );
-
-  useEffect(() => {
-    void load();
-    return () => controllerRef.current?.abort();
-  }, [load]);
-
-  const loadStats = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const res = await fetch(`/api/alerts/incidents/stats?range=${range}`, { signal, cache: 'no-store' });
-      if (!res.ok) throw new Error('stats');
-      setStats((await res.json()) as IncidentStatsDto);
-      setStatsFailed(false);
-    } catch (error) {
-      if (isAbortError(error) || signal?.aborted) return;
-      setStatsFailed(true);
     }
-  }, [range]);
+    answeredKey.current = listParams;
+    previousRows.current = rows;
+    serverTime.current = listData.serverTime ?? new Date().toISOString();
+    setUpdatedAt(Date.now());
+    // `answeredAt` is the signal: every answer counts, also one equal to the last
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [answeredAt]);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    void loadStats(controller.signal);
-    const timer = window.setInterval(() => void loadStats(), STATS_REFRESH_MS);
-    return () => {
-      controller.abort();
-      window.clearInterval(timer);
-    };
-  }, [loadStats]);
+  const statsQuery = useIncidentStats(range);
+  const stats = statsQuery.data ?? null;
+  const statsFailed = statsQuery.isError;
+  const { refetch: refetchStats } = statsQuery;
 
   // Live refresh: a cheap "anything changed since?" probe every 15 s while the tab is visible; a change reloads the page of rows
   // (so every filter, sort and the paging still apply) and the new or changed rows are flagged for a few seconds.
-  const probe = useCallback(async () => {
-    if (!serverTime.current) return;
-    try {
-      const res = await fetch(`/api/alerts/incidents?updatedAfter=${encodeURIComponent(serverTime.current)}&limit=1`, { cache: 'no-store' });
-      if (!res.ok) return;
-      const data = (await res.json()) as { incidents?: IncidentDto[]; serverTime?: string };
-      if ((data.incidents?.length ?? 0) > 0) {
-        void load(true);
-        void loadStats();
-      } else if (data.serverTime) {
-        serverTime.current = data.serverTime;
-        setUpdatedAt(Date.now());
-      }
-    } catch {
-      // a failed probe is retried on the next tick
+  const refreshAll = useCallback(() => {
+    void refetchList();
+    void refetchStats();
+  }, [refetchList, refetchStats]);
+  const probe = useIncidentProbe({ live, ready: Boolean(listData), getSince: () => serverTime.current });
+  const probedAt = probe.dataUpdatedAt;
+  useEffect(() => {
+    const answer = probe.data;
+    if (!answer) return;
+    if ((answer.incidents?.length ?? 0) > 0) {
+      refreshAll();
+    } else if (answer.serverTime) {
+      serverTime.current = answer.serverTime;
+      setUpdatedAt(Date.now());
     }
-  }, [load, loadStats]);
-
+    // `probedAt` is the signal: a probe answer is read once
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [probedAt]);
+  // Coming back to the tab probes at once instead of waiting for the next tick.
+  const { refetch: refetchProbe } = probe;
   useEffect(() => {
     if (!live) return;
     const run = () => {
-      if (document.visibilityState === 'visible') void probe();
+      if (document.visibilityState === 'visible' && serverTime.current) void refetchProbe();
     };
-    const timer = window.setInterval(run, POLL_MS);
     document.addEventListener('visibilitychange', run);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', run);
-    };
-  }, [live, probe]);
+    return () => document.removeEventListener('visibilitychange', run);
+  }, [live, refetchProbe]);
 
   // "Updated Ns ago" needs a clock.
   useEffect(() => {
@@ -341,25 +305,14 @@ export default function IncidentsPage() {
 
   // ?highlight=<id>: an incident outside the loaded page (an e-mail deep link) is fetched and shown on top.
   const loadedIds = useMemo(() => new Set(incidents.map((incident) => incident._id)), [incidents]);
-  const attemptedHighlight = useRef<string | null>(null);
+  // The lookup is asked for once per highlighted id, however often the list reloads afterwards; a missing incident shows no highlight.
+  const [highlightWanted, setHighlightWanted] = useState<string | null>(null);
   useEffect(() => {
-    if (!highlightId || loading || loadedIds.has(highlightId)) {
-      if (pinned && loadedIds.has(pinned._id)) setPinned(null);
-      return;
-    }
-    if (pinned?._id === highlightId || attemptedHighlight.current === highlightId) return;
-    attemptedHighlight.current = highlightId;
-    const controller = new AbortController();
-    fetch(`/api/alerts/incidents/${encodeURIComponent(highlightId)}`, { signal: controller.signal })
-      .then(async (res) => (res.ok ? ((await res.json()) as { incident?: IncidentDto }) : null))
-      .then((data) => {
-        if (data?.incident) setPinned(data.incident);
-      })
-      .catch(() => {
-        // the highlight is a convenience; a missing incident just shows no highlight
-      });
-    return () => controller.abort();
-  }, [highlightId, loading, loadedIds, pinned]);
+    if (!highlightId || loading || loadedIds.has(highlightId) || highlightWanted === highlightId) return;
+    setHighlightWanted(highlightId);
+  }, [highlightId, loading, loadedIds, highlightWanted]);
+  const highlighted = useIncident(highlightId ?? undefined, highlightWanted === highlightId);
+  const pinned = highlightWanted === highlightId && highlighted.data && !loadedIds.has(highlighted.data._id) ? highlighted.data : null;
 
   const records = useMemo(() => (pinned && !loadedIds.has(pinned._id) ? [pinned, ...incidents] : incidents), [incidents, pinned, loadedIds]);
   const groupBy = filters.group;
@@ -404,26 +357,18 @@ export default function IncidentsPage() {
   }, [records, flash, focusedId, groupBy, collapsed]);
 
   // ── Actions ────────────────────────────────────────────────────────────────
-  const refreshAll = useCallback(() => {
-    void load(true);
-    void loadStats();
-  }, [load, loadStats]);
-
+  const updateIncident = useUpdateIncident();
   const changeStatus = async (incident: IncidentDto, status: IncidentStatus) => {
     try {
-      const res = await fetch(`/api/alerts/incidents/${incident._id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status }),
-      });
-      if (!res.ok) throw new Error(await readApiError(res, t('statusUpdateError')));
+      await updateIncident.mutateAsync({ id: incident._id, body: { status } });
       notifications.show({ title: t('statusUpdated'), message: t('statusUpdatedMessage', { status: t(`status.${status}`) }), color: 'teal' });
-      refreshAll();
     } catch (error) {
-      notifications.show({ title: t('error'), message: error instanceof Error ? error.message : t('statusUpdateError'), color: 'red' });
+      notifications.show({ title: t('error'), message: apiErrorMessage(error, t('statusUpdateError')), color: 'red' });
     }
   };
 
+  const bulkIncidents = useBulkIncidents();
+  const busy = bulkIncidents.isPending;
   const runBulk = async (action: BulkAction, rows: IncidentDto[], options: BulkOptions = {}) => {
     const eligible = bulkEligible(rows, action);
     if (eligible.length === 0) {
@@ -440,27 +385,21 @@ export default function IncidentsPage() {
       });
       if (!ok) return;
     }
-    setBusy(true);
     try {
       const body: Record<string, unknown> = { ids: eligible.map((incident) => incident._id), action };
       if (action === 'assign') body.assignedTo = options.assignedTo ?? null;
       if (action === 'snooze') body.until = options.until;
-      const res = await fetch('/api/alerts/incidents/bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (!res.ok) throw new Error(await readApiError(res, t('bulk.failed')));
-      const data = (await res.json()) as { updated?: number; failed?: Array<{ id: string; error: string }> };
-      const failed = data.failed?.length ?? 0;
-      const updated = data.updated ?? 0;
+      const data = await bulkIncidents.mutateAsync(body);
+      const failed = data?.failed?.length ?? 0;
+      const updated = data?.updated ?? 0;
       notifications.show({
         title: t('bulk.doneTitle'),
         message: failed > 0 ? t(pluralKey('bulk.donePartial', updated), { updated, failed }) : t(pluralKey('bulk.done', updated), { updated }),
         color: failed > 0 ? 'orange' : 'teal',
       });
       if (options.clearSelection) setSelected(new Set());
-      refreshAll();
     } catch (error) {
-      notifications.show({ title: t('error'), message: error instanceof Error ? error.message : t('bulk.failed'), color: 'red' });
-    } finally {
-      setBusy(false);
+      notifications.show({ title: t('error'), message: apiErrorMessage(error, t('bulk.failed')), color: 'red' });
     }
   };
 
@@ -968,7 +907,7 @@ export default function IncidentsPage() {
 
       {loadError ? (
         <div style={{ marginBottom: 12 }}>
-          <LoadError message={loadError} onRetry={() => void load(records.length > 0)} />
+          <LoadError message={loadError} onRetry={() => void refetchList()} />
         </div>
       ) : null}
 

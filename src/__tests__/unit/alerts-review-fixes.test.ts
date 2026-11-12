@@ -12,7 +12,6 @@ import {
   installApiMock,
   installDomStubs,
   jsonResponse,
-  mount,
   q,
   qa,
   setInput,
@@ -21,6 +20,10 @@ import {
   type ApiMock,
   type Mounted,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
+
+/** `mount`, inside a query client (the screens read through React Query). */
+const mount = (element: Parameters<typeof renderWithQuery>[0], locale = 'en') => renderWithQuery(element, { locale });
 import { messages } from '@/lib/i18n/messages';
 
 const nav = vi.hoisted(() => ({ search: '' }));
@@ -41,8 +44,7 @@ import { DEFAULT_ALERT_CATALOG, ruleStateView, type TFn } from '@/components/ale
 import { channelsFromStored, newChannelItem } from '@/components/alerts/channelItems';
 import { buildRulePayload, channelsSignature, checkRule, valuesFromRule } from '@/components/alerts/ruleForm';
 import { describeRowValue, internalPath, rowMode, translateServerNote, translateServerNotes } from '@/components/alerts/incidentUi';
-import { resetAlertMetaCache } from '@/components/alerts/useAlertMeta';
-import { resetUserDirectoryCache, userLabel } from '@/components/alerts/useUserDirectory';
+import { userLabel } from '@/components/alerts/useUserDirectory';
 import { ALERT_METRIC_CATALOG } from '@/lib/services/alerts/metricCatalog';
 import type { AlertEventDto, AlertMeta, AlertRuleDto, IncidentDto } from '@/components/alerts/alertTypes';
 
@@ -65,8 +67,6 @@ let api: ApiMock;
 beforeAll(() => installDomStubs());
 beforeEach(() => {
   nav.search = '';
-  resetAlertMetaCache();
-  resetUserDirectoryCache();
 });
 afterEach(async () => {
   await mounted?.unmount();
