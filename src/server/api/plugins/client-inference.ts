@@ -584,6 +584,11 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         return handleAgentChatCompletion({ request, agent, auth, body: body as Record<string, unknown>, model: modelKey, reply });
       }
 
+      // A model call needs at least one message; an empty or missing array is a request error, not a provider call.
+      if (!Array.isArray(body.messages) || body.messages.length === 0) {
+        return chatFail(reply, 400, 'messages must contain at least one message', 'missing_messages', { param: 'messages' });
+      }
+
       const outcome = await runModelChatCompletion(auth, body, { modelKey });
       if (outcome.kind === 'refused') return reply.code(outcome.status).send(outcome.body);
       const { result } = outcome;
