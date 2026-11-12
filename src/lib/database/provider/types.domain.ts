@@ -3744,13 +3744,6 @@ export interface IAgentToolBinding {
 export type AgentTriggerWebhookPreset = 'generic';
 
 /**
- * Vendor presets that older triggers were stored with. Read-only legacy: such a
- * trigger no longer receives deliveries (its URL answers 410), can not be
- * written, and can be converted to a connector or a generic webhook trigger.
- */
-export type RetiredAgentTriggerWebhookPreset = 'github' | 'gitlab' | 'azure_devops';
-
-/**
  * How a delivery proves it knows the trigger's secret. The first two sign
  * the raw body (checked once the body is read); the rest carry the secret in a
  * header (checked before the body is read).
@@ -3764,9 +3757,6 @@ export type AgentTriggerWebhookAuth =
   | 'bearer'
   /** `<headerName>: <secret>`. */
   | 'header';
-
-/** Auth modes of retired vendor presets; stored on old triggers only (see `RetiredAgentTriggerWebhookPreset`). */
-export type RetiredAgentTriggerWebhookAuth = 'github_signature' | 'gitlab_token' | 'basic';
 
 /** One filter rule over the delivery (all rules must match). */
 export interface AgentTriggerWebhookFilterRule {
@@ -3783,8 +3773,8 @@ export interface AgentTriggerWebhookFilterRule {
 export interface AgentTriggerWebhook {
   /** `wh_` + 18 random bytes (base64url): the URL's locator. Kept while the trigger stays a webhook one; never reused. */
   hookId: string;
-  preset: AgentTriggerWebhookPreset | RetiredAgentTriggerWebhookPreset;
-  auth: AgentTriggerWebhookAuth | RetiredAgentTriggerWebhookAuth;
+  preset: AgentTriggerWebhookPreset;
+  auth: AgentTriggerWebhookAuth;
   /** Auth `header` only; lower-case. */
   headerName?: string | null;
   /** `encryptObject(secret)`; never serialized. */

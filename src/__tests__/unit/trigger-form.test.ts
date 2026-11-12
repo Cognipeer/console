@@ -349,8 +349,7 @@ describe('strings', () => {
     const keys = [
       ...WEBHOOK_FILTER_OPS.map((op) => `op_${op}`),
       ...['accepted', 'duplicate', 'filtered', 'ignored', 'unauthorized', 'rejected', 'failed'].map((outcome) => `outcome_${outcome}`),
-      // The names of the retired presets stay: a stored trigger of one is still listed under its name.
-      'presetGeneric', 'presetGithub', 'presetGitlab', 'presetAzureDevops',
+      'presetGeneric',
       ...['kindConnectorWebhook', 'kindConnectorPoll', 'summaryConnector', 'summaryConnectorAny'],
       ...['connectorUnavailable', 'connectorForbidden', 'connectorUnavailableBadge', 'connectorCatalogFailed', 'connectorRequired', 'connectorUnattendedHint', 'deliveriesHintConnector'],
       ...['connectorTestHint', 'connectorTestEvent', 'connectorTestEventPlaceholder', 'connectorTestEventInvalid', 'connectorTestPayloadHint'],
@@ -371,10 +370,10 @@ describe('strings', () => {
     }
   });
 
-  it('the editor’s strings no longer carry the vendor presets, except the names a retired trigger is listed under', () => {
+  it('the editor’s strings no longer carry the vendor presets', () => {
     for (const locale of ['en', 'tr'] as const) {
       const vendor = Object.keys(at(messages[locale], 'agents.triggers')).filter((key) => /github|gitlab|azure|ado/i.test(key));
-      expect(vendor.sort(), locale).toEqual(['presetAzureDevops', 'presetGithub', 'presetGitlab']);
+      expect(vendor, locale).toEqual([]);
     }
   });
 
