@@ -79,9 +79,11 @@ import { runBoundToolCleanup } from './agentBoundTools';
 import { describeRunOutcome } from './agentRecords';
 import { answeredWithMetadata, createReasoningTap, liveStreamOptions, createTurnFlowSink, turnFlowRecord, turnReasoning } from './agentStreamTaps';
 import { outputFileEvents, mergeSessionRuntimeContext } from './agentAttachments';
-import { buildLocalAgentRun, agentMayStreamAnswer, sessionStopReason, toAgentChatResponse } from './agentChatRun';
+import { buildLocalAgentRun, agentMayStreamAnswer, firstTurnTitle, sessionStopReason, toAgentChatResponse } from './agentChatRun';
+import { createRunCheckpointer, settleInterruptedToolCalls, stampRunTurn, type CheckpointTurn, type DurableTurn, type LoadedCheckpoint } from './runCheckpoint';
 import { extractPlaygroundSteps, describeStructuredOutputError } from './agentPlaygroundSteps';
 import { createLogger } from '@/lib/core/logger';
+import { getConfig } from '@/lib/core/config';
 
 const logger = createLogger('agents');
 
@@ -152,7 +154,16 @@ export interface AgentResumeRequest {
         source: 'agent' | 'agent-playground';
         usePublished?: boolean;
         version?: number;
+        /**
+         * Durable runs: continue a turn that was cut off on another node, from its
+         * checkpoint instead of the stored conversation state. The session is still
+         * marked running (that turn never ended) and the transcript does not have
+         * the turn yet: a chat turn's user message is written with the answer.
+         */
+        recovery?: LoadedCheckpoint;
     };
+    /** Durable runs: set for a run that writes checkpoints (see runCheckpoint.ts). */
+    durable?: DurableTurn;
 }
 
 export interface AgentResumeResult {
@@ -216,6 +227,27 @@ async function loadContinuationRun(
     if (!conversation || conversation.projectId !== request.projectId || conversation.agentKey !== request.agentKey) {
         throw new Error(`Conversation "${request.conversationId}" not found`);
     }
+    // A recovered turn never ended: the session still says it is running, and the
+    // state to go on from is the turn's checkpoint, not the session's last state.
+    const recovery = continuation.recovery;
+    if (recovery) {
+        const { agent, config, version } = await continuationConfig(db, request, continuation);
+        const settled = settleInterruptedToolCalls((recovery.carried.messages ?? []) as AgentSdkMessage[]);
+        if (settled.interrupted.length > 0) {
+            logger.info('Recovered turn: tool calls with an unknown outcome', {
+                conversationId: request.conversationId,
+                tools: settled.interrupted,
+            });
+        }
+        return {
+            conversation,
+            agent,
+            config,
+            version,
+            carried: { ...recovery.carried, messages: settled.messages },
+            recoveredTurn: recovery.turn,
+        };
+    }
     if (conversation.runtimeStatus === 'requires_action') {
         throw new AgentResumeError('This session is waiting for an approval or an answer. Resolve it first.');
     }
@@ -236,21 +268,23 @@ async function loadContinuationRun(
         throw new AgentResumeError('This session already ended with an answer, so there is nothing to continue.');
     }
 
-    let agent: IAgent;
-    let config: IAgentConfig;
-    let version: number | null = null;
+    const { agent, config, version } = await continuationConfig(db, request, continuation);
+    return { conversation, agent, config, version, carried, recoveredTurn: undefined as CheckpointTurn | undefined };
+}
+
+/** The agent and the config a continuation runs with: the published version asked for, else the draft. */
+async function continuationConfig(
+    db: Awaited<ReturnType<typeof getDatabase>>,
+    request: Pick<AgentResumeRequest, 'tenantDbName' | 'projectId' | 'agentKey'>,
+    continuation: NonNullable<AgentResumeRequest['continuation']>,
+): Promise<{ agent: IAgent; config: IAgentConfig; version: number | null }> {
     if (continuation.usePublished || continuation.version !== undefined) {
         const resolved = await resolveAgentConfig(request.tenantDbName, request.agentKey, request.projectId, continuation.version);
-        agent = resolved.agent;
-        config = resolved.config;
-        version = resolved.resolvedVersion;
-    } else {
-        const found = await db.findAgentByKey(request.agentKey, request.projectId);
-        if (!found) throw new Error(`Agent "${request.agentKey}" not found`);
-        agent = found;
-        config = found.config;
+        return { agent: resolved.agent, config: resolved.config, version: resolved.resolvedVersion };
     }
-    return { conversation, agent, config, version, carried };
+    const found = await db.findAgentByKey(request.agentKey, request.projectId);
+    if (!found) throw new Error(`Agent "${request.agentKey}" not found`);
+    return { agent: found, config: found.config, version: null };
 }
 
 /**
@@ -396,6 +430,7 @@ async function runAgentResumeTurn(
     }
     const loaded = (pausedRun ?? continued)!;
     const { conversation, agent, version } = loaded;
+    const recoveredTurn = continued?.recoveredTurn;
     // A turn that paused resumes on the model it ran with (stored on the session when the request was authorized).
     const config: IAgentConfig = additionalModelKeys(loaded.config).length > 0
         ? applyModelToConfig(loaded.config, applyAgentModelChoice(loaded.config, { sessionMetadata: conversation.metadata, background: true }).modelKey)
@@ -441,6 +476,25 @@ async function runAgentResumeTurn(
         })
         : undefined;
 
+    // Durable runs: the continuation checkpoints itself like a first turn (runCheckpoint.ts).
+    // A recovered chat turn keeps recording the user message it still owes the transcript.
+    const checkpointer = request.durable && request.runId
+        ? createRunCheckpointer({
+            db,
+            runId: request.runId,
+            tenantId,
+            conversationId,
+            generation: request.durable.generation,
+            deadlineAt: request.cancellationCell?.deadlineAt ?? Date.now() + getConfig().agent.backgroundMaxDurationMs,
+            intervalMs: getConfig().agent.checkpointIntervalMs,
+            turn: () => recoveredTurn ?? { kind: 'resume' },
+            onFenced: () => {
+                if (request.cancellationCell) request.cancellationCell.cancelled = true;
+            },
+        })
+        : undefined;
+    if (checkpointer && request.cancellationCell) request.cancellationCell.checkpointer = checkpointer;
+
     const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, outputLimit, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity, hitlLog } = await buildLocalAgentRun({
         db,
         tenantDbName,
@@ -468,6 +522,7 @@ async function runAgentResumeTurn(
         ...(turnOptions.variables ? { variables: turnOptions.variables } : {}),
         ...(turnOptions.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
         ...(turnOptions.literalVariables ? { literalVariables: turnOptions.literalVariables } : {}),
+        ...(checkpointer ? { checkpointer } : {}),
         // A continued turn already holds tool results and answers from outside.
         reminders: {
             ...(request.runId ? { runId: request.runId } : {}),
@@ -588,6 +643,7 @@ async function runAgentResumeTurn(
                 ? { timeoutMs: Math.max(0, request.cancellationCell.deadlineAt - Date.now()) }
                 : {}),
             ...sessionBudgetInvokeOptions(budgetPlan),
+            ...(checkpointer ? { onStateChange: checkpointer.onStateChange } : {}),
         };
 
         request.onInvokeStart?.();
@@ -701,10 +757,18 @@ async function runAgentResumeTurn(
             latencyMs: Date.now() - startedAt,
             version,
         };
-        const messages = [...(conversation.messages ?? []), assistantMessage];
+        // A recovered chat turn writes the user message its first execution never got to write.
+        const recoveredUser = recoveredTurn?.kind === 'chat' && recoveredTurn.userMessage
+            ? [{ ...recoveredTurn.userMessage, timestamp: new Date(recoveredTurn.userMessage.timestamp ?? Date.now()) }]
+            : [];
+        if (request.durable) stampRunTurn(assistantMessage, request.durable.turnKey);
+        const messages = [...(conversation.messages ?? []), ...recoveredUser, assistantMessage];
 
         if (!superseded) {
-            await db.updateAgentConversation(conversationId, { messages });
+            const title = recoveredUser.length > 0
+                ? firstTurnTitle(conversation, messages.length, recoveredUser[0].content, recoveredUser[0].attachments)
+                : undefined;
+            await db.updateAgentConversation(conversationId, { messages, ...(title ? { title } : {}) });
             await addSessionTurnSpend({ db, conversationId, plan: spendAccount, spentUsd: budget?.turnCostUsd ?? costUsd ?? 0 });
             await saveConversationState(db, {
                 conversationId,

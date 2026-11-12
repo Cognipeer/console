@@ -2023,6 +2023,27 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_aconv_agent_creator ON agent_conversations(agentKey, createdBy, updatedAt);
 
   -- Agent runtime state per conversation (see IAgentConversationState)
+  -- Durable-run checkpoints (see IAgentRunCheckpoint): one row per running run,
+  -- deleted when the run ends or the reconciler gives it up (SQLite has no TTL).
+  CREATE TABLE IF NOT EXISTS agent_run_checkpoints (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    conversationId TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    schema INTEGER NOT NULL,
+    head TEXT NOT NULL,
+    messageChunks TEXT NOT NULL,
+    toolHistoryChunks TEXT NOT NULL,
+    messageCount INTEGER NOT NULL DEFAULT 0,
+    toolHistoryCount INTEGER NOT NULL DEFAULT 0,
+    sizeBytes INTEGER NOT NULL DEFAULT 0,
+    sealed TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    expiresAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_run_checkpoints_expiresAt ON agent_run_checkpoints(expiresAt);
+
   CREATE TABLE IF NOT EXISTS agent_conversation_states (
     id TEXT PRIMARY KEY,
     conversationId TEXT NOT NULL UNIQUE,
@@ -2743,6 +2764,11 @@ export const TENANT_SCHEMA_SQL = `
     resumeApiTokenId TEXT,
     accountableUserId TEXT,
     accountableTokenId TEXT,
+    -- Durable runs: times continued on another node, and the last such move.
+    recoveryCount INTEGER,
+    lastRecoveredAt TEXT,
+    lastRecoveryReason TEXT,
+    recoveryDeadlineAt TEXT,
     createdAt TEXT NOT NULL,
     startedAt TEXT,
     completedAt TEXT,

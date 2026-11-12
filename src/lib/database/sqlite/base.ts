@@ -128,6 +128,7 @@ export const TABLES = {
   batchJobs: 'batch_jobs',
   batchJobItems: 'batch_job_items',
   agentRuns: 'agent_runs',
+  agentRunCheckpoints: 'agent_run_checkpoints',
   realtimeModels: 'realtime_models',
   realtimeSessions: 'realtime_sessions',
   // ── Project membership & future groups ──────────────────────────────
@@ -1272,6 +1273,9 @@ export class SQLiteProviderBase {
       // answered; the principal a trigger run counts against.
       ['callbackEventId', 'TEXT'], ['resumeTrigger', 'TEXT'], ['resumeUserId', 'TEXT'], ['resumeApiTokenId', 'TEXT'],
       ['accountableUserId', 'TEXT'], ['accountableTokenId', 'TEXT'],
+      // Durable runs: times continued on another node, and the last such move.
+      ['recoveryCount', 'INTEGER'], ['lastRecoveredAt', 'TEXT'], ['lastRecoveryReason', 'TEXT'],
+      ['recoveryDeadlineAt', 'TEXT'],
     ] as const) {
       this.ensureTableColumn(db, TABLES.agentRuns, column, `${column} ${type}`);
     }

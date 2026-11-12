@@ -44,6 +44,7 @@ import { getUserAuthState } from '@/lib/services/users/userAuthState';
 import { AgentRunInterruptedError, AgentRunTimeoutError, GENERIC_RUN_FAILURE_MESSAGE, publicRunFailureMessage, runFailureReason } from './agentErrors';
 import { enforceAgentRunQuota, settleAgentRun } from './agentQuota';
 import { createRunUsageSink, runWithUsageSink } from './runUsage';
+import { agentRunTurnKey, readRunCheckpoint, transcriptHasTurn, type DurableTurn, type LoadedCheckpoint } from './runCheckpoint';
 import {
   executeAgentChat,
   executeAgentChatLocal,
@@ -1043,6 +1044,8 @@ interface LocalRun {
    */
   abort: () => void;
   settled: Promise<unknown>;
+  /** Durable runs: on shutdown the run is handed to another node instead of failed `interrupted`. */
+  durable?: boolean;
 }
 
 const activeLocalRuns = new Map<string, LocalRun>();
@@ -1965,11 +1968,28 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       });
     };
 
+    // Durable runs (runCheckpoint.ts): a background run checkpoints its turn so another node can
+    // continue it. The checkpoint goes when the run ends or pauses; a run that never wrote one
+    // (and was never recovered) has none, and costs no delete.
+    const durable = cfg.agent.durableRuns && claimed.mode !== 'sync';
+    const checkpointOf: { cell?: AgentRunCancellationCell } = {};
+    const dropCheckpoint = async () => {
+      if (!durable || (!checkpointOf.cell?.checkpointer?.wrote && !claimed.lastRecoveredAt)) return;
+      checkpointOf.cell?.checkpointer?.stop();
+      await db.deleteAgentRunCheckpoint(runId, tenantId).catch((error) => {
+        logger.warn('Could not delete the run checkpoint (its TTL removes it)', {
+          runId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    };
+
     const finalize = async (
       status: 'succeeded' | 'failed' | 'canceled',
       data: Pick<IAgentRun, 'errorReason' | 'errorMessage' | 'result' | 'stopReason'>,
       callbackData: Record<string, unknown> = {},
     ) => {
+      await dropCheckpoint();
       // A failed / canceled run says so; a succeeded one passes how its turn ended.
       const stopReason = data.stopReason
         ?? (status === 'failed' ? 'error' : status === 'canceled' ? 'cancelled' : undefined);
@@ -2045,13 +2065,15 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       }
     }
 
-    const maxDurationMs = claimed.maxDurationMs && claimed.maxDurationMs > 0
-      ? Math.min(claimed.maxDurationMs, cfg.agent.backgroundMaxDurationMs)
-      : cfg.agent.backgroundMaxDurationMs;
-    const deadlineAt = Date.now() + maxDurationMs;
+    const maxDurationMs = agentRunCeilingMs(claimed);
+    // A recovered turn keeps the ceiling it started with: a move to another node does not extend it.
+    const deadlineAt = claimed.lastRecoveredAt && claimed.recoveryDeadlineAt
+      ? Math.min(new Date(claimed.recoveryDeadlineAt).getTime(), Date.now() + maxDurationMs)
+      : Date.now() + maxDurationMs;
     // deadlineAt makes the turn itself stop at the ceiling (SDK timeout +
     // no conversation write), not just the run record.
     const cancellationCell: AgentRunCancellationCell = { cancelled: false, deadlineAt };
+    checkpointOf.cell = cancellationCell;
 
     let resolveCancelObserved: (() => void) | undefined;
     // Set when the CALLER asked for the cancel (the poll saw `cancelRequestedAt`);
@@ -2074,6 +2096,7 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       cell: cancellationCell,
       abort: markSuperseded,
       settled,
+      durable,
     });
 
     const heartbeatTimer = setInterval(() => {
@@ -2124,6 +2147,34 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
 
     try {
       const request = buildRequestFromRun(claimed, cancellationCell);
+      const durableTurn: DurableTurn | undefined = durable
+        ? { generation: claimed.queueGeneration ?? 1, turnKey: agentRunTurnKey(runId, claimed.resumeActionIds) }
+        : undefined;
+      if (durableTurn) request.durable = durableTurn;
+
+      // A run taken from a node that stopped: go on from its checkpoint, or finish it if its
+      // turn was already written, or run the turn again when it never reached a side effect.
+      let recovery: LoadedCheckpoint | undefined;
+      if (durableTurn && claimed.lastRecoveredAt) {
+        const plan = await planRunRecovery(db, claimed, durableTurn.turnKey);
+        logger.info('Agent run recovered on this node', { runId, plan: plan.kind, reason: claimed.lastRecoveryReason });
+        if (plan.kind === 'written') {
+          stopAllTimers();
+          const result = { ...plan.result, id: `resp_${runId}`, model: `agent:${request.agentKey}` };
+          await finalize('succeeded', { result, stopReason: 'end_turn' }, { result });
+          return;
+        }
+        if (plan.kind === 'unusable') {
+          stopAllTimers();
+          await finalize(
+            'failed',
+            { errorReason: 'worker_lost', errorMessage: UNRECOVERABLE_RUN_MESSAGE },
+            { errorReason: 'worker_lost', message: UNRECOVERABLE_RUN_MESSAGE },
+          );
+          return;
+        }
+        if (plan.kind === 'checkpoint') recovery = plan.checkpoint;
+      }
       // The tokens the turn's model calls spend are tallied as they happen, so a run that
       // fails, times out or is cancelled is still charged for them (runUsage.ts).
       const usage = createRunUsageSink();
@@ -2153,7 +2204,33 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
         // A run queued to continue a paused turn picks that turn up where it
         // stopped; everything around it (heartbeat, ceiling, cancel, finalize,
         // callback) is the same.
-        () => continuingBudget
+        () => recovery
+          ? executeAgentContinueLocal({
+            tenantDbName: request.tenantDbName,
+            tenantId: request.tenantId,
+            projectId: request.projectId,
+            agentKey: request.agentKey,
+            conversationId: request.conversationId,
+            // The person the turn is for: who answered a pause, else the run's owner.
+            userId: claimed.resumeUserId ?? request.userId,
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
+            runId,
+            runtimeContext: request.runtimeContext,
+            ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
+            ...(request.variables ? { variables: request.variables } : {}),
+            ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
+            ...(request.literalVariables ? { literalVariables: request.literalVariables } : {}),
+            ...(request.unattended ? { unattended: true } : {}),
+            cancellationCell,
+            ...(durableTurn ? { durable: durableTurn } : {}),
+            continuation: {
+              source: 'agent',
+              ...(request.usePublished !== undefined ? { usePublished: request.usePublished } : {}),
+              ...(request.version !== undefined ? { version: request.version } : {}),
+              recovery,
+            },
+          }).then((continued) => continued.response)
+          : continuingBudget
           ? executeAgentContinueLocal({
             tenantDbName: request.tenantDbName,
             tenantId: request.tenantId,
@@ -2170,6 +2247,7 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
             ...(request.literalVariables ? { literalVariables: request.literalVariables } : {}),
             ...(request.unattended ? { unattended: true } : {}),
             cancellationCell,
+            ...(durableTurn ? { durable: durableTurn } : {}),
             continuation: {
               source: 'agent',
               ...(request.usePublished !== undefined ? { usePublished: request.usePublished } : {}),
@@ -2195,6 +2273,7 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
             ...(request.literalVariables ? { literalVariables: request.literalVariables } : {}),
             ...(request.unattended ? { unattended: true } : {}),
             cancellationCell,
+            ...(durableTurn ? { durable: durableTurn } : {}),
           }).then((resumed) => resumed.response)
           : executeAgentChatLocal(request),
       )).then(
@@ -2262,6 +2341,8 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       if (responseWithRunId.status === 'requires_action') {
         // Paused for a person: not terminal. The run waits as `requires_action`
         // (the conversation's slot is free) until the actions are resolved.
+        // The pause keeps its own state (the conversation's paused snapshot).
+        await dropCheckpoint();
         const paused = await db.finalizeAgentRun(runId, tenantId, {
           status: 'requires_action',
           result: responseWithRunId as unknown as Record<string, unknown>,
@@ -2611,9 +2692,9 @@ const DRAIN_EVENTS_MAX_WAIT_MS = 5_000;
  * next boot's reconciler republishes them). The caller pauses the consumers
  * first so no new run starts meanwhile.
  */
-export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled: number; interrupted: number }> {
+export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled: number; interrupted: number; handedOff: number }> {
   const initial = [...activeLocalRuns.values()];
-  if (initial.length === 0) return { settled: 0, interrupted: 0 };
+  if (initial.length === 0) return { settled: 0, interrupted: 0, handedOff: 0 };
   const timer = delaySentinel(timeoutMs, TIMEOUT_SENTINEL);
   try {
     await Promise.race([Promise.allSettled(initial.map((run) => run.settled)), timer.promise]);
@@ -2622,8 +2703,23 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
   }
   const leftovers = [...activeLocalRuns.values()];
   let interrupted = 0;
+  let handedOff = 0;
   const ended: Array<{ local: LocalRun; run: IAgentRun }> = [];
   for (const local of leftovers) {
+    // Durable runs go on elsewhere: the latest step is stored and the run is queued again.
+    if (local.durable) {
+      const handed = await handOffLocalRun(local).catch((error: unknown) => {
+        logger.warn('Could not hand an agent run off; it ends interrupted', {
+          runId: local.runId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      });
+      if (handed) {
+        handedOff += 1;
+        continue;
+      }
+    }
     try {
       const completedAt = new Date();
       const finalized = await runWithTenantDb(local.tenantDbName, (db) => db.finalizeAgentRun(local.runId, local.tenantId, {
@@ -2671,9 +2767,97 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
     local.cell.abandoned = true;
     local.abort();
   }
-  const result = { settled: initial.length - leftovers.length, interrupted };
+  const result = { settled: initial.length - leftovers.length, interrupted, handedOff };
   logger.info('Agent runs drained for shutdown', { ...result, timeoutMs });
   return result;
+}
+
+/** How long a shutdown waits for a run's last checkpoint before handing it off with the one before. */
+const HANDOFF_FLUSH_MAX_MS = 2_000;
+
+/**
+ * Durable runs: stores the turn's latest step, queues the run again for
+ * another node (the generation moves on, so this execution's writes are refused
+ * from now on) and publishes its job. Null when it could not be handed off.
+ *
+ * A flush that does not finish in time is not a problem: every tool with side
+ * effects waited for its own checkpoint before it started, so the last stored
+ * one already lists it. What is lost is at most read-only progress.
+ */
+async function handOffLocalRun(local: LocalRun): Promise<IAgentRun | null> {
+  const checkpointer = local.cell.checkpointer;
+  if (checkpointer?.sealed) return null;
+  if (checkpointer) {
+    const timer = delaySentinel(HANDOFF_FLUSH_MAX_MS, TIMEOUT_SENTINEL);
+    try {
+      await Promise.race([checkpointer.flush(), timer.promise]);
+    } finally {
+      timer.clear();
+    }
+    // No new tool starts here from now on.
+    checkpointer.stop();
+  }
+  const run = await runWithTenantDb(local.tenantDbName, (db) => db.requeueAgentRunForRecovery(
+    local.runId,
+    local.tenantId,
+    { fromWorkerId: getThisNodeName() },
+    { reason: 'handoff', deadlineAt: new Date(local.cell.deadlineAt ?? Date.now() + getConfig().agent.backgroundMaxDurationMs) },
+  ));
+  if (!run) return null;
+  await publishAgentRunJob(run).catch((error: unknown) => {
+    // Queued all the same: the reconciler republishes it after AGENT_RUN_REQUEUE_AFTER_MS.
+    logger.warn('Could not publish a handed-off agent run', {
+      runId: local.runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+  logger.info('Agent run handed off for shutdown', { runId: local.runId, generation: run.queueGeneration });
+  return run;
+}
+
+/** How long one turn of a background run may take: its own `maxDurationMs`, capped by `AGENT_BACKGROUND_MAX_DURATION_MS`. */
+export function agentRunCeilingMs(run: Pick<IAgentRun, 'maxDurationMs'>): number {
+  const cap = getConfig().agent.backgroundMaxDurationMs;
+  return run.maxDurationMs && run.maxDurationMs > 0 ? Math.min(run.maxDurationMs, cap) : cap;
+}
+
+/** Why a recovered run ended without going on: its checkpoint could not be used. */
+const UNRECOVERABLE_RUN_MESSAGE = 'The server running this run stopped and the run could not be continued from where it was. It was not completed; retry it.';
+
+type RunRecoveryPlan =
+  /** The turn ended and wrote its answer before its run was finalized: finish the run. */
+  | { kind: 'written'; result: Record<string, unknown> }
+  /** Go on from the checkpoint. */
+  | { kind: 'checkpoint'; checkpoint: LoadedCheckpoint }
+  /** No checkpoint, so no tool with side effects started: run the turn again. */
+  | { kind: 'rerun' }
+  /** A checkpoint that cannot be used (too large, unknown format, unreadable). */
+  | { kind: 'unusable' };
+
+/** What a node does with a run it took over from a node that stopped (see `RunRecoveryPlan`). */
+export async function planRunRecovery(
+  db: Pick<DatabaseProvider, 'findAgentConversationById' | 'findAgentRunCheckpoint'>,
+  run: Pick<IAgentRun, '_id' | 'tenantId' | 'conversationId'>,
+  turnKey: string,
+): Promise<RunRecoveryPlan> {
+  const conversation = await db.findAgentConversationById(run.conversationId);
+  const written = [...(conversation?.messages ?? [])].reverse()
+    .find((message) => transcriptHasTurn([message], turnKey));
+  if (written) {
+    return {
+      kind: 'written',
+      result: {
+        object: 'response',
+        status: 'completed',
+        conversation_id: run.conversationId,
+        output_text: written.content,
+      },
+    };
+  }
+  const read = await readRunCheckpoint(await db.findAgentRunCheckpoint(String(run._id), run.tenantId));
+  if (read.kind === 'ok') return { kind: 'checkpoint', checkpoint: read.checkpoint };
+  if (read.kind === 'unusable') return { kind: 'unusable' };
+  return { kind: 'rerun' };
 }
 
 /** A sync reservation this old is abandoned, not live — see `SYNC_RESERVATION_GRACE_MS`. */

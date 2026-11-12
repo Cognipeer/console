@@ -9,7 +9,7 @@
  */
 
 import type { Filter } from 'mongodb';
-import type { AgentRunClass, IAgentRun } from '../provider.interface';
+import type { AgentRunCheckpointWrite, AgentRunClass, IAgentRun, IAgentRunCheckpoint } from '../provider.interface';
 import { AgentRunConflictError, AgentRunIdempotencyKeyTakenError } from '../provider/errors';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
@@ -309,6 +309,10 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
           workerId: null,
           cancelRequestedAt: null,
           completedAt: null,
+          // A new turn: not a recovery of the one before.
+          lastRecoveredAt: null,
+          lastRecoveryReason: null,
+          recoveryDeadlineAt: null,
           updatedAt: new Date(),
         },
       );
@@ -319,6 +323,103 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       }
       await this.bindAgentRunLock(lockId, id);
       return run;
+    }
+
+    async requeueAgentRunForRecovery(
+      id: string,
+      tenantId: string,
+      guard: { fromWorkerId?: string; staleBefore?: Date },
+      recovery: { reason: 'handoff' | 'orphaned'; deadlineAt: Date },
+    ): Promise<IAgentRun | null> {
+      const { reason } = recovery;
+      const filter: Filter<IAgentRun> = { _id: objectId(id), tenantId, status: 'running' };
+      if (guard.fromWorkerId !== undefined) filter.workerId = guard.fromWorkerId;
+      if (guard.staleBefore) filter.heartbeatAt = { $lt: guard.staleBefore };
+      const now = new Date();
+      // The row stays active (queued), so it keeps the conversation's lock.
+      const doc = await this.agentRunsCollection().findOneAndUpdate(
+        filter,
+        {
+          $set: {
+            status: 'queued',
+            workerId: null,
+            notBefore: now,
+            lastRecoveredAt: now,
+            lastRecoveryReason: reason,
+            recoveryDeadlineAt: recovery.deadlineAt,
+            updatedAt: now,
+          },
+          // Only an orphan counts toward the limit: a run that keeps killing its node.
+          $inc: { queueGeneration: 1, ...(reason === 'orphaned' ? { recoveryCount: 1 } : {}) },
+        },
+        { returnDocument: 'after' },
+      );
+      return doc ? toRun(doc) : null;
+    }
+
+    async writeAgentRunCheckpoint(write: AgentRunCheckpointWrite): Promise<boolean> {
+      const collection = this.getTenantDb().collection<IAgentRunCheckpoint>(COLLECTIONS.agentRunCheckpoints);
+      const now = new Date();
+      const common = {
+        ...(write.head !== undefined ? { head: write.head } : {}),
+        messageCount: write.messageCount,
+        toolHistoryCount: write.toolHistoryCount,
+        sizeBytes: write.sizeBytes,
+        schema: write.schema,
+        sealed: write.sealed ?? null,
+        updatedAt: now,
+        expiresAt: write.expiresAt,
+      };
+      if (write.mode === 'append') {
+        // Only onto this execution's own checkpoint: an older or newer generation's is not ours to extend.
+        const result = await collection.updateOne(
+          { _id: write.runId, tenantId: write.tenantId, generation: write.generation },
+          {
+            $set: common,
+            $push: {
+              messageChunks: { $each: write.messageChunks },
+              toolHistoryChunks: { $each: write.toolHistoryChunks },
+            },
+          },
+        );
+        return result.matchedCount === 1;
+      }
+      await ensureTenantCollectionsIndexes(this.getTenantDb(), [COLLECTIONS.agentRunCheckpoints]);
+      try {
+        // A newer execution's checkpoint does not match the filter; the upsert then collides on _id.
+        await collection.updateOne(
+          { _id: write.runId, tenantId: write.tenantId, generation: { $lte: write.generation } },
+          {
+            $set: {
+              ...common,
+              runId: write.runId,
+              conversationId: write.conversationId,
+              generation: write.generation,
+              messageChunks: write.messageChunks,
+              toolHistoryChunks: write.toolHistoryChunks,
+            },
+            $setOnInsert: { tenantId: write.tenantId, createdAt: now },
+          },
+          { upsert: true },
+        );
+        return true;
+      } catch (error) {
+        if (isDuplicateKeyError(error)) return false;
+        throw error;
+      }
+    }
+
+    async findAgentRunCheckpoint(runId: string, tenantId: string): Promise<IAgentRunCheckpoint | null> {
+      const doc = await this.getTenantDb()
+        .collection<IAgentRunCheckpoint>(COLLECTIONS.agentRunCheckpoints)
+        .findOne({ _id: runId, tenantId });
+      return doc ? { ...doc, _id: String(doc._id) } : null;
+    }
+
+    async deleteAgentRunCheckpoint(runId: string, tenantId: string): Promise<void> {
+      await this.getTenantDb()
+        .collection<IAgentRunCheckpoint>(COLLECTIONS.agentRunCheckpoints)
+        .deleteOne({ _id: runId, tenantId });
     }
 
     async updateAgentRunCallback(

@@ -956,23 +956,62 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
   });
 
   it('the shutdown drain waits for local runs, then fails the ones still going as interrupted', async () => {
-    hoisted.executeAgentChatLocal.mockImplementation(() => new Promise(() => undefined));
-    const run = await startQueued('conv-drain');
-    const job = runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
-    // Executing: claimed, preconditions passed, the turn invoked.
-    await vi.waitFor(() => {
-      expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
-    });
+    process.env.AGENT_DURABLE_RUNS = 'false';
+    reloadConfig();
+    try {
+      hoisted.executeAgentChatLocal.mockImplementation(() => new Promise(() => undefined));
+      const run = await startQueued('conv-drain');
+      const job = runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+      // Executing: claimed, preconditions passed, the turn invoked.
+      await vi.waitFor(() => {
+        expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
+      });
 
-    const drained = await drainLocalAgentRuns(50);
+      const drained = await drainLocalAgentRuns(50);
 
-    expect(drained).toEqual({ settled: 0, interrupted: 1 });
-    expect(await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id))).toMatchObject({
-      status: 'failed',
-      errorReason: 'interrupted',
-      stopReason: 'error',
-    });
-    await job;
+      expect(drained).toEqual({ settled: 0, interrupted: 1, handedOff: 0 });
+      expect(await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id))).toMatchObject({
+        status: 'failed',
+        errorReason: 'interrupted',
+        stopReason: 'error',
+      });
+      await job;
+    } finally {
+      delete process.env.AGENT_DURABLE_RUNS;
+      reloadConfig();
+    }
+  });
+
+  it('with durable runs, the shutdown drain hands a run still going to another node instead of failing it', async () => {
+    process.env.AGENT_DURABLE_RUNS = 'true';
+    reloadConfig();
+    try {
+      hoisted.executeAgentChatLocal.mockImplementation(() => new Promise(() => undefined));
+      const run = await startQueued('conv-drain-handoff');
+      const runId = String(run._id);
+      const job = runAgentJobLocal({ runId, tenantId, tenantDbName: dbName });
+      await vi.waitFor(() => {
+        expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
+      });
+      hoisted.publish.mockClear();
+
+      const drained = await drainLocalAgentRuns(50);
+
+      expect(drained).toEqual({ settled: 0, interrupted: 0, handedOff: 1 });
+      const db = await getDatabase();
+      await db.switchToTenant(dbName);
+      const after = await db.getAgentRunById(runId, tenantId, PROJECT_ID);
+      expect(after).toMatchObject({ status: 'queued', lastRecoveryReason: 'handoff', queueGeneration: 2 });
+      expect(after?.recoveryCount ?? 0).toBe(0);
+      expect(after?.recoveryDeadlineAt).toBeTruthy();
+      expect(hoisted.publish).toHaveBeenCalledWith(AGENT_RUN_QUEUE, 'run', expect.objectContaining({ runId }), expect.anything());
+      await job;
+      // The old execution, cut off, does not finalize the run it handed over.
+      expect((await db.getAgentRunById(runId, tenantId, PROJECT_ID))?.status).toBe('queued');
+    } finally {
+      delete process.env.AGENT_DURABLE_RUNS;
+      reloadConfig();
+    }
   });
   describe('the agents service switched off', () => {
     /** Runs `fn` with the agents service off for the deployment, and puts the environment back. */

@@ -101,7 +101,7 @@ A run, as every read returns it:
 | `requires_action` | Paused for an approval or a question. **Not terminal**: answer it and the run continues. A client that polls until the end must stop here too, or it waits for a person. |
 | `succeeded`, `failed`, `canceled` | Terminal. `succeeded` includes a run that a limit stopped; `stop_reason` (`end_turn`, `limit`, `requires_action`, `cancelled`, `error`, `budget_reached`) says how the turn ended. A structured-output failure does not fail the run: read `output_error`. |
 
-A failed or canceled run carries `error: { type, message }`. The types: `agent_error`, `max_duration_exceeded`, `worker_lost` (the node died; not retried, because a half-done turn may have had side effects), `interrupted` (the server shut down, see [below](#shutdown-and-crashes)), `expired` (a deferred or scheduled run that never started in time) and `canceled_by_caller`.
+A failed or canceled run carries `error: { type, message }`. The types: `agent_error`, `max_duration_exceeded`, `worker_lost` (the node died and the run could not be continued, see [durable runs](#durable-runs)), `interrupted` (the server shut down without durable runs, see [below](#shutdown-and-crashes)), `expired` (a deferred or scheduled run that never started in time) and `canceled_by_caller`.
 
 ## Run classes
 
@@ -189,9 +189,22 @@ A callback is a `POST` with `x-cognipeer-event: agent_run.succeeded | agent_run.
 
 ## Shutdown and crashes
 
+This section describes a deployment **without** [durable runs](#durable-runs) (the default on-premises). With durable runs, a background run that is still going at shutdown, or whose node died, continues on another node instead of failing.
+
 - **Draining.** On `SIGTERM` a node stops taking new queue work, waits up to `AGENT_RUN_DRAIN_TIMEOUT_MS` (10 seconds, kept 3 seconds below `SHUTDOWN_TIMEOUT_MS`) for the runs executing on it, and marks what is left `failed` with the error type `interrupted`: *"The server restarted while this run was in progress. It was not completed; retry it."* Their callbacks and webhooks fire. This happens **before** the HTTP server starts waiting for its open connections: a caller that is waiting on such a run gets its `503 agent_run_interrupted` (a stream, its `error` event) and ends, so no open stream holds the shutdown up. The run's session events are closed the way a failed turn's are, `session.error` (`code: agent_run_interrupted`) and then `session.status_idle` with `stop_reason: error`, before the open session event streams are ended, so a client that follows the run and waits for the idle event is told it is over; those streams then end, and their clients reconnect (with `Last-Event-ID`) to the next node. They are **not** retried automatically, because a half-done turn may have had side effects. Queued and scheduled runs are untouched; another node, or this one after the restart, picks them up.
 - **A node that dies.** A running run whose heartbeat is older than `AGENT_RUN_HEARTBEAT_STALE_MS` (45 seconds) is failed as `worker_lost`, also not retried, and its session events get the same ending (`session.error`, `session.status_idle` with `stop_reason: error`) from the node that failed it, so the session does not stay `running` and a follower is not left waiting. A queued run no worker took within `AGENT_RUN_REQUEUE_AFTER_MS` is published again, with a job id of its own for each requeue window, so a job that failed before it claimed its run is tried again instead of being lost; a job is never run twice (a run is claimed once). On MongoDB an idempotency lock that was never bound to a run (the node died between the lock and the insert) is reclaimed after 60 seconds.
 - **Retention.** Run records are kept `AGENT_RUN_RETENTION_DAYS` (30), counted from when the run **finished**, whichever way it ended (a run scheduled 20 days ahead is kept 30 days after it ran, not 10). Until it has run, a scheduled run's record is kept for the retention days after its due time (a deferred run's also after `AGENT_DEFERRED_MAX_WAIT_MS`). A run that is queued, running, scheduled or paused is never deleted, and an idempotency key lives as long as its run.
+
+### Durable runs
+
+With `AGENT_DURABLE_RUNS` (on by default in SaaS), a background, deferred, scheduled or detached inline run does not depend on the node that runs it.
+
+- **What is stored, and when.** A turn writes a checkpoint (its messages, tool history, summaries and plan) only when one is needed: before a tool that may have side effects starts (the tool waits for it), after such a tool, at most every `AGENT_CHECKPOINT_INTERVAL_MS` (10 seconds) while the turn goes on, and at shutdown. A turn whose tools only read, or that calls none, writes nothing. Writes add what is new since the last one (compressed); the whole state is written again only when the turn summarized its history. The checkpoint is deleted when the run ends or pauses, and expires an hour after the run's ceiling if a crash left it behind. Text and reasoning deltas are never stored here.
+- **Shutdown.** After the drain wait, a run still going is handed off: its latest step is stored (at most 2 seconds), the run goes back to `queued` and is published, and the node stops it. The next node continues it from the checkpoint. A caller waiting on it is not given an error; it reads the run (or its session events) as usual.
+- **A node that dies.** The reconciler finds the run by its stale heartbeat, puts it back in the queue and publishes it, up to `AGENT_RUN_MAX_RECOVERIES` (2) times a run; a run that keeps losing its node is then failed as `worker_lost`. Shutdown handoffs do not count toward the limit.
+- **How it continues.** The next node finishes the run if its answer had already been written, continues from the checkpoint if there is one, and runs the turn again from the start if there is none (no tool with side effects had started). A tool call that was running when the node stopped is not run again; the model is told its outcome is unknown and to check its effect before calling it again. A moved run keeps the time ceiling it started with.
+- **Fencing.** Each move gives the run a new generation. A node that lost its run can no longer write a checkpoint or a heartbeat for it, and does not start another tool for it.
+- **Limits.** A checkpoint larger than `AGENT_STATE_MAX_BYTES` is not continued: the turn goes on where it is, and if its node stops, the run fails as `worker_lost`. Synchronous calls and chat turns are not durable runs; a client that waits on one still gets `503 agent_run_interrupted` at shutdown.
 
 ## Triggers
 
@@ -218,6 +231,9 @@ Set in the environment ([Configuration](/guide/configuration#agent-runs) lists t
 | `AGENT_RUN_HEARTBEAT_INTERVAL_MS` | `15000` | How often a running run writes its heartbeat. |
 | `AGENT_RUN_HEARTBEAT_STALE_MS` | `45000` | When a run without a heartbeat counts as lost. |
 | `AGENT_RUN_RETENTION_DAYS` | `30` | Run record retention. |
+| `AGENT_DURABLE_RUNS` | `true` in SaaS, `false` on-premises | [Durable runs](#durable-runs). |
+| `AGENT_CHECKPOINT_INTERVAL_MS` | `10000` | Longest time between two checkpoints of a turn that has one (minimum 1000). |
+| `AGENT_RUN_MAX_RECOVERIES` | `2` | Times a run whose node died is continued elsewhere (`0`..`10`). |
 | `AGENT_TRIGGER_TICK_MS`, `AGENT_TRIGGER_MISFIRE_GRACE_MS` | `30000`, `3600000` | The [trigger scheduler](/guide/agent-triggers#schedule). |
 
 Tenant quotas can lower the wait window, the maximum duration and the active-run cap (`maxAgentSyncTimeoutSeconds`, `maxAgentBackgroundDurationMinutes`, `maxConcurrentAgentRuns`); they never raise them above the environment. An agent has no run limits of its own except the ones inside a turn (`runtime.limits`).

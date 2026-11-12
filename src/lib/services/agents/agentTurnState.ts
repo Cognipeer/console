@@ -147,7 +147,7 @@ export async function decodeStoredStateAsync(stored: string): Promise<string> {
  * next turn, and `usage` accumulates — carried over, it would bill every turn
  * for all the turns before it.
  */
-const CARRIED_FIELDS = [
+export const CARRIED_FIELDS = [
     'messages',
     'toolHistory',
     'toolHistoryArchived',
@@ -157,7 +157,7 @@ const CARRIED_FIELDS = [
     'planVersion',
 ] as const;
 
-type CarriedState = Partial<Pick<AgentSdkSmartState, (typeof CARRIED_FIELDS)[number]>>;
+export type CarriedState = Partial<Pick<AgentSdkSmartState, (typeof CARRIED_FIELDS)[number]>>;
 
 type LooseMessage = Record<string, unknown> & {
     role?: string;

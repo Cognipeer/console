@@ -4118,6 +4118,11 @@ export interface IAgentConversationMessage {
     origin?: 'reminder';
     reminder?: { runId: string; message: string; setAt?: string };
     /**
+     * Durable runs: the background run turn that wrote this answer (`agentRunTurnKey`). A run
+     * continued on another node checks it, so a turn that was already written is not written twice.
+     */
+    runTurn?: string;
+    /**
      * FlowBase agents (`kind: 'flow'`) only: the flow run behind this reply, and what it waits for.
      * The chat can render `wait.form` / `widgets` as UI; `content` already carries a text version of both.
      */
@@ -4603,6 +4608,60 @@ export interface IAgentConversationState {
   sizeBytes: number;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+/**
+ * Durable runs: the state a background run's turn has reached so far, so that
+ * another node can continue the turn if this one stops. Temporary: deleted when
+ * the run ends; `expiresAt` (TTL) removes one a crash left behind. Written
+ * sparsely (see runCheckpoint.ts) and as deltas: `messageChunks` /
+ * `toolHistoryChunks` are appended, never rewritten, until the turn compacts
+ * its history (then the checkpoint is written again in full).
+ */
+export interface IAgentRunCheckpoint {
+  /** The run id. */
+  _id?: string;
+  runId: string;
+  tenantId: string;
+  conversationId: string;
+  /** The run's `queueGeneration` when written: a write from an older execution is refused (fencing). */
+  generation: number;
+  /** Format version of the encoded parts; a node that does not know it does not continue the run. */
+  schema: number;
+  /** Encoded JSON: the state's other carried fields and the turn's own bookkeeping. */
+  head: string;
+  /** Encoded JSON arrays of SDK messages, in order. */
+  messageChunks: string[];
+  /** Encoded JSON arrays of tool history entries, in order. */
+  toolHistoryChunks: string[];
+  messageCount: number;
+  toolHistoryCount: number;
+  /** Stored size of head + chunks. */
+  sizeBytes: number;
+  /** Set when the turn could not be checkpointed any more (`too_large`): the run cannot be continued. */
+  sealed?: 'too_large' | null;
+  createdAt?: Date;
+  updatedAt?: Date;
+  expiresAt: Date;
+}
+
+/** One checkpoint write: a full rewrite (`reset`) or chunks appended to the stored ones. */
+export interface AgentRunCheckpointWrite {
+  runId: string;
+  tenantId: string;
+  conversationId: string;
+  generation: number;
+  schema: number;
+  mode: 'reset' | 'append';
+  /** Required on `reset`; on `append`, absent = unchanged. */
+  head?: string;
+  messageChunks: string[];
+  toolHistoryChunks: string[];
+  messageCount: number;
+  toolHistoryCount: number;
+  sizeBytes: number;
+  sealed?: 'too_large' | null;
+  expiresAt: Date;
 }
 
 // ── Incident types ──────────────────────────────────────────────────────
@@ -5845,6 +5904,21 @@ export interface IAgentRun extends IUsageAttributionFields {
   resumeTrigger?: 'resume' | 'timeout' | null;
   resumeUserId?: string | null;
   resumeApiTokenId?: string | null;
+  /**
+   * Durable runs: how many times the reconciler found the run orphaned (its
+   * node stopped heartbeating) and queued it to continue elsewhere. Capped by
+   * `AGENT_RUN_MAX_RECOVERIES`. A shutdown handoff does not count.
+   */
+  recoveryCount?: number;
+  /**
+   * When the run was last queued to continue on another node (handoff or
+   * orphan), and why. Set = the next claim recovers. Cleared when the run is
+   * queued for a new turn (`requeueAgentRunForResume`).
+   */
+  lastRecoveredAt?: Date | null;
+  lastRecoveryReason?: 'handoff' | 'orphaned' | null;
+  /** The ceiling of the turn being recovered: a recovered execution does not get a fresh one. */
+  recoveryDeadlineAt?: Date | null;
   /**
    * The principal whose spend and quota policies the run counts against when
    * its owner is a synthetic actor (a trigger fire): the trigger's last

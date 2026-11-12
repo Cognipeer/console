@@ -88,6 +88,8 @@ beforeEach(async () => {
   await db.switchToTenant(dbName);
   process.env.AGENT_RUN_HEARTBEAT_STALE_MS = '45000';
   process.env.AGENT_SYNC_TIMEOUT_MS = '5000';
+  // Durable runs are on by default in SaaS; the sweep's plain behaviour is tested with them off.
+  process.env.AGENT_DURABLE_RUNS = 'false';
   reloadConfig();
   hoisted.publish.mockResolvedValue(undefined);
 });
@@ -95,6 +97,7 @@ beforeEach(async () => {
 afterEach(async () => {
   delete process.env.AGENT_RUN_HEARTBEAT_STALE_MS;
   delete process.env.AGENT_SYNC_TIMEOUT_MS;
+  delete process.env.AGENT_DURABLE_RUNS;
   delete process.env.AGENT_RUN_REQUEUE_AFTER_MS;
   delete process.env.AGENT_DEFERRED_MAX_RUNNING_PER_TENANT;
   vi.useRealTimers();
@@ -425,5 +428,53 @@ describe('agent-run reconciler: hourly retention (§4.5)', () => {
     // The expired key is free to claim again; the live one still holds.
     expect(await db.claimSchedulerSlot('trigger:r1:2026-01-01T00:00:00.000Z', new Date(Date.now() + 60_000))).toBe(true);
     expect(await db.claimSchedulerSlot('trigger:r1:2099-01-01T00:00:00.000Z', new Date(Date.now() + 60_000))).toBe(false);
+  });
+});
+
+describe('durable runs: an orphaned run continues on another node', () => {
+  beforeEach(() => {
+    process.env.AGENT_DURABLE_RUNS = 'true';
+    process.env.AGENT_BACKGROUND_MAX_DURATION_MS = '600000';
+    reloadConfig();
+  });
+  afterEach(() => {
+    delete process.env.AGENT_RUN_MAX_RECOVERIES;
+    delete process.env.AGENT_BACKGROUND_MAX_DURATION_MS;
+  });
+
+  const staleRun = async (conversationId: string) => {
+    const run = await db.createAgentRun(baseRecord(conversationId));
+    const startedAt = new Date(Date.now() - 120_000);
+    await db.claimAgentRun(String(run._id), tenantId, 'dead-worker', startedAt);
+    return { runId: String(run._id), startedAt };
+  };
+
+  it('queues it again with the ceiling its turn started with, and publishes it', async () => {
+    const { runId, startedAt } = await staleRun('conv-durable-orphan');
+
+    await triggerAgentRunReconcilerRun();
+
+    const after = await db.getAgentRunById(runId, tenantId, PROJECT_ID);
+    expect(after).toMatchObject({ status: 'queued', recoveryCount: 1, lastRecoveryReason: 'orphaned', queueGeneration: 2 });
+    expect(after?.workerId ?? null).toBeNull();
+    expect(new Date(after!.recoveryDeadlineAt!).getTime()).toBe(startedAt.getTime() + 600_000);
+    expect(hoisted.publish).toHaveBeenCalledWith(AGENT_RUN_QUEUE, 'run', expect.objectContaining({ runId }), expect.anything());
+  });
+
+  it('fails it as worker_lost once it used up its recoveries, and drops its checkpoint', async () => {
+    process.env.AGENT_RUN_MAX_RECOVERIES = '0';
+    reloadConfig();
+    const { runId } = await staleRun('conv-durable-exhausted');
+    await db.writeAgentRunCheckpoint({
+      runId, tenantId, conversationId: 'conv-durable-exhausted', generation: 1, schema: 1, mode: 'reset', head: 'h',
+      messageChunks: [], toolHistoryChunks: [], messageCount: 0, toolHistoryCount: 0, sizeBytes: 1,
+      expiresAt: new Date(Date.now() + 3_600_000),
+    });
+
+    await triggerAgentRunReconcilerRun();
+
+    const after = await db.getAgentRunById(runId, tenantId, PROJECT_ID);
+    expect(after).toMatchObject({ status: 'failed', errorReason: 'worker_lost' });
+    expect(await db.findAgentRunCheckpoint(runId, tenantId)).toBeNull();
   });
 });

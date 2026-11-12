@@ -122,6 +122,7 @@ export const COLLECTIONS = {
   batchJobItems: 'batch_job_items',
   agentRuns: 'agent_runs',
   agentRunLocks: 'agent_run_locks',
+  agentRunCheckpoints: 'agent_run_checkpoints',
   realtimeModels: 'realtime_models',
   realtimeSessions: 'realtime_sessions',
   // ── Project membership & future groups ──────────────────────────────
