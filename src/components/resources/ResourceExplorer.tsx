@@ -187,6 +187,12 @@ export default function ResourceExplorer() {
     return () => clearTimeout(handle);
   }, [searchInput]);
 
+  // A failed refresh belongs to the list it was run for: a new filter, page or search starts clean.
+  const { reset: resetRefresh } = refreshList;
+  useEffect(() => {
+    resetRefresh();
+  }, [type, projectId, q, status, onlyIssues, pageSize, page, resetRefresh]);
+
   const handleRefresh = () => {
     refreshList.mutate({
       type: type || undefined,

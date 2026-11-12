@@ -93,7 +93,8 @@ function ProjectDetail({ projectId }: { projectId: string }) {
 
   // The providers tab (and what it lists) works on the active project: make this one active.
   useEffect(() => {
-    if (loading || ready || !projectId) return;
+    // A project missing from the list (just deleted, or never there) is never activated.
+    if (loading || ready || !projectId || !project) return;
     void (async () => {
       try {
         await setActiveProject.mutateAsync(projectId);
@@ -105,7 +106,7 @@ function ProjectDetail({ projectId }: { projectId: string }) {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, ready, projectId, t]);
+  }, [loading, ready, projectId, project, t]);
 
   const shellTabs: DetailShellTab[] = tabs.map((id) => ({ id, label: t(`tabs.${id}`) }));
 

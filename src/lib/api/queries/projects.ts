@@ -135,7 +135,10 @@ export function useDeleteProject() {
   const invalidate = useInvalidateProjects();
   return useMutation({
     mutationFn: (id: string) => apiDelete<unknown>(`/api/projects/${enc(id)}`),
-    onSuccess: () => invalidate(),
+    // Not awaited: the caller navigates away; waiting for the list refetch would leave the deleted page mounted.
+    onSuccess: () => {
+      void invalidate();
+    },
   });
 }
 

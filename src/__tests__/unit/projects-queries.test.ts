@@ -55,9 +55,11 @@ afterEach(async () => {
 describe('Projects hooks', () => {
   let calls: Array<{ method: string; path: string; search: string; body: unknown }>;
   let sessionFails: boolean;
+  let listGate: Promise<void> | null;
 
   beforeEach(() => {
     calls = [];
+    listGate = null;
     sessionFails = false;
     vi.stubGlobal(
       'fetch',
@@ -67,6 +69,7 @@ describe('Projects hooks', () => {
         const path = url.pathname;
         calls.push({ method, path, search: url.search, body: init?.body ? JSON.parse(String(init.body)) : undefined });
         if (method === 'GET' && path === '/api/projects') {
+          if (listGate) await listGate;
           return jsonResponse({ projects: [{ _id: 'p1', name: 'One', key: 'one' }], activeProjectId: 'p1' });
         }
         if (method === 'GET' && path === '/api/auth/session') {
@@ -172,6 +175,22 @@ describe('Projects hooks', () => {
     });
     await settle();
     expect(calls.filter((c) => c.method === 'GET' && c.path === '/api/projects')).toHaveLength(3);
+  });
+
+  it('a deleted project is reported at once: the caller does not wait for the list to be read again', async () => {
+    const client = newTestQueryClient();
+    const probe = await renderHook(client, () => ({ list: useProjects(), remove: useDeleteProject() }));
+    await settle();
+    let release: () => void = () => undefined;
+    listGate = new Promise<void>((resolve) => { release = resolve; });
+    await act(async () => {
+      await probe.current.remove.mutateAsync('p1');
+    });
+    // Reaching this line means the call returned while the list read was still held back.
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(calls.filter((c) => c.method === 'GET' && c.path === '/api/projects')).toHaveLength(2);
+    release();
+    await settle();
   });
 
   it('a failed read reaches the screen with the status and the server message', async () => {
