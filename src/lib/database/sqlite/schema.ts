@@ -2313,9 +2313,6 @@ export const TENANT_SCHEMA_SQL = `
     upstreamBaseUrl TEXT,
     upstreamAuth TEXT DEFAULT '{}',
     exposure TEXT,
-    -- @deprecated, still written and still read: every stored row carries it
-    -- and the read-time normaliser folds it into the guardrail column.
-    aegis TEXT,
     guardrail TEXT,
     access TEXT,
     owner TEXT,

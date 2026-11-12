@@ -33,7 +33,7 @@ const ALL_MODULES = unionMembers('AlertModule');
 
 describe('alert metric catalog', () => {
   it('reads the AlertMetric union (sanity)', () => {
-    expect(ALL_METRICS.length).toBeGreaterThanOrEqual(61);
+    expect(ALL_METRICS.length).toBeGreaterThanOrEqual(57);
     expect(ALL_METRICS).toContain('error_rate');
     expect(ALL_METRICS).toContain('tool_p95_latency_ms');
   });
@@ -45,9 +45,9 @@ describe('alert metric catalog', () => {
     expect(ids.filter((id) => !ALL_METRICS.includes(id))).toEqual([]);
   });
 
-  it('covers the 37 metrics that existed before entity health', () => {
+  it('covers the 33 metrics that existed before entity health', () => {
     const legacy = ALERT_METRIC_CATALOG.filter((d) => d.source === 'legacy');
-    expect(legacy).toHaveLength(37);
+    expect(legacy).toHaveLength(33);
   });
 
   it('gives every metric a label, a module of the union and a valid mode list', () => {
@@ -65,13 +65,12 @@ describe('alert metric catalog', () => {
     expect(getMetricDef('p95_latency_ms')?.unit).toBe('ms');
     expect(getMetricDef('guardrail_avg_risk_score')?.unit).toBe('');
     expect(getMetricDef('evaluation_avg_score')?.unit).toBe('%');
-    expect(getMetricDef('aegis_block_rate')).toMatchObject({ module: 'guardrails', hiddenForNewRules: true });
+    expect(getMetricDef('guardrail_block_rate')).toMatchObject({ module: 'guardrails' });
   });
 
   it('marks exactly the legacy duplicates as hidden for new rules', () => {
     const hidden = ALERT_METRIC_CATALOG.filter((d) => d.hiddenForNewRules).map((d) => d.id).sort();
     expect(hidden).toEqual([
-      'aegis_approval_rate', 'aegis_avg_risk_score', 'aegis_block_rate', 'aegis_total_decisions',
       'avg_latency_ms', 'error_rate', 'mcp_avg_latency_ms', 'mcp_error_rate', 'mcp_total_requests',
       'p95_latency_ms', 'rag_avg_latency_ms', 'rag_total_queries', 'total_cost', 'total_requests',
     ].sort());
@@ -123,11 +122,10 @@ describe('alert metric catalog', () => {
 });
 
 describe('module to metrics table', () => {
-  it('lists every catalog metric under its module and resolves aegis like guardrails', () => {
+  it('lists every catalog metric under its module', () => {
     for (const def of ALERT_METRIC_CATALOG) {
       expect(ALERT_MODULE_METRICS[def.module], def.id).toContain(def.id);
     }
-    expect(ALERT_MODULE_METRICS.aegis).toEqual(ALERT_MODULE_METRICS.guardrails);
     expect(Object.keys(ALERT_MODULE_METRICS).sort()).toEqual([...ALL_MODULES].sort());
   });
 

@@ -66,8 +66,7 @@
  *
  * ── decision vs wouldBeDecision ────────────────────────────────────────────
  * `decision` is the EFFECTIVE outcome, already neutralised to 'allow' when the
- * guardrail is not in `enforce` mode, exactly as the enforcement plane this
- * replaces did (aegis/engine.ts:289). Callers therefore need no `enforced`
+ * guardrail is not in `enforce` mode, Callers therefore need no `enforced`
  * guard of their own, and must not add one — the ported interceptor and MCP
  * bridge have none, so a `decision` that meant "what the policies wanted" would
  * hard-403 every monitor-mode tenant the moment that plane was deleted.
@@ -170,8 +169,7 @@ const SELF_FAILMODE_FAMILIES: ReadonlySet<PolicyFamily> = new Set<PolicyFamily>(
 ]);
 
 /**
- * Risk contribution per finding, carried over verbatim from the enforcement
- * plane (aegis/engine.ts:285) so a migrated policy's risk scores, alert
+ * Risk contribution per finding, so a policy's risk scores, alert
  * thresholds and dashboards keep meaning the same thing. `critical` is a flag
  * here rather than a fourth severity — widening `GuardrailFinding.severity`
  * would break the moderation API's `Record<severity, number>` and both
@@ -192,8 +190,7 @@ const LOGGED_INPUT_MAX_CHARS = 1500;
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * The enforcement plane's one-line contract guard, carried over verbatim
- * (aegis/engine.ts:204). An ABSENT version is accepted — an in-process caller
+ * The one-line contract guard. An ABSENT version is accepted — an in-process caller
  * that omits the field is making no claim about the wire shape — while a
  * PRESENT mismatch is refused rather than reinterpreted, because a caller
  * speaking a different contract is far more likely to be sending a differently
@@ -255,11 +252,10 @@ export async function resolveGuardrail(
 export const DEFAULT_TOOL_GUARDRAIL_KEY = 'tool-safety-default';
 
 /**
- * The side-effect classification of the sandbox toolbox, copied VERBATIM from
- * the enforcement plane's `BASELINE_SIDE_EFFECTS` (aegis/store.ts:46-52).
+ * The side-effect classification of the sandbox toolbox.
  *
- * Inlined rather than imported because that module lives in the enterprise
- * overlay and is being deleted — and because this table IS the reason the
+ * Inlined rather than imported because the toolbox lives in the enterprise
+ * overlay — and because this table IS the reason the
  * default guardrail exists: without it every sandbox tool is unclassified, and
  * an unclassified tool resolves to `defaultSideEffect` ('read'), i.e. to no
  * finding at all.
@@ -317,8 +313,7 @@ export function policyTiming(
 }
 
 /**
- * The three PII patterns the enforcement plane's DLP layer actually redacted
- * (aegis/engine.ts:17-21), reproduced as `regex` rules so the default protects
+ * The three PII patterns the default tool guardrail redacts, as `regex` rules so the default protects
  * something the moment it is created, with no PII policy to provision first.
  *
  * Every rule declares `maxMatchChars`: an undeclared bound makes the whole
@@ -436,7 +431,7 @@ function defaultToolGuardrailHooks(): GuardrailHooksConfig {
  * WITHOUT THIS, DELETING THE ENFORCEMENT PLANE SILENTLY DISARMS THE TOOLBOX.
  * Its call site (client-sandbox-toolbox.ts:72-79) passes NO shield id and
  * depended entirely on a lazily-created `default` shield existing
- * (aegis/store.ts:54-63: `mode:'enforce'`, `BASELINE_SIDE_EFFECTS`, DLP on).
+ * (`mode:'enforce'`, `BASELINE_SIDE_EFFECTS`, DLP on).
  * All three properties are reproduced above.
  *
  * `action: 'block'` is REQUIRED, not a stylistic default. The enforcement plane
@@ -1284,7 +1279,7 @@ function foldDecision(findings: readonly SafetyFinding[]): SafetyAction {
  *
  * `undefined` must mean "unclassified", never "no side effect": an unknown tool
  * IS the risk signal the LLM judge was gated on
- * (`!shield.rules.sideEffects?.[name]`, aegis/engine.ts:253), so substituting
+ * so substituting
  * `defaultSideEffect` here would switch the judge off for exactly the calls it
  * was kept on for. Resolution mirrors `tool_access`'s own lookup — exact keys
  * beat globs, and among globs the one with the most literal text wins — so the

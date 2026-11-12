@@ -27,7 +27,7 @@ Every guide above runs on a community install; none of them require an
 Enterprise licence. One sub-feature is the exception: an MCP server whose stdio
 package runs in **persistent sandbox execution** is Enterprise-gated and the API
 rejects it with HTTP 402 otherwise. The Enterprise-only services — Realtime,
-Cluster, GPU Fleet, Sandbox, Aegis and Prompt Optimizer — are out of scope
+Cluster, GPU Fleet, Sandbox and Prompt Optimizer — are out of scope
 here; of those, [Sandbox](/guide/sandbox), [Cluster](/guide/cluster) and
 [GPU Fleet](/guide/gpu-fleet/overview) have Guide pages.
 

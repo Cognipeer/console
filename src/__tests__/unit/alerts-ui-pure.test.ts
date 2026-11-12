@@ -106,7 +106,6 @@ describe('alertCatalog', () => {
       expect(moduleLabel(moduleId, tEn)).not.toContain('.');
       expect(moduleLabel(moduleId, tTr)).not.toBe(moduleLabel(moduleId, tEn));
     }
-    expect(moduleLabel('aegis', tEn)).toBe(moduleLabel('guardrails', tEn));
     expect(moduleLabel(undefined, tEn)).toBe('—');
   });
 
@@ -118,7 +117,6 @@ describe('alertCatalog', () => {
   it('infers the module from the stored module, the catalog and the prefix', () => {
     expect(inferModule(catalog, 'agent_error_rate')).toBe('agents');
     expect(inferModule(catalog, 'error_rate', 'models')).toBe('models');
-    expect(inferModule(catalog, 'x', 'aegis')).toBe('guardrails');
     expect(inferModule(catalog, 'kb_future_metric')).toBe('rag');
     expect(inferModule(catalog, 'mcp_server_future')).toBe('mcp');
     expect(inferModule(catalog, undefined)).toBe('models');
@@ -127,12 +125,10 @@ describe('alertCatalog', () => {
   it('hides retired metrics unless the rule being edited uses one', () => {
     expect(metricsForModule(catalog, 'models').map((def) => def.id)).not.toContain('error_rate');
     expect(metricsForModule(catalog, 'models', 'error_rate').map((def) => def.id)).toContain('error_rate');
-    expect(metricsForModule(catalog, 'guardrails').map((def) => def.id)).not.toContain('aegis_block_rate');
   });
 
-  it('lists authorable modules in display order and never the retired alias', () => {
+  it('lists authorable modules in display order', () => {
     const modules = authorableModules(catalog);
-    expect(modules).not.toContain('aegis');
     expect(modules).toEqual(MODULE_ORDER.filter((module) => modules.includes(module)));
     expect(authorableModules(catalog, ['tools', 'agents'])).toEqual(['agents', 'tools']);
   });

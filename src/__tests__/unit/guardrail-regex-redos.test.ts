@@ -24,7 +24,7 @@
  * what the load round was for; re-measuring it on every CI run is not.
  */
 
-import { describe, it, expect } from 'vitest';
+import { beforeAll, describe, it, expect } from 'vitest';
 import {
   scanRegexRules,
   DEFAULT_REGEX_BUDGET_MS,
@@ -104,6 +104,15 @@ describe('regex family: a pathological rule is cut off, not waited on', () => {
 
 describe('regex family: the budget does not change what benign rules do', () => {
   const EMAIL = rule({ id: 'email', pattern: '[\\w.+-]+@[\\w-]+\\.[\\w.]+' });
+
+  // The tests above time out on purpose, and a timeout discards the sweep's V8
+  // context. The first sweep in a fresh context pays its start-up cost inside
+  // the 50 ms budget, and on a loaded CI runner that alone can overrun it and
+  // report a benign rule as skipped. Warming the sweep here keeps these tests
+  // about what benign rules match, not about start-up time.
+  beforeAll(() => {
+    scanRegexRules('warm-up', [rule({ id: 'warm', pattern: 'WARM' })], { budgetMs: 5_000 });
+  });
 
   it('finds every match with correct spans', () => {
     const text = 'write to a@corp.com or b@corp.com please';
