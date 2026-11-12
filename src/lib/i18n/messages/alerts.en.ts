@@ -104,6 +104,9 @@ export const alertsEn = {
   },
   history: {
     notificationsSent: '{sent}/{total} sent',
+    notSentOne: 'Not sent (channel failed)',
+    notSentAll: 'Not sent (all {total} channels failed)',
+    noChannel: 'No channel',
   },
   modules: {
     agents: 'Agents',

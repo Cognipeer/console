@@ -16,6 +16,7 @@ import { userLabel, useUserDirectory } from '@/components/alerts/useUserDirector
 import { describeRowValue } from '@/components/alerts/incidentUi';
 import type { AlertEventDto } from '@/components/alerts/alertTypes';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { summarizeDeliveries } from '@/components/alerts/deliverySummary';
 
 const PAGE_SIZE_OPTIONS = [25, 50];
 
@@ -207,13 +208,16 @@ export default function AlertHistoryPage() {
       key: 'notifications',
       label: t('columns.notifications'),
       render: (event) => {
-        const total = event.channels?.length ?? 0;
-        if (total === 0) return <Text size="xs" c="dimmed">—</Text>;
-        const sent = event.channels.filter((channel) => channel.success).length;
+        const { kind, sent, total } = summarizeDeliveries(event.channels);
+        if (kind === 'none-attempted') return <Text size="xs" c="dimmed">{t('history.noChannel')}</Text>;
         const failures = event.channels.filter((channel) => !channel.success && channel.error).map((channel) => `${channel.type}: ${channel.error}`);
+        const label =
+          kind === 'failed-one' ? t('history.notSentOne')
+          : kind === 'failed-all' ? t('history.notSentAll', { total })
+          : t('history.notificationsSent', { sent, total });
         return (
-          <Text size="xs" c={sent === total ? undefined : 'orange'} title={failures.join('\n') || undefined}>
-            {t('history.notificationsSent', { sent, total })}
+          <Text size="xs" c={kind === 'all' ? undefined : 'orange'} title={failures.join('\n') || undefined}>
+            {label}
           </Text>
         );
       },

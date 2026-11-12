@@ -241,9 +241,9 @@ export default function AuditLogViewer() {
       label: 'Service',
       width: 170,
       render: (record) => (
-        <Badge variant="light" color="gray">
+        <span className="ds-badge">
           {serviceLabels.get(record.service as PermissionService) ?? record.service}
-        </Badge>
+        </span>
       ),
     },
     {
@@ -410,9 +410,9 @@ export default function AuditLogViewer() {
               <Badge color={outcomeColor(selectedLog.outcome)} variant="light">
                 {selectedLog.outcome}
               </Badge>
-              <Badge variant="light" color="gray">
+              <span className="ds-badge">
                 {serviceLabels.get(selectedLog.service as PermissionService) ?? selectedLog.service}
-              </Badge>
+              </span>
               <Badge variant="outline" color="gray">
                 {selectedLog.action}
               </Badge>

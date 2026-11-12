@@ -23,6 +23,7 @@ import { useTableControls } from '@/components/common/ui/useTableControls';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateGuardrailModal from '@/components/guardrails/CreateGuardrailModal';
 import WordListsManager from '@/components/guardrails/WordListsManager';
+import { countBlockingGuardrails } from '@/components/guardrails/blockingCount';
 // The one home for the three mode words, shared with the detail page and the
 // hook grid.
 import { MODE_COPY } from '@/components/guardrails/guardrailVocabulary';
@@ -254,7 +255,8 @@ export default function GuardrailsPage() {
   const total = guardrails.length;
   // Counts what actually runs. See the filter above.
   const enabled = guardrails.filter((g) => effectiveMode(g) !== 'disabled').length;
-  const blockCount = guardrails.filter((g) => g.action === 'block').length;
+  // Only enforcing guardrails block; monitor-mode ones just log.
+  const blockCount = countBlockingGuardrails(guardrails);
   // Worth its own tile: a fleet in monitor mode looks identical to an enforcing
   // one on every other number here, and "we thought it was blocking" is the
   // expensive version of that confusion.

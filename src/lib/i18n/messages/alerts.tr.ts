@@ -105,6 +105,9 @@ export const alertsTr: typeof alertsEn = {
   },
   history: {
     notificationsSent: '{sent}/{total} gönderildi',
+    notSentOne: 'Gönderilemedi (kanal başarısız)',
+    notSentAll: 'Gönderilemedi ({total} kanalın tümü başarısız)',
+    noChannel: 'Kanal yok',
   },
   modules: {
     agents: 'Ajanlar',

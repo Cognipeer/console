@@ -1549,14 +1549,16 @@ function OverviewTab({
                 {chartData.length} buckets
               </span>
             </div>
-            {chartData.length > 1 ? (
+            {chartData.length > 0 ? (
               <AreaChart
                 h={140}
                 data={chartData}
                 dataKey="date"
                 series={[{ name: 'Calls', color: 'teal.6' }]}
                 curveType="monotone"
-                withDots={false}
+                // A single bucket (all traffic on one day) has no line to draw,
+                // so show it as a point.
+                withDots={chartData.length === 1}
                 withGradient
                 gridAxis="x"
                 tickLine="x"
