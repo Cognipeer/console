@@ -46,6 +46,7 @@ import type {
 
 import { createLogger } from '@/lib/core/logger';
 import type { DatabaseProvider, IAgentConversation, IAgentRunCheckpoint } from '@/lib/database';
+import { isReadOnlyTool, toolKindOf } from './agentHumanInTheLoop';
 import {
     CARRIED_FIELDS,
     type CarriedState,
@@ -124,7 +125,10 @@ export interface RunCheckpointerOptions {
     intervalMs: number;
     /** The turn's bookkeeping for the state being written (the user message as it will be stored). */
     turn: (state: StateLike) => CheckpointTurn;
-    /** True for a tool that only reads: no checkpoint is needed before it. Default: none is. */
+    /**
+     * True for a tool that only reads: no checkpoint is needed before it. Default: none is.
+     * `withCheckpointBeforeTool` passes each tool's own classification instead.
+     */
     isReadOnlyTool?: (toolName: string) => boolean;
     /** The run moved to another execution: stop the turn. */
     onFenced?: () => void;
@@ -134,10 +138,13 @@ export interface RunCheckpointerOptions {
 export interface RunCheckpointer {
     /** The SDK's `onStateChange`: remembers the state at a step boundary; never pauses the turn. */
     onStateChange(state: unknown): boolean;
-    /** Awaited before a tool runs. Throws when the run continues elsewhere (the tool must not run). */
-    beforeTool(toolName: string): Promise<void>;
+    /**
+     * Awaited before a tool runs. Throws when the run continues elsewhere (the tool must not run).
+     * `readOnly` overrides `isReadOnlyTool` for this call.
+     */
+    beforeTool(toolName: string, readOnly?: boolean): Promise<void>;
     /** After a tool with possible side effects finished: the next boundary is written. */
-    afterTool(toolName: string): void;
+    afterTool(toolName: string, readOnly?: boolean): void;
     /** Writes the latest step now (shutdown). False when it could not be stored. */
     flush(): Promise<boolean>;
     /** Writes nothing more, and refuses tools with side effects (the run was handed to another node). */
@@ -323,9 +330,9 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
             // Never pause: the SDK stops the loop when this returns true.
             return false;
         },
-        async beforeTool(toolName: string): Promise<void> {
+        async beforeTool(toolName: string, readOnly?: boolean): Promise<void> {
             if (fenced || stopped) throw new Error('This run continues on another server; the tool was not run here.');
-            if (sealed || isReadOnly(toolName)) return;
+            if (sealed || (readOnly ?? isReadOnly(toolName))) return;
             if (!latest || latestWritten === latest) {
                 await chain;
             } else {
@@ -333,8 +340,8 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
             }
             if (fenced) throw new Error('This run continues on another server; the tool was not run here.');
         },
-        afterTool(toolName: string): void {
-            if (!isReadOnly(toolName)) sideEffectSinceWrite = true;
+        afterTool(toolName: string, readOnly?: boolean): void {
+            if (!(readOnly ?? isReadOnly(toolName))) sideEffectSinceWrite = true;
         },
         async flush(): Promise<boolean> {
             if (fenced || sealed) return false;
@@ -356,7 +363,9 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
 /**
  * Wraps a tool so it waits for the checkpoint before it runs. Every callable
  * alias the SDK may use is wrapped (like `protectBuiltTool`); a tool with no
- * callable is returned as it is.
+ * callable is returned as it is. A tool that only reads, by the same rule
+ * tool approval uses (its markings for a bound tool, the list for Console's
+ * own), needs no checkpoint: it is only refused once the run moved on.
  */
 export function withCheckpointBeforeTool<T>(tool: T, checkpointer: RunCheckpointer): T {
     if (!tool || typeof tool !== 'object') return tool;
@@ -368,12 +377,14 @@ export function withCheckpointBeforeTool<T>(tool: T, checkpointer: RunCheckpoint
     );
     if (!original) return tool;
     const name = typeof record.name === 'string' ? record.name : 'tool';
+    const kind = toolKindOf(record);
+    const readOnly = kind === undefined ? isReadOnlyTool(name) : kind === 'reads';
     const wrapped = async (...args: unknown[]) => {
-        await checkpointer.beforeTool(name);
+        await checkpointer.beforeTool(name, readOnly);
         try {
             return await original(...args);
         } finally {
-            checkpointer.afterTool(name);
+            checkpointer.afterTool(name, readOnly);
         }
     };
     return { ...record, invoke: wrapped, call: wrapped, run: wrapped, func: wrapped } as T;

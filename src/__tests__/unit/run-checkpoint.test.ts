@@ -259,7 +259,7 @@ describe('run checkpointer: fencing', () => {
 
     it('a wrapped tool waits for the checkpoint and is not run when the run moved on', async () => {
         const { store, checkpointer } = setup();
-        const run = vi.fn(async (_input: unknown) => 'sent');
+        const run = vi.fn<(input: unknown) => Promise<string>>(async () => 'sent');
         const tool = { name: 'send_email', description: 'd', invoke: run, call: run, func: run, run };
         const wrapped = withCheckpointBeforeTool(tool, checkpointer);
         checkpointer.onStateChange({ messages: [user('hi'), assistant('', [{ id: 'c1', name: 'send_email' }])], toolHistory: [] });
@@ -271,6 +271,25 @@ describe('run checkpointer: fencing', () => {
         checkpointer.stop();
         await expect(wrapped.invoke({})).rejects.toThrow(/another server/);
         expect(run).toHaveBeenCalledTimes(1);
+    });
+
+    it('a wrapped tool that only reads, by the approval rule, writes no checkpoint', async () => {
+        const { store, checkpointer } = setup({ isReadOnlyTool: undefined });
+        const run = vi.fn<(input: unknown) => Promise<string>>(async () => 'ok');
+        const tool = (name: string, hitlKind?: 'reads' | 'writes') => withCheckpointBeforeTool(
+            { name, description: 'd', invoke: run, call: run, func: run, run, ...(hitlKind ? { hitlKind } : {}) },
+            checkpointer,
+        );
+        checkpointer.onStateChange({ messages: [user('hi'), assistant('', [{ id: 'c1', name: 'x' }])], toolHistory: [] });
+
+        // A bound tool marked read-only, and one of Console's own read-only tools.
+        await tool('crm_get_contact', 'reads').invoke({});
+        await tool('knowledge_search').invoke({});
+        expect(store.writes).toHaveLength(0);
+
+        // A bound tool without a read-only marking.
+        await tool('crm_update_contact', 'writes').invoke({});
+        expect(store.writes).toHaveLength(1);
     });
 });
 
