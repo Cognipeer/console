@@ -327,3 +327,87 @@ describe('authorization of the new routes', () => {
     expect(getRequiredPermissionLevel('GET', 'providers')).toBe('read');
   });
 });
+
+describe('POST /api/providers - create input and error mapping', () => {
+  it('project scope creates for the context project with host paths allowed, and sets no projectIds', async () => {
+    const res = await post('/api/providers', { ...CREATE_BODY, createdBy: 'spoofed', description: 'About', status: 'disabled' });
+    expect(res.statusCode).toBe(201);
+    const input = hoisted.createProviderConfig.mock.calls[0]![2];
+    expect(input).toMatchObject({
+      createdBy: 'user-1',
+      projectId: 'proj-ctx',
+      allowHostPaths: true,
+      key: 'azure-eu',
+      type: 'model',
+      driver: 'openai',
+      label: 'Azure EU',
+      description: 'About',
+      status: 'disabled',
+    });
+    expect('projectIds' in input).toBe(false);
+  });
+
+  it('tenant scope sets no projectId and keeps the session user as createdBy', async () => {
+    await post('/api/providers?scope=tenant', { ...CREATE_BODY, createdBy: 'spoofed' });
+    const input = hoisted.createProviderConfig.mock.calls[0]![2];
+    expect(input.createdBy).toBe('user-1');
+    expect(input.allowHostPaths).toBe(true);
+    expect('projectId' in input).toBe(false);
+  });
+
+  it('names the missing required field with 400', async () => {
+    for (const field of ['key', 'type', 'driver', 'label', 'credentials']) {
+      const body: Record<string, unknown> = { ...CREATE_BODY };
+      delete body[field];
+      const res = await post('/api/providers', body);
+      expect(res.statusCode, field).toBe(400);
+      expect(parseJsonBody<{ error: string }>(res.body).error).toBe(`${field} is required`);
+    }
+    expect(hoisted.createProviderConfig).not.toHaveBeenCalled();
+  });
+
+  it('answers 409 for a key that already exists, and 400 for any other error', async () => {
+    hoisted.createProviderConfig.mockRejectedValueOnce(new Error('Provider with this key already exists'));
+    const dup = await post('/api/providers', CREATE_BODY);
+    expect(dup.statusCode).toBe(409);
+    expect(parseJsonBody<{ error: string }>(dup.body).error).toBe('Provider with this key already exists');
+
+    hoisted.createProviderConfig.mockRejectedValueOnce(new Error('something odd'));
+    const other = await post('/api/providers', CREATE_BODY);
+    expect(other.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: string }>(other.body).error).toBe('something odd');
+  });
+
+  it('maps an endpoint the guard refuses to 400 with its code', async () => {
+    hoisted.createProviderConfig.mockRejectedValueOnce(new ProviderEndpointError('baseUrl', 'private address'));
+    const res = await post('/api/providers', CREATE_BODY);
+    expect(res.statusCode).toBe(400);
+    expect(parseJsonBody<{ field: string }>(res.body).field).toBe('baseUrl');
+  });
+});
+
+describe('404s of the stored-provider routes', () => {
+  const url = '/api/providers/prov-1';
+  const call = (method: 'GET' | 'PATCH' | 'DELETE', suffix = '') =>
+    app.inject({ method, url: `${url}${suffix}`, ...(method === 'PATCH' ? { payload: { label: 'x' } as never } : {}) });
+
+  it.each(['GET', 'PATCH', 'DELETE'] as const)('%s is 404 for another tenant\'s provider and for a project it is not assigned to', async (method) => {
+    hoisted.getProviderConfigById.mockResolvedValueOnce({ _id: 'prov-1', tenantId: 'tenant-2', projectIds: ['proj-ctx'] });
+    expect((await call(method)).statusCode).toBe(404);
+    hoisted.getProviderConfigById.mockResolvedValueOnce({ _id: 'prov-1', tenantId: 'tenant-1', projectIds: ['other'] });
+    expect((await call(method)).statusCode).toBe(404);
+    hoisted.getProviderConfigById.mockResolvedValueOnce(null);
+    const missing = await call(method);
+    expect(missing.statusCode).toBe(404);
+    expect(parseJsonBody<{ error: string }>(missing.body).error).toBe('Not found');
+    expect(hoisted.updateProviderConfig).not.toHaveBeenCalled();
+  });
+
+  it.each(['GET', 'PATCH', 'DELETE'] as const)('%s with scope=tenant is 403 for a non-admin and 404 for another tenant\'s provider', async (method) => {
+    hoisted.session.userRole = 'user';
+    expect((await call(method, '?scope=tenant')).statusCode).toBe(403);
+    hoisted.session.userRole = 'owner';
+    hoisted.getProviderConfigById.mockResolvedValueOnce({ _id: 'prov-1', tenantId: 'tenant-2' });
+    expect((await call(method, '?scope=tenant')).statusCode).toBe(404);
+  });
+});

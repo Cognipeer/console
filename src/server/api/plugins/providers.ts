@@ -2,17 +2,10 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { ProviderDomain } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { providerRegistry } from '@/lib/providers';
-import type {
-  CreateProviderConfigInput,
-  ProviderStatus,
-  ProviderTestOverrides,
-  ProviderTestTarget,
-  UpdateProviderConfigInput,
-} from '@/lib/services/providers/providerService';
+import type { ProviderTestOverrides, ProviderTestTarget } from '@/lib/services/providers/providerService';
 import {
   createProviderConfig,
   deleteProviderConfig,
-  getProviderConfigById,
   hasProviderTestOverrides,
   listProviderConfigs,
   loadProviderRuntimeData,
@@ -26,6 +19,7 @@ import {
 import { foundCount, testProviderConnection } from '@/lib/services/providers/providerConnectionTest';
 import { getProviderUsage } from '@/lib/services/providers/providerUsage';
 import { WebSearchCacheConfigError } from '@/lib/services/webSearch/cacheSettings';
+import { isOwnerOrAdmin } from '@/lib/services/users/peoplePolicy';
 import {
   readJsonBody,
   requireProjectContextForRequest,
@@ -34,6 +28,14 @@ import {
   withApiRequestContext,
 } from '../fastify-utils';
 import { isProviderConfigError, sendProviderConfigError } from '../providerConfigErrors';
+import {
+  assertCreateProviderPayload,
+  buildCreateProviderInput,
+  isRecord,
+  loadScopedProvider,
+  parseProviderStatus,
+  sanitizeProviderUpdatePayload,
+} from '../providerRoutes';
 
 const logger = createLogger('api:providers');
 
@@ -68,66 +70,6 @@ function sendProviderError(reply: FastifyReply, error: unknown) {
   return reply.code(500).send({
     error: error instanceof Error ? error.message : 'Internal server error',
   });
-}
-
-function parseStatus(value: string | undefined): ProviderStatus | undefined {
-  if (value === 'active' || value === 'disabled' || value === 'errored') {
-    return value;
-  }
-  return undefined;
-}
-
-function isProviderAdmin(role: string | undefined): boolean {
-  return role === 'owner' || role === 'admin';
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
-}
-
-function validateCreatePayload(body: unknown): asserts body is CreateProviderConfigInput {
-  if (!isRecord(body)) {
-    throw new Error('Invalid payload');
-  }
-
-  const requiredFields = ['key', 'type', 'driver', 'label', 'credentials', 'createdBy'];
-  for (const field of requiredFields) {
-    if (body[field] === undefined || body[field] === null || body[field] === '') {
-      throw new Error(`${field} is required`);
-    }
-  }
-}
-
-function sanitizeUpdatePayload(body: unknown): UpdateProviderConfigInput {
-  const payload: UpdateProviderConfigInput = {};
-  if (!isRecord(body)) {
-    return payload;
-  }
-
-  if (typeof body.label === 'string') payload.label = body.label;
-  if (typeof body.description === 'string' || body.description === null) {
-    payload.description = (body.description ?? undefined) as string | undefined;
-  }
-  if (body.status === 'active' || body.status === 'disabled' || body.status === 'errored') {
-    payload.status = body.status;
-  }
-  if (isRecord(body.settings)) payload.settings = body.settings;
-  if (isRecord(body.metadata)) payload.metadata = body.metadata;
-  if (isRecord(body.credentials)) payload.credentials = body.credentials;
-  if (
-    Array.isArray(body.projectIds)
-    && body.projectIds.every((item) => typeof item === 'string')
-  ) {
-    payload.projectIds = body.projectIds;
-  }
-  if (
-    Array.isArray(body.capabilitiesOverride)
-    && body.capabilitiesOverride.every((item) => typeof item === 'string')
-  ) {
-    payload.capabilitiesOverride = body.capabilitiesOverride;
-  }
-
-  return payload;
 }
 
 class ProviderProjectIdsError extends Error {}
@@ -246,13 +188,13 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       };
 
       if (query.scope === 'tenant') {
-        if (!isProviderAdmin(session.userRole)) {
+        if (!isOwnerOrAdmin(session.userRole)) {
           return reply.code(403).send({ error: 'Forbidden' });
         }
 
         const providers = await listProviderConfigs(session.tenantDbName, session.tenantId, {
           driver: query.driver || undefined,
-          status: parseStatus(query.status),
+          status: parseProviderStatus(query.status),
           type: query.type || undefined,
         });
 
@@ -263,7 +205,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       const providers = await listProviderConfigs(session.tenantDbName, session.tenantId, {
         driver: query.driver || undefined,
         projectId,
-        status: parseStatus(query.status),
+        status: parseProviderStatus(query.status),
         type: query.type || undefined,
       });
 
@@ -277,53 +219,35 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/providers', withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
-      if (!isProviderAdmin(session.userRole)) {
+      if (!isOwnerOrAdmin(session.userRole)) {
         return reply.code(403).send({ error: 'Forbidden' });
       }
 
       const query = (request.query ?? {}) as { scope?: string };
       const body = readJsonBody<Record<string, unknown>>(request);
       body.createdBy = session.userId;
-      validateCreatePayload(body);
+      assertCreateProviderPayload(body);
+
+      // Owners and admins only reach this point (the gate above): they may name directories of this server.
+      const allowHostPaths = true;
 
       if (query.scope === 'tenant') {
         const projectIds = await readCreateProjectIds(body, session.tenantDbName, session.tenantId);
-        const provider = await createProviderConfig(session.tenantDbName, session.tenantId, {
-          capabilitiesOverride: body.capabilitiesOverride as string[] | undefined,
-          createdBy: session.userId,
-          credentials: body.credentials as Record<string, unknown>,
-          description: body.description as string | undefined,
-          driver: body.driver as string,
-          key: body.key as string,
-          label: body.label as string,
-          metadata: body.metadata as Record<string, unknown> | undefined,
-          projectIds,
-          settings: body.settings as Record<string, unknown> | undefined,
-          status: body.status as ProviderStatus | undefined,
-          type: body.type as ProviderDomain,
-          // Owners and admins only reach this point (the gate above): they may name directories of this server.
-          allowHostPaths: true,
-        });
+        const provider = await createProviderConfig(
+          session.tenantDbName,
+          session.tenantId,
+          buildCreateProviderInput(body, { createdBy: session.userId, scope: { projectIds }, allowHostPaths }),
+        );
 
         return reply.code(201).send({ provider });
       }
 
       const { projectId } = await requireProjectContextForRequest(request);
-      const provider = await createProviderConfig(session.tenantDbName, session.tenantId, {
-        capabilitiesOverride: body.capabilitiesOverride as string[] | undefined,
-        createdBy: session.userId,
-        credentials: body.credentials as Record<string, unknown>,
-        description: body.description as string | undefined,
-        driver: body.driver as string,
-        key: body.key as string,
-        label: body.label as string,
-        metadata: body.metadata as Record<string, unknown> | undefined,
-        projectId,
-        settings: body.settings as Record<string, unknown> | undefined,
-        status: body.status as ProviderStatus | undefined,
-        type: body.type as ProviderDomain,
-        allowHostPaths: true,
-      });
+      const provider = await createProviderConfig(
+        session.tenantDbName,
+        session.tenantId,
+        buildCreateProviderInput(body, { createdBy: session.userId, scope: { projectId }, allowHostPaths }),
+      );
 
       return reply.code(201).send({ provider });
     } catch (error) {
@@ -346,7 +270,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/providers/test', withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
-      if (!isProviderAdmin(session.userRole)) {
+      if (!isOwnerOrAdmin(session.userRole)) {
         return reply.code(403).send({ error: 'Forbidden' });
       }
 
@@ -376,12 +300,11 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { id } = request.params as { id: string };
       const session = requireSessionContext(request);
-      if (!isProviderAdmin(session.userRole)) {
+      if (!isOwnerOrAdmin(session.userRole)) {
         return reply.code(403).send({ error: 'Forbidden' });
       }
 
-      const existing = await getProviderConfigById(session.tenantDbName, id);
-      if (!existing || existing.tenantId !== session.tenantId) {
+      if (!await loadScopedProvider(session.tenantDbName, session.tenantId, id, { scope: 'tenant' })) {
         return reply.code(404).send({ error: 'Not found' });
       }
 
@@ -427,12 +350,12 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { id } = request.params as { id: string };
       const session = requireSessionContext(request);
-      if (!isProviderAdmin(session.userRole)) {
+      if (!isOwnerOrAdmin(session.userRole)) {
         return reply.code(403).send({ error: 'Forbidden' });
       }
 
-      const existing = await getProviderConfigById(session.tenantDbName, id);
-      if (!existing || existing.tenantId !== session.tenantId) {
+      const existing = await loadScopedProvider(session.tenantDbName, session.tenantId, id, { scope: 'tenant' });
+      if (!existing) {
         return reply.code(404).send({ error: 'Not found' });
       }
 
@@ -450,13 +373,16 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       const query = (request.query ?? {}) as { scope?: string };
 
       if (query.scope === 'tenant') {
-        if (!isProviderAdmin(session.userRole)) {
+        if (!isOwnerOrAdmin(session.userRole)) {
           return reply.code(403).send({ error: 'Forbidden' });
         }
 
         // The edit form opens from this read: it carries which credential fields are stored (names, never values).
-        const provider = await getProviderConfigById(session.tenantDbName, id, { credentialFields: true });
-        if (!provider || provider.tenantId !== session.tenantId) {
+        const provider = await loadScopedProvider(session.tenantDbName, session.tenantId, id, {
+          scope: 'tenant',
+          credentialFields: true,
+        });
+        if (!provider) {
           return reply.code(404).send({ error: 'Not found' });
         }
 
@@ -464,16 +390,12 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const { projectId } = await requireProjectContextForRequest(request);
-      const provider = await getProviderConfigById(session.tenantDbName, id, { credentialFields: true });
-      const assigned = provider && (
-        String(provider.projectId) === String(projectId)
-        || (
-          Array.isArray(provider.projectIds)
-          && provider.projectIds.map(String).includes(String(projectId))
-        )
-      );
-
-      if (!provider || provider.tenantId !== session.tenantId || !assigned) {
+      const provider = await loadScopedProvider(session.tenantDbName, session.tenantId, id, {
+        scope: 'project',
+        projectId,
+        credentialFields: true,
+      });
+      if (!provider) {
         return reply.code(404).send({ error: 'Not found' });
       }
 
@@ -490,10 +412,10 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       const session = requireSessionContext(request);
       const query = (request.query ?? {}) as { scope?: string };
       const body = readJsonBody<Record<string, unknown>>(request);
-      const payload = sanitizeUpdatePayload(body);
+      const payload = sanitizeProviderUpdatePayload(body);
       payload.updatedBy = session.userId;
       // Naming a directory of this server is for owners and admins, whichever scope the edit is in.
-      payload.allowHostPaths = isProviderAdmin(session.userRole);
+      payload.allowHostPaths = isOwnerOrAdmin(session.userRole);
 
       // Assignment edits (the Projects tab / assign step) may only name projects of the caller's tenant.
       if (payload.projectIds !== undefined) {
@@ -509,12 +431,11 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       if (query.scope === 'tenant') {
-        if (!isProviderAdmin(session.userRole)) {
+        if (!isOwnerOrAdmin(session.userRole)) {
           return reply.code(403).send({ error: 'Forbidden' });
         }
 
-        const existing = await getProviderConfigById(session.tenantDbName, id);
-        if (!existing || existing.tenantId !== session.tenantId) {
+        if (!await loadScopedProvider(session.tenantDbName, session.tenantId, id, { scope: 'tenant' })) {
           return reply.code(404).send({ error: 'Not found' });
         }
 
@@ -527,16 +448,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const { projectId } = await requireProjectContextForRequest(request);
-      const existing = await getProviderConfigById(session.tenantDbName, id);
-      const assigned = existing && (
-        String(existing.projectId) === String(projectId)
-        || (
-          Array.isArray(existing.projectIds)
-          && existing.projectIds.map(String).includes(String(projectId))
-        )
-      );
-
-      if (!existing || existing.tenantId !== session.tenantId || !assigned) {
+      if (!await loadScopedProvider(session.tenantDbName, session.tenantId, id, { scope: 'project', projectId })) {
         return reply.code(404).send({ error: 'Not found' });
       }
 
@@ -559,12 +471,11 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       const query = (request.query ?? {}) as { scope?: string };
 
       if (query.scope === 'tenant') {
-        if (!isProviderAdmin(session.userRole)) {
+        if (!isOwnerOrAdmin(session.userRole)) {
           return reply.code(403).send({ error: 'Forbidden' });
         }
 
-        const existing = await getProviderConfigById(session.tenantDbName, id);
-        if (!existing || existing.tenantId !== session.tenantId) {
+        if (!await loadScopedProvider(session.tenantDbName, session.tenantId, id, { scope: 'tenant' })) {
           return reply.code(404).send({ error: 'Not found' });
         }
 
@@ -577,16 +488,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const { projectId } = await requireProjectContextForRequest(request);
-      const existing = await getProviderConfigById(session.tenantDbName, id);
-      const assigned = existing && (
-        String(existing.projectId) === String(projectId)
-        || (
-          Array.isArray(existing.projectIds)
-          && existing.projectIds.map(String).includes(String(projectId))
-        )
-      );
-
-      if (!existing || existing.tenantId !== session.tenantId || !assigned) {
+      if (!await loadScopedProvider(session.tenantDbName, session.tenantId, id, { scope: 'project', projectId })) {
         return reply.code(404).send({ error: 'Not found' });
       }
 
