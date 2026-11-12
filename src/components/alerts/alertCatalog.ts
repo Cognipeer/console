@@ -36,7 +36,7 @@ export const DEFAULT_ALERT_CATALOG: AlertCatalog = createAlertCatalog(ALERT_METR
 
 // ── Modules ─────────────────────────────────────────────────────────────────
 
-/** Display order. `aegis` is the retired spelling of guardrails and never listed. */
+/** Display order. */
 export const MODULE_ORDER: AlertModule[] = [
   'agents',
   'models',
@@ -65,9 +65,6 @@ export const MODULE_COLORS: Record<string, string> = {
   'ai-app-gateway': 'indigo',
 };
 
-/** A rule filed under a retired module keeps firing; it is displayed under its successor. */
-const LEGACY_MODULE_ALIASES: Record<string, AlertModule> = { aegis: 'guardrails' };
-
 /** Modules whose rules can only be authored by the enterprise build. */
 export const ENTERPRISE_MODULES: AlertModule[] = ['ai-app-gateway'];
 
@@ -78,7 +75,6 @@ const METRIC_PREFIX_MODULES: Array<[string, AlertModule]> = [
   ['mcp_server_', 'mcp'],
   ['tool_', 'tools'],
   ['guardrail_', 'guardrails'],
-  ['aegis_', 'guardrails'],
   ['rag_', 'rag'],
   ['mcp_', 'mcp'],
   ['evaluation_', 'evaluation'],
@@ -89,7 +85,7 @@ const METRIC_PREFIX_MODULES: Array<[string, AlertModule]> = [
 
 export function normalizeModule(module: string | undefined | null): AlertModule | undefined {
   if (!module) return undefined;
-  return LEGACY_MODULE_ALIASES[module] ?? (module as AlertModule);
+  return module as AlertModule;
 }
 
 /**
@@ -128,7 +124,7 @@ export function moduleColor(module: string | undefined | null): string {
 export function authorableModules(catalog: AlertCatalog, validModules?: string[] | null): AlertModule[] {
   const allowed = new Set<string>(validModules && validModules.length > 0 ? validModules : catalog.metrics.map((def) => def.module));
   const listed = MODULE_ORDER.filter((module) => allowed.has(module));
-  const extra = [...allowed].filter((module) => !MODULE_ORDER.includes(module as AlertModule) && !LEGACY_MODULE_ALIASES[module]);
+  const extra = [...allowed].filter((module) => !MODULE_ORDER.includes(module as AlertModule));
   return [...listed, ...(extra as AlertModule[])];
 }
 
@@ -138,15 +134,10 @@ export function getDef(catalog: AlertCatalog, metric: string | undefined | null)
   return metric ? catalog.byId.get(metric) : undefined;
 }
 
-/**
- * Metrics offered for a module. Legacy duplicates (`hiddenForNewRules`) are left
- * out unless `keep` names the one a rule being edited already uses.
- */
-export function metricsForModule(catalog: AlertCatalog, module: string, keep?: string | null): AlertMetricDef[] {
+/** Metrics offered for a module. */
+export function metricsForModule(catalog: AlertCatalog, module: string): AlertMetricDef[] {
   const normalized = normalizeModule(module);
-  return catalog.metrics.filter(
-    (def) => normalizeModule(def.module) === normalized && (!def.hiddenForNewRules || def.id === keep),
-  );
+  return catalog.metrics.filter((def) => normalizeModule(def.module) === normalized);
 }
 
 /** Translated metric label: `alerts.metrics.<id>`, then the catalog's English label, then the raw id. */

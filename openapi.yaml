@@ -113,8 +113,6 @@ tags:
     description: "Managed code sandboxes: lifecycle, exec/code, snapshots, files, port preview, and the in-sandbox toolbox (filesystem, git, shell sessions). Enterprise."
   - name: MCP Hubs
     description: Curated MCP hub discovery (read-only). Enterprise.
-  - name: Aegis
-    description: "REMOVED. The Aegis enforcement plane was replaced by guardrail hooks (`POST /guardrails/hooks/evaluate`, `GET /guardrails`). Every operation under this tag answers `410 Gone`."
   - name: Analytics
     description: Usage analytics and dashboard overview (project-scoped).
   - name: Audit
@@ -566,45 +564,6 @@ paths:
                 error: Not found
         '500':
           $ref: '#/components/responses/InternalError'
-  /aegis/evaluate:
-    post:
-      tags:
-        - Aegis
-      deprecated: true
-      summary: "[Removed] Evaluate a call against a shield"
-      description: "REMOVED — always answers `410 Gone`. The Aegis enforcement plane was replaced by guardrail hooks: evaluate a tool call, model input/output or stream window with `POST /guardrails/hooks/evaluate` (`hook: tool.pre | tool.post | input.pre | output.pre | prompt.pre | output.stream.delta`). Kept in this document only so clients built against the old surface recognise the response."
-      operationId: aegisEvaluate
-      responses:
-        "410":
-          $ref: "#/components/responses/AegisRemoved"
-  /aegis/shields:
-    get:
-      tags:
-        - Aegis
-      deprecated: true
-      summary: "[Removed] List shields"
-      description: "REMOVED — always answers `410 Gone`. Shields were replaced by guardrail definitions: list them with `GET /guardrails`."
-      operationId: listAegisShields
-      responses:
-        "410":
-          $ref: "#/components/responses/AegisRemoved"
-  /aegis/shields/{id}/audit:
-    get:
-      tags:
-        - Aegis
-      deprecated: true
-      summary: "[Removed] Read a shield's audit trail"
-      description: "REMOVED — always answers `410 Gone`. Guardrail decisions are recorded on the guardrail's evaluation log and in the tenant audit log; the verdict of each call is also returned in the `x-cognipeer-guardrail-*` response headers."
-      operationId: getAegisShieldAudit
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "410":
-          $ref: "#/components/responses/AegisRemoved"
   /agents:
     get:
       tags:
@@ -7575,7 +7534,7 @@ paths:
       tags:
         - Guardrails
       summary: List guardrails
-      description: "Lists the guardrail definitions this token can address: the token's own project plus workspace-level guardrails (the same set `POST /guardrails/hooks/evaluate` accepts). Each item is the stored record minus the authored `hooks` blob (which may carry webhook credentials), plus `effectiveMode` and a `hooksSummary` saying which hooks will actually be evaluated. Replaces the removed `GET /aegis/shields`. Requires `read` on the guardrails service."
+      description: "Lists the guardrail definitions this token can address: the token's own project plus workspace-level guardrails (the same set `POST /guardrails/hooks/evaluate` accepts). Each item is the stored record minus the authored `hooks` blob (which may carry webhook credentials), plus `effectiveMode` and a `hooksSummary` saying which hooks will actually be evaluated. Requires `read` on the guardrails service."
       operationId: listGuardrails
       parameters:
         - name: enabled
@@ -7679,7 +7638,7 @@ paths:
       tags:
         - Guardrails
       summary: Evaluate a hook against one or more guardrails
-      description: "The remote enforcement point's entry to the guardrail hook plane — the replacement for the removed `POST /aegis/evaluate`. Names a `hook`, the guardrail key(s) that govern it and the hook's subject: `text` for `prompt.pre` / `input.pre` / `output.pre`; `tool_name` + `tool_args` for `tool.pre`, plus `tool_result` for `tool.post`; `buffer` for `output.stream.delta`. The tenant, project and actor come from the API token and cannot be supplied in the body. The verdicts of several guardrails merge. The response repeats the verdict in the `x-cognipeer-guardrail-*` headers (the `x-aegis-*` aliases are deprecated). When any named guardrail opts into verdict status codes the reply is `246` (passed with findings) or `446` (blocked) instead of `200`. Requires `write` on the guardrails service."
+      description: "The remote enforcement point's entry to the guardrail hook plane. Names a `hook`, the guardrail key(s) that govern it and the hook's subject: `text` for `prompt.pre` / `input.pre` / `output.pre`; `tool_name` + `tool_args` for `tool.pre`, plus `tool_result` for `tool.post`; `buffer` for `output.stream.delta`. The tenant, project and actor come from the API token and cannot be supplied in the body. The verdicts of several guardrails merge. The response repeats the verdict in the `x-cognipeer-guardrail-*` headers (the `x-aegis-*` aliases are deprecated). When any named guardrail opts into verdict status codes the reply is `246` (passed with findings) or `446` (blocked) instead of `200`. Requires `write` on the guardrails service."
       operationId: evaluateGuardrailHook
       requestBody:
         required: true
@@ -7715,9 +7674,9 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
           content:
             application/json:
               schema:
@@ -12287,7 +12246,7 @@ paths:
       tags:
         - Sandbox
       summary: Delete a file or directory
-      description: "Enterprise (EE) sandbox toolbox operation. Removes a file, or a directory tree when 'recursive' is true, inside the running sandbox. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Removes a file, or a directory tree when 'recursive' is true, inside the running sandbox. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxFsDelete
       parameters:
         - name: id
@@ -12333,21 +12292,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolOk"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -12363,7 +12322,7 @@ paths:
       tags:
         - Sandbox
       summary: Find a fixed string in files
-      description: "Enterprise (EE) sandbox toolbox operation. Recursively searches under a path for a fixed (non-regex) string, skipping binaries, returning up to 1000 matches. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Recursively searches under a path for a fixed (non-regex) string, skipping binaries, returning up to 1000 matches. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxFsFind
       parameters:
         - name: id
@@ -12409,21 +12368,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolFindResult"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -12439,7 +12398,7 @@ paths:
       tags:
         - Sandbox
       summary: Get file or directory metadata
-      description: "Enterprise (EE) sandbox toolbox operation. Returns metadata (size, mode, permissions, modification time) for a path inside the running sandbox. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Returns metadata (size, mode, permissions, modification time) for a path inside the running sandbox. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxFsInfo
       parameters:
         - name: id
@@ -12481,21 +12440,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolFileInfo"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -12511,7 +12470,7 @@ paths:
       tags:
         - Sandbox
       summary: List directory entries
-      description: "Enterprise (EE) sandbox toolbox operation. Lists the immediate entries of a directory inside the running sandbox. Requests are Aegis-enforced: the policy engine evaluates the call (pre/post stages) and may hold it for approval (202) or block it (403). On success the response carries Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Lists the immediate entries of a directory inside the running sandbox. Requests are Guardrail-enforced: the policy engine evaluates the call (pre/post stages) and may hold it for approval (202) or block it (403). On success the response carries guardrail decision headers."
       operationId: sandboxFsList
       parameters:
         - name: id
@@ -12553,21 +12512,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolListResult"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -12583,7 +12542,7 @@ paths:
       tags:
         - Sandbox
       summary: Create a directory
-      description: "Enterprise (EE) sandbox toolbox operation. Creates a directory (recursively) inside the running sandbox, optionally applying a chmod mode. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Creates a directory (recursively) inside the running sandbox, optionally applying a chmod mode. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxFsMkdir
       parameters:
         - name: id
@@ -12628,21 +12587,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolOk"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -12658,7 +12617,7 @@ paths:
       tags:
         - Sandbox
       summary: Move or rename a path
-      description: "Enterprise (EE) sandbox toolbox operation. Moves or renames a path inside the running sandbox, creating the destination's parent directory as needed. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Moves or renames a path inside the running sandbox, creating the destination's parent directory as needed. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxFsMove
       parameters:
         - name: id
@@ -12704,21 +12663,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolOk"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -12734,7 +12693,7 @@ paths:
       tags:
         - Sandbox
       summary: Set path permissions and ownership
-      description: "Enterprise (EE) sandbox toolbox operation. Applies chmod (mode) and/or chown (owner/group) to a path inside the running sandbox. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Applies chmod (mode) and/or chown (owner/group) to a path inside the running sandbox. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxFsPermissions
       parameters:
         - name: id
@@ -12785,21 +12744,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolOk"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -12815,7 +12774,7 @@ paths:
       tags:
         - Sandbox
       summary: Read a file
-      description: "Enterprise (EE) sandbox toolbox operation. Reads a file (up to a 10 MiB limit) as UTF-8 or base64; binary content is automatically returned base64-encoded. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Reads a file (up to a 10 MiB limit) as UTF-8 or base64; binary content is automatically returned base64-encoded. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxFsRead
       parameters:
         - name: id
@@ -12864,21 +12823,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolReadResult"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -12945,7 +12904,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           description: "Missing/relative path, a directory, or not a regular file (`{ \"error\": \"is-a-directory\" }`)."
           content:
@@ -12986,7 +12945,7 @@ paths:
       tags:
         - Sandbox
       summary: Replace a string across files
-      description: "Enterprise (EE) sandbox toolbox operation. Performs a literal find-and-replace of a string across an explicit list of files, reporting per-file success. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Performs a literal find-and-replace of a string across an explicit list of files, reporting per-file success. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxFsReplace
       parameters:
         - name: id
@@ -13038,21 +12997,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolReplaceResult"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -13068,7 +13027,7 @@ paths:
       tags:
         - Sandbox
       summary: Write a file
-      description: "Enterprise (EE) sandbox toolbox operation. Creates or overwrites a file inside the running sandbox, creating parent directories as needed. Content may be supplied as UTF-8 text or base64. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Creates or overwrites a file inside the running sandbox, creating parent directories as needed. Content may be supplied as UTF-8 text or base64. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxFsWrite
       parameters:
         - name: id
@@ -13121,21 +13080,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolWriteResult"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -13151,7 +13110,7 @@ paths:
       tags:
         - Sandbox
       summary: Stage files for commit
-      description: "Enterprise (EE) sandbox toolbox operation. Stages files in a repository (git add); when no files are supplied, stages all changes (-A). Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Stages files in a repository (git add); when no files are supplied, stages all changes (-A). Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxGitAdd
       parameters:
         - name: id
@@ -13198,21 +13157,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolOk"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -13228,7 +13187,7 @@ paths:
       tags:
         - Sandbox
       summary: Create a git branch
-      description: "Enterprise (EE) sandbox toolbox operation. Creates a new local branch in a repository inside the sandbox. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Creates a new local branch in a repository inside the sandbox. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxGitBranchCreate
       parameters:
         - name: id
@@ -13274,21 +13233,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolOk"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -13304,7 +13263,7 @@ paths:
       tags:
         - Sandbox
       summary: Delete a git branch
-      description: "Enterprise (EE) sandbox toolbox operation. Force-deletes a local branch (git branch -D) in a repository inside the sandbox. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Force-deletes a local branch (git branch -D) in a repository inside the sandbox. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxGitBranchDelete
       parameters:
         - name: id
@@ -13350,21 +13309,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolOk"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -13380,7 +13339,7 @@ paths:
       tags:
         - Sandbox
       summary: List git branches
-      description: "Enterprise (EE) sandbox toolbox operation. Lists local branches of a repository inside the sandbox. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Lists local branches of a repository inside the sandbox. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxGitBranches
       parameters:
         - name: id
@@ -13422,21 +13381,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolBranchesResult"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -13452,7 +13411,7 @@ paths:
       tags:
         - Sandbox
       summary: Checkout a git branch
-      description: "Enterprise (EE) sandbox toolbox operation. Checks out a branch (or ref) in a repository inside the sandbox. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Checks out a branch (or ref) in a repository inside the sandbox. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxGitCheckout
       parameters:
         - name: id
@@ -13498,21 +13457,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolOk"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -13528,7 +13487,7 @@ paths:
       tags:
         - Sandbox
       summary: Clone a git repository
-      description: "Enterprise (EE) sandbox toolbox operation. Clones a git repository into the sandbox, optionally checking out a branch and injecting basic-auth credentials into https/http URLs. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Clones a git repository into the sandbox, optionally checking out a branch and injecting basic-auth credentials into https/http URLs. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxGitClone
       parameters:
         - name: id
@@ -13583,21 +13542,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolCloneResult"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -13613,7 +13572,7 @@ paths:
       tags:
         - Sandbox
       summary: Create a git commit
-      description: "Enterprise (EE) sandbox toolbox operation. Commits staged changes with a supplied author/email, optionally allowing an empty commit, and returns the resulting commit hash. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Commits staged changes with a supplied author/email, optionally allowing an empty commit, and returns the resulting commit hash. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxGitCommit
       parameters:
         - name: id
@@ -13671,21 +13630,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolCommitResult"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -13701,7 +13660,7 @@ paths:
       tags:
         - Sandbox
       summary: Read git commit log
-      description: "Enterprise (EE) sandbox toolbox operation. Returns recent commits (hash, author, email, date, message) for a repository; the limit is clamped between 1 and 500 (default 30). Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Returns recent commits (hash, author, email, date, message) for a repository; the limit is clamped between 1 and 500 (default 30). Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxGitLog
       parameters:
         - name: id
@@ -13749,21 +13708,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolGitLogResult"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -13779,7 +13738,7 @@ paths:
       tags:
         - Sandbox
       summary: Pull from a git remote
-      description: "Enterprise (EE) sandbox toolbox operation. Pulls from origin, optionally injecting basic-auth credentials into the remote URL for the duration of the pull. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Pulls from origin, optionally injecting basic-auth credentials into the remote URL for the duration of the pull. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxGitPull
       parameters:
         - name: id
@@ -13827,21 +13786,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolOk"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -13857,7 +13816,7 @@ paths:
       tags:
         - Sandbox
       summary: Push to a git remote
-      description: "Enterprise (EE) sandbox toolbox operation. Pushes the current branch to origin, optionally injecting basic-auth credentials into the remote URL for the duration of the push. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Pushes the current branch to origin, optionally injecting basic-auth credentials into the remote URL for the duration of the push. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxGitPush
       parameters:
         - name: id
@@ -13905,21 +13864,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolOk"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -13935,7 +13894,7 @@ paths:
       tags:
         - Sandbox
       summary: Get git working-tree status
-      description: "Enterprise (EE) sandbox toolbox operation. Returns the porcelain status of a repository: current branch, ahead/behind counts and changed files. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Returns the porcelain status of a repository: current branch, ahead/behind counts and changed files. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxGitStatus
       parameters:
         - name: id
@@ -13977,21 +13936,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolGitStatus"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -14143,7 +14102,7 @@ paths:
       tags:
         - Sandbox
       summary: Create a command session
-      description: "Enterprise (EE) sandbox toolbox operation. Creates a session (a directory grouping background commands) inside the sandbox; a client-supplied id may be provided, otherwise one is generated. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Creates a session (a directory grouping background commands) inside the sandbox; a client-supplied id may be provided, otherwise one is generated. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxSessionCreate
       parameters:
         - name: id
@@ -14183,21 +14142,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolSessionCreateResult"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -14212,7 +14171,7 @@ paths:
       tags:
         - Sandbox
       summary: List command sessions
-      description: "Enterprise (EE) sandbox toolbox operation. Lists the ids of active command sessions in the sandbox. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Lists the ids of active command sessions in the sandbox. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxSessionList
       parameters:
         - name: id
@@ -14242,21 +14201,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolSessionListResult"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -14272,7 +14231,7 @@ paths:
       tags:
         - Sandbox
       summary: Delete a command session
-      description: "Enterprise (EE) sandbox toolbox operation. Deletes a command session and its recorded logs from the sandbox. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Deletes a command session and its recorded logs from the sandbox. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxSessionDelete
       parameters:
         - name: id
@@ -14308,21 +14267,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolOk"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -14338,7 +14297,7 @@ paths:
       tags:
         - Sandbox
       summary: Get or stream session command logs
-      description: Enterprise (EE) sandbox toolbox operation. Returns a one-shot snapshot of a session command's stdout/stderr/exit state, or — when 'follow=true' — streams new output as Server-Sent Events (stdout/stderr/exit/error events) until the command exits. This log endpoint is served directly (not through the Aegis tool interceptor), so it does not emit Aegis decision headers or a 202 approval response.
+      description: Enterprise (EE) sandbox toolbox operation. Returns a one-shot snapshot of a session command's stdout/stderr/exit state, or — when 'follow=true' — streams new output as Server-Sent Events (stdout/stderr/exit/error events) until the command exits. This log endpoint is served directly (not through the guardrail tool boundary), so it does not emit guardrail decision headers or a 202 approval response.
       operationId: sandboxSessionCommandLogs
       parameters:
         - name: id
@@ -14393,7 +14352,7 @@ paths:
       tags:
         - Sandbox
       summary: Run a command in a session
-      description: "Enterprise (EE) sandbox toolbox operation. Launches a command detached inside a session (stdout/stderr/exit are captured to files) and returns a command id for later log retrieval. Aegis-enforced: may return 202 (approval required) or 403 (blocked); success responses carry Aegis decision headers."
+      description: "Enterprise (EE) sandbox toolbox operation. Launches a command detached inside a session (stdout/stderr/exit are captured to files) and returns a command id for later log retrieval. Guardrail-enforced: may return 202 (approval required) or 403 (blocked); success responses carry guardrail decision headers."
       operationId: sandboxSessionExec
       parameters:
         - name: id
@@ -14445,21 +14404,21 @@ paths:
             x-cognipeer-guardrail-trace-id:
               $ref: "#/components/headers/GuardrailTraceId"
             x-aegis-trace-id:
-              $ref: "#/components/headers/AegisTraceIdDeprecated"
+              $ref: "#/components/headers/LegacyVerdictTraceIdHeader"
             x-aegis-decision:
-              $ref: "#/components/headers/AegisDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictDecisionHeader"
             x-aegis-post-decision:
-              $ref: "#/components/headers/AegisPostDecisionDeprecated"
+              $ref: "#/components/headers/LegacyVerdictPostDecisionHeader"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxToolExecResult"
         "202":
-          description: Aegis approval required — the operation is held pending policy/human approval.
+          description: Guardrail approval required — the operation is held pending policy/human approval.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SandboxToolAegisRejection"
+                $ref: "#/components/schemas/SandboxToolGuardrailRejection"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -16733,17 +16692,17 @@ components:
       description: Guardrail evaluation trace id; correlates with the guardrail evaluation log. Canonical replacement for `x-aegis-trace-id`.
       schema:
         type: string
-    AegisTraceIdDeprecated:
+    LegacyVerdictTraceIdHeader:
       deprecated: true
       description: "Deprecated alias of `x-cognipeer-guardrail-trace-id`. Sent while the guardrail's `visibility.aegisCompatHeaders` is on; removed in v3."
       schema:
         type: string
-    AegisDecisionDeprecated:
+    LegacyVerdictDecisionHeader:
       deprecated: true
       description: "Deprecated alias of `x-cognipeer-guardrail` (the pre-stage decision); removed in v3."
       schema:
         type: string
-    AegisPostDecisionDeprecated:
+    LegacyVerdictPostDecisionHeader:
       deprecated: true
       description: "Deprecated post-stage (`tool.post`) decision alias; read `x-cognipeer-guardrail` on the post hook's own response instead. Removed in v3."
       schema:
@@ -17079,31 +17038,6 @@ components:
           type: object
           additionalProperties: true
           description: 'A status message (`role: agent`): the reason of a `failed` task, the note of a run that stopped early, or the wait of an `input-required` one.'
-    AegisRemovedError:
-      type: object
-      description: Returned with `410 Gone` by every removed Aegis operation.
-      required:
-        - error
-      properties:
-        error:
-          type: object
-          required:
-            - type
-            - code
-            - message
-          properties:
-            type:
-              type: string
-              enum: [gone]
-            code:
-              type: string
-              enum: [aegis_removed]
-            message:
-              type: string
-            replacement:
-              type: string
-              nullable: true
-              description: Path of the operation that replaces the removed one; `null` when there is none (the shield audit log has no API-token equivalent).
     AgentCard:
       type: object
       description: A2A Agent Card (discovery document) as defined by the Agent-to-Agent protocol.
@@ -23062,20 +22996,20 @@ components:
                       type: boolean
                     holdBackChars:
                       type: integer
-    McpAegisInput:
+    McpGuardrailInput:
       type: object
-      description: Aegis enforcement configuration.
+      description: Guardrail binding for the server's tool calls (omit to leave the server unguarded).
       properties:
-        shieldId:
+        guardrailKey:
           type: string
-          description: Aegis shield id to apply.
+          description: Key of the guardrail to apply. Omit to use the tenant's default tool guardrail.
         mode:
           type: string
           enum:
             - off
             - monitor
             - enforce
-          description: Aegis enforcement mode. Defaults to `off`.
+          description: Enforcement mode. Defaults to `off`.
     McpConsoleExecuteRequest:
       type: object
       required:
@@ -23174,8 +23108,8 @@ components:
           $ref: "#/components/schemas/McpStdioConfigInput"
         exposure:
           $ref: "#/components/schemas/McpExposureInput"
-        aegis:
-          $ref: "#/components/schemas/McpAegisInput"
+        guardrail:
+          $ref: "#/components/schemas/McpGuardrailInput"
         access:
           $ref: "#/components/schemas/ResourceAccessList"
     McpExecuteRequest:
@@ -23658,8 +23592,8 @@ components:
           $ref: "#/components/schemas/McpStdioConfigInput"
         exposure:
           $ref: "#/components/schemas/McpExposureInput"
-        aegis:
-          $ref: "#/components/schemas/McpAegisInput"
+        guardrail:
+          $ref: "#/components/schemas/McpGuardrailInput"
         runtimeHeaders:
           type: object
           nullable: true
@@ -27140,9 +27074,9 @@ components:
         - id
         - name
         - status
-    SandboxToolAegisRejection:
+    SandboxToolGuardrailRejection:
       type: object
-      description: "Guardrail enforcement outcome returned when a toolbox operation is held for approval (202) or blocked (403). The verdict is produced by the guardrail hook plane; the `Aegis` name is kept for wire compatibility only. The same verdict is repeated in the `x-cognipeer-guardrail-*` response headers."
+      description: "Guardrail enforcement outcome returned when a toolbox operation is held for approval (202) or blocked (403). The verdict is produced by the guardrail hook plane. The same verdict is repeated in the `x-cognipeer-guardrail-*` response headers."
       required:
         - error
       properties:
@@ -27152,7 +27086,7 @@ components:
         evaluation:
           type: object
           additionalProperties: true
-          description: Aegis policy evaluation detail (matched rules, decision, trace).
+          description: Guardrail evaluation detail (matched rules, decision, trace).
     SandboxToolBranchesResult:
       type: object
       required:
@@ -31604,27 +31538,6 @@ components:
           type: boolean
           description: True when the run finished or waits for a person; false while it keeps working.
   responses:
-    AegisRemoved:
-      description: "Gone — the Aegis enforcement plane has been removed. The body names the replacement path when there is one; a `Link` header with `rel=\"successor-version\"` repeats it."
-      headers:
-        Deprecation:
-          description: Always `true`.
-          schema:
-            type: string
-        Link:
-          description: "`<replacement path>; rel=\"successor-version\"` — absent when the operation has no replacement."
-          schema:
-            type: string
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/AegisRemovedError"
-          example:
-            error:
-              type: gone
-              code: aegis_removed
-              message: The Aegis enforcement plane was removed. Evaluate a tool call with POST /api/client/v1/guardrails/hooks/evaluate.
-              replacement: /api/client/v1/guardrails/hooks/evaluate
     BadRequest:
       description: Bad request — missing or invalid parameters.
       content:

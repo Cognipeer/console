@@ -6,7 +6,7 @@
  * A composite republishes tools from other MCP servers on the tenant — this
  * panel lets the operator add/remove members. Each member keeps its own
  * auth, its own tool enable/disable + rename overrides, its own request
- * logs and its own Aegis binding; this panel only decides *which* servers
+ * logs and its own guardrail binding; this panel only decides *which* servers
  * are included. Naming collisions are resolved automatically by the backend
  * (see `allocateExposedNames` in `composite.ts`) — real tool names are kept
  * unless two members collide.

@@ -115,8 +115,8 @@ async function call(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', url: st
 
 const ruleBody = (overrides: Record<string, unknown> = {}) => ({
   name: 'High error rate',
-  module: 'models',
-  metric: 'error_rate',
+  module: 'guardrails',
+  metric: 'guardrail_fail_rate',
   condition: { operator: 'gt', threshold: 5 },
   windowMinutes: 15,
   channels: [{ type: 'email', recipients: ['ops@acme.com'] }],
@@ -145,8 +145,8 @@ async function seedForeignRule(): Promise<string> {
     tenantId: TENANT_ID,
     projectId: PROJECT_B,
     name: 'Foreign rule',
-    module: 'models',
-    metric: 'error_rate',
+    module: 'guardrails',
+    metric: 'guardrail_fail_rate',
     condition: { operator: 'gt', threshold: 1 },
     windowMinutes: 15,
     cooldownMinutes: 60,
@@ -164,7 +164,7 @@ async function seedEvent(projectId: string, status: 'fired' | 'resolved' = 'fire
     projectId,
     ruleId,
     ruleName: 'Seeded',
-    metric: 'error_rate',
+    metric: 'guardrail_fail_rate',
     threshold: 5,
     actualValue: 9,
     status,
@@ -182,7 +182,7 @@ async function seedIncident(projectId: string, overrides: Record<string, unknown
     alertEventId: event,
     ruleId: 'rule-x',
     ruleName: 'Seeded',
-    metric: 'error_rate',
+    metric: 'guardrail_fail_rate',
     threshold: 5,
     actualValue: 9,
     firedAt: new Date(),
@@ -244,7 +244,6 @@ describe('GET /alerts/rules (meta + list)', () => {
 
     expect(meta.validWindows).toEqual([5, 15, 30, 60, 120, 240, 1440]);
     expect(meta.validModules).toEqual(expect.arrayContaining(['models', 'agents', 'tools']));
-    expect(meta.validModules).not.toContain('aegis');
     expect(meta.moduleMetrics.agents).toContain('agent_error_rate');
     expect(meta.validMetrics).toContain('agent_error_rate');
     expect(Array.isArray(meta.catalog)).toBe(true);
@@ -1080,7 +1079,7 @@ describe('rules: runbookUrl, mute, filters and noise stats', () => {
     const db = await getTenantDatabase(TENANT_DB_NAME);
     for (let i = 0; i < 11; i += 1) {
       await db.createAlertEvent({
-        tenantId: TENANT_ID, projectId: PROJECT_A, ruleId: String(noisy._id), ruleName: 'zz-noisy', metric: 'error_rate',
+        tenantId: TENANT_ID, projectId: PROJECT_A, ruleId: String(noisy._id), ruleName: 'zz-noisy', metric: 'guardrail_fail_rate',
         threshold: 5, actualValue: 9, status: 'resolved', channels: [], firedAt: new Date(Date.now() - i * 3600_000),
       } as never);
     }

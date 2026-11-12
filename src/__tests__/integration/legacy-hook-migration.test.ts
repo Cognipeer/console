@@ -68,7 +68,7 @@ describe('legacy tenant DB gains the hook-plane columns', () => {
     const cols = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as Array<{ name: string }>).map((c) => c.name);
     expect(cols('guardrails')).toEqual(expect.arrayContaining(['hooks', 'hooksVersion', 'mode', 'target', 'failMode']));
     expect(cols('guardrail_evaluation_logs')).toEqual(expect.arrayContaining(['hook', 'decision', 'riskScore']));
-    expect(cols('mcp_servers')).toEqual(expect.arrayContaining(['aegis', 'guardrail']));
+    expect(cols('mcp_servers')).toEqual(expect.arrayContaining(['guardrail']));
     const idx = (db.prepare(`SELECT name FROM sqlite_master WHERE type='index'`).all() as Array<{ name: string }>).map((r) => r.name);
     expect(idx).toContain('idx_guardrail_eval_hook');
     db.close();

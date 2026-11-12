@@ -514,7 +514,7 @@ export function channelsSignature(channels: ChannelItem[], libraryRefs: LibraryR
 export function checkRule(values: RuleFormValues, catalog: AlertCatalog, options: { channelsUnchanged?: boolean } = {}): RuleChecks {
   const def = getDef(catalog, values.metric);
   const name = Boolean(values.name.trim()) && values.name.trim().length <= MAX_NAME_LENGTH;
-  const metric = Boolean(def) && metricsForModule(catalog, values.module, values.metric).some((entry) => entry.id === values.metric);
+  const metric = Boolean(def) && metricsForModule(catalog, values.module).some((entry) => entry.id === values.metric);
   const target =
     !isEntityMetric(def) || values.entityMode === 'all' || (values.entityKeys.length >= 1 && values.entityKeys.length <= MAX_ENTITY_KEYS);
 

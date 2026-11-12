@@ -1,5 +1,4 @@
 import type {
-  IMcpAegisConfig,
   IMcpAuthConfig,
   IMcpExposureConfig,
   IMcpGuardrailConfig,
@@ -52,8 +51,6 @@ export interface McpServerView {
   access: IResourceAccessList;
   /** The agent the server belongs to, when it was created inside that agent (`IAgentResourceOwner`). */
   owner?: IAgentResourceOwner;
-  /** @deprecated Legacy shield binding; still returned so an un-deployed UI keeps rendering. */
-  aegis?: IMcpAegisConfig;
   /** Guardrail binding evaluated at `tool.pre` / `tool.post`. */
   guardrail?: IMcpGuardrailConfig;
   status: string;
@@ -118,8 +115,6 @@ export interface CreateMcpServerInput {
   /** Custom public-URL path segment (default: a random unguessable slug). Only
    *  meaningful once exposure.accessMode is 'public'; must be unique tenant-wide. */
   endpointSlug?: string;
-  /** @deprecated Legacy shield binding. Accepted for one release; `guardrail` wins. */
-  aegis?: IMcpAegisConfig;
   /** Guardrail binding for this server's tool calls (omit = unguarded). */
   guardrail?: IMcpGuardrailConfig;
   /** Who may use the server's tools in an agent run (omit = everyone who can run the agent). */
@@ -171,8 +166,6 @@ export interface UpdateMcpServerInput {
   exposure?: IMcpExposureConfig;
   /** Rename the server's public-URL path segment; must be unique tenant-wide. */
   endpointSlug?: string;
-  /** @deprecated Legacy shield binding. Accepted for one release; `guardrail` wins. */
-  aegis?: IMcpAegisConfig;
   /** Guardrail binding for this server's tool calls. */
   guardrail?: IMcpGuardrailConfig;
   /** Full replacement of who may use the server's tools in an agent run. */

@@ -11,8 +11,7 @@
  *   1. `runIf` GATING — the cost lever. An LLM judge on every request is what
  *      makes guardrails too expensive to leave on; `onFinding` /
  *      `onSideEffect` run it only when a cheap deterministic pass already saw
- *      something. This generalises the enforcement plane's `judge.onlyHighRisk`
- *      (aegis/engine.ts:253-254), which gated on exactly two signals.
+ *      something. It gates on exactly two signals.
  *   2. A REAL TIMEOUT, per policy. Today the only budget in the fleet is a
  *      hardcoded `GUARDRAIL_TIMEOUT_MS = 4_000` inside the AI App Gateway
  *      (aiAppGateway/policy/engine.ts:45), applied by racing the WHOLE
@@ -154,8 +153,7 @@ export interface LlmFamilyRunContext extends FamilyRunContext {
    * The tool's classified side effect, for the `onSideEffect` gate.
    *
    * `undefined` MUST mean "this tool is not classified", not "no side effect":
-   * an unknown tool is itself the risk signal the enforcement plane gated on
-   * (`!shield.rules.sideEffects?.[name]`, aegis/engine.ts:253). A caller that
+   * an unknown tool is itself a risk signal. A caller that
    * substitutes `tool_access.defaultSideEffect` here erases that signal and
    * turns the judge off for exactly the calls it was kept on for.
    */
@@ -180,9 +178,8 @@ export interface LlmFamilyRunContext extends FamilyRunContext {
 
 /**
  * Side effects that count as "high risk" for the `onSideEffect` gate. Exactly
- * the two the enforcement plane raised a `side_effect_*` finding for
- * (aegis/engine.ts:132) — `read` and `write` did not wake the judge there and
- * do not here, so the gate's cost profile is the one operators already have.
+ * the two that raise a `side_effect_*` finding — `read` and `write` do not wake
+ * the judge.
  */
 const HIGH_RISK_SIDE_EFFECTS: ReadonlySet<SideEffect> = new Set<SideEffect>([
   'destructive',
@@ -597,8 +594,7 @@ export async function runLlmPolicy(
  * The engine is expected to hand this family a subject the DETERMINISTIC
  * families' redactions have already been applied to, so PII and credentials
  * the tenant configured a guardrail to strip are not then shipped to a
- * third-party judge model. That was explicit in the enforcement plane it
- * replaces (aegis/engine.ts:255-258) and is invisible from here.
+ * third-party judge model. That is invisible from here.
  */
 async function dispatch(
   subject: HookSubject,

@@ -157,18 +157,17 @@ export default function AlertRuleForm({
   const library = useChannelLibrary({ enabled: opened, fallbackError: t('libraryUx.loadError') });
   const backtestKey = useMemo(() => JSON.stringify(buildBacktestBody(values, { catalog, isEdit })), [values, catalog, isEdit]);
 
-  const editingMetric = isEdit ? ((initialData?.metric as string | undefined) ?? null) : null;
   const modules = useMemo(() => {
     const list: string[] = authorableModules(catalog, meta?.validModules);
     return list.includes(values.module) ? list : [...list, values.module];
   }, [catalog, meta?.validModules, values.module]);
   const metricOptions = useMemo(
     () =>
-      metricsForModule(catalog, values.module, editingMetric ?? values.metric).map((entry) => ({
+      metricsForModule(catalog, values.module).map((entry) => ({
         value: entry.id as string,
         label: metricLabel(catalog, entry.id, t),
       })),
-    [catalog, values.module, editingMetric, values.metric, t],
+    [catalog, values.module, t],
   );
   const windowOptions = useMemo(
     () => (meta?.validWindows?.length ? meta.validWindows : DEFAULT_WINDOWS).map((minutes) => ({ value: String(minutes), label: formatMinutes(minutes, t) })),
@@ -418,7 +417,6 @@ export default function AlertRuleForm({
                     <span style={{ flex: 1 }}>{option.label}</span>
                     {isEntityMetric(entry) ? <span className="ds-badge ds-badge-teal">{t('form.badgePerEntity')}</span> : null}
                     {isEnterpriseMetric(entry) ? <span className="ds-badge ds-badge-info">{t('form.badgeEnterprise')}</span> : null}
-                    {entry?.hiddenForNewRules ? <span className="ds-badge">{t('form.badgeLegacy')}</span> : null}
                   </div>
                 );
               }}

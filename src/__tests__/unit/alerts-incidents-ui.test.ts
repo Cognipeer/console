@@ -489,7 +489,7 @@ describe('AlertHistoryPage', () => {
         { type: 'slack', target: 'https://hooks.slack.com/…', success: false, error: 'rejected' },
       ],
     },
-    { _id: 'ev2', ruleName: 'Old', metric: 'error_rate', threshold: 5, actualValue: 6, status: 'resolved', firedAt: '2026-10-14T10:00:00.000Z', resolvedAt: '2026-10-14T11:00:00.000Z', channels: [] },
+    { _id: 'ev2', ruleName: 'Old', metric: 'guardrail_fail_rate', threshold: 5, actualValue: 6, status: 'resolved', firedAt: '2026-10-14T10:00:00.000Z', resolvedAt: '2026-10-14T11:00:00.000Z', channels: [] },
   ];
 
   it('lists events with their entity, value against the baseline and delivery results', async () => {

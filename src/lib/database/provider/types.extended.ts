@@ -297,25 +297,10 @@ export interface IMcpStdioConfig {
 }
 
 /**
- * Aegis integration seam — enforcement was wired by the enterprise overlay.
+ * Guardrail binding for an MCP server's tool calls.
  *
- * @deprecated Superseded by `IMcpGuardrailConfig`. NOT removed: every stored
- * MCP server row carries this object and the `aegis` column is still written,
- * so dropping the type would make existing rows unreadable. `shieldId` values
- * are already dead references — the read-time normaliser keeps `mode` and
- * falls back to the default tool guardrail.
- */
-export interface IMcpAegisConfig {
-  shieldId?: string;
-  mode: 'off' | 'monitor' | 'enforce';
-}
-
-/**
- * Guardrail binding for an MCP server's tool calls. Replaces IMcpAegisConfig.
- *
- * `mode` keeps the MCP vocabulary ('off' rather than 'disabled') so the two
- * fields are drop-in interchangeable during the release where both are
- * written; the read-time normaliser folds 'off' onto GuardrailMode.
+ * `mode` keeps the MCP vocabulary ('off' rather than 'disabled'); the
+ * read-time normaliser folds 'off' onto GuardrailMode.
  * An absent `guardrailKey` means "use the tenant's default tool guardrail",
  * which is what keeps the sandbox toolbox armed without per-server setup.
  */
@@ -349,8 +334,6 @@ export interface IMcpServer {
   upstreamAuth: IMcpAuthConfig;
   /** Endpoint exposure: enabled protocols + access mode. Default: both + token. */
   exposure?: IMcpExposureConfig;
-  /** @deprecated Aegis shield binding. Read for one release, then dropped. */
-  aegis?: IMcpAegisConfig;
   /** Guardrail binding for tool.pre / tool.post enforcement. */
   guardrail?: IMcpGuardrailConfig;
   /** Who may use this server's tools in an agent run. Absent = everyone who can run the agent (`IResourceAccessList`). */

@@ -91,10 +91,10 @@ describe('collector registry and the seam', () => {
   });
 
   it('prefers a built-in collector over a registered one for the same metric', () => {
-    const shadow: IMetricCollectorLike = { supportedMetrics: ['error_rate'], collect: async () => ({ value: -1, sampleCount: 1 }) };
+    const shadow: IMetricCollectorLike = { supportedMetrics: ['guardrail_fail_rate'], collect: async () => ({ value: -1, sampleCount: 1 }) };
     registerAlertMetricCollector(shadow);
-    expect(getCollectorForMetric('error_rate')).not.toBe(shadow);
-    expect(getCollectorForMetric('error_rate')).toBeDefined();
+    expect(getCollectorForMetric('guardrail_fail_rate')).not.toBe(shadow);
+    expect(getCollectorForMetric('guardrail_fail_rate')).toBeDefined();
   });
 
   it('stops resolving once the seam is reset', () => {

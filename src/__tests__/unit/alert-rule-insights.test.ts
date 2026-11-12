@@ -17,7 +17,7 @@ const DAY = 86_400_000;
 
 function rule(over: Partial<IAlertRule> & { _id: string }): IAlertRule {
   return {
-    tenantId: 't', projectId: 'p', name: over._id, module: 'models', enabled: true, metric: 'error_rate',
+    tenantId: 't', projectId: 'p', name: over._id, module: 'guardrails', enabled: true, metric: 'guardrail_fail_rate',
     condition: { operator: 'gt', threshold: 5 }, windowMinutes: 15, cooldownMinutes: 15, channels: [], createdBy: 'u1',
     ...over,
   } as IAlertRule;
@@ -54,7 +54,7 @@ describe('runbookUrl validation', () => {
   });
 
   const body = {
-    name: 'r', module: 'models', metric: 'error_rate', condition: { operator: 'gt', threshold: 5 }, windowMinutes: 15,
+    name: 'r', module: 'guardrails', metric: 'guardrail_fail_rate', condition: { operator: 'gt', threshold: 5 }, windowMinutes: 15,
   };
 
   it('flows through the rule validator for create, and is kept / cleared on update', () => {

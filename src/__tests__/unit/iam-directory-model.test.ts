@@ -42,7 +42,6 @@ describe('the permission matrix', () => {
     const ids = MATRIX_SERVICES.map((s) => s.id as string);
     expect(ids).toContain('models');
     expect(ids).toContain('iam');
-    expect(ids).not.toContain('aegis');
   });
 
   it('reads nothing stored as "role default" - never as "no access"', () => {
@@ -63,11 +62,16 @@ describe('the permission matrix', () => {
     expect(toPermissions(back)).toEqual({ models: 'read' });
   });
 
-  it('carries a stored entry of a retired service through a save untouched', () => {
-    const draft = readDraft({ aegis: 'admin', models: 'read', bogus: 'write' });
-    expect(draft.kept).toEqual({ aegis: 'admin' });
-    expect(toPermissions({ ...draft, choices: { ...draft.choices, models: 'inherit' } })).toEqual({ aegis: 'admin' });
-    expect(toPermissions(resetDraft(draft))).toEqual({ aegis: 'admin' });
+  it('drops an entry that names no known service', () => {
+    const draft = readDraft({ models: 'read', bogus: 'write' });
+    expect(draft.kept).toEqual({});
+    expect(toPermissions(draft)).toEqual({ models: 'read' });
+  });
+
+  it('carries the entries it does not offer through a save and a reset untouched', () => {
+    const draft = { ...readDraft({ models: 'read' }), kept: { sandbox: 'admin' as const } };
+    expect(toPermissions({ ...draft, choices: { ...draft.choices, models: 'inherit' } })).toEqual({ sandbox: 'admin' });
+    expect(toPermissions(resetDraft(draft))).toEqual({ sandbox: 'admin' });
   });
 
   it('lists what changed against the stored state, in the matrix order', () => {

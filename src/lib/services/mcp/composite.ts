@@ -4,7 +4,7 @@
  * A composite server (sourceType 'composite') republishes tools from other
  * MCP servers on the same tenant under one endpoint: each member keeps its
  * own auth, its own enable/disable + rename overrides, its own request logs
- * and its own Aegis binding — the composite only decides *which* member
+ * and its own guardrail binding — the composite only decides *which* member
  * tools are included and what name they're exposed under.
  *
  * This module owns the config shape (including `isInternalSourced`, which

@@ -322,13 +322,10 @@ export default function McpDetailView({ serverId, embedded }: McpDetailViewProps
   // the enterprise build seam AND the tenant's ENTERPRISE license, so a
   // downgraded tenant sees the warning below. `guardrail.available` folds
   // neither — tool-call enforcement is a community capability, and the flag
-  // only reports whether the hook is wired at all. `aegis.hookAvailable` is the
-  // pre-rename key, read as a fallback so this page stays honest against an API
-  // binary that has not been redeployed yet.
+  // only reports whether the hook is wired at all.
   const [caps, setCaps] = useState<{
     stdioSandbox: { available: boolean };
     guardrail?: { available: boolean };
-    aegis?: { hookAvailable: boolean };
     consoleIdentity?: ConsoleIdentityIssuerInfo;
   } | null>(null);
   const [guardrails, setGuardrails] = useState<GuardrailOption[]>([]);
@@ -913,22 +910,12 @@ export default function McpDetailView({ serverId, embedded }: McpDetailViewProps
   // once it's exposed on a public, unauthenticated URL.
   const readsInternalData = server.sourceType === 'internal'
     || (server.sourceType === 'composite' && (server.members ?? []).some((m) => m.sourceType === 'internal'));
-  // What actually runs, resolved the way mcpService does it: the new binding
-  // when there is one, otherwise the legacy `aegis` mode. The legacy shieldId
-  // is deliberately dropped — those are dead references, and an unbound mode
+  // What actually runs, resolved the way mcpService does it. An unbound mode
   // falls back to the tenant's default tool guardrail.
-  const guardrailMode: GuardrailBindingMode = server.guardrail?.mode
-    ?? server.aegis?.mode
-    ?? 'off';
+  const guardrailMode: GuardrailBindingMode = server.guardrail?.mode ?? 'off';
   const guardrailKeyValue = server.guardrail?.guardrailKey ?? DEFAULT_GUARDRAIL_VALUE;
   const boundGuardrail = guardrails.find((g) => g.key === server.guardrail?.guardrailKey);
-  // Rendered read-only for one release so an operator can still see what a
-  // server was bound to before the rename. Only worth showing when it says
-  // something — an `{ mode: 'off' }` leftover does not.
-  const legacyAegis = server.aegis && (server.aegis.mode !== 'off' || server.aegis.shieldId)
-    ? server.aegis
-    : undefined;
-  const guardrailHookAvailable = caps?.guardrail?.available ?? caps?.aegis?.hookAvailable ?? false;
+  const guardrailHookAvailable = caps?.guardrail?.available ?? false;
   const totalRequests = overviewAggregate?.totalRequests ?? 0;
   const successCount = overviewAggregate?.successCount ?? 0;
   const errorCount = overviewAggregate?.errorCount ?? 0;
@@ -1261,37 +1248,6 @@ export default function McpDetailView({ serverId, embedded }: McpDetailViewProps
                   “{boundGuardrail.name}” has no tool.pre or tool.post hook enabled, so this binding
                   enforces nothing yet.
                 </Text>
-              ) : null}
-              {legacyAegis ? (
-                <Box
-                  mt="sm"
-                  pt="sm"
-                  style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}
-                >
-                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Legacy binding</Text>
-                  <Group gap="xs" mt={4}>
-                    <Badge size="xs" variant="light" color="gray">aegis: {legacyAegis.mode}</Badge>
-                    {legacyAegis.shieldId ? (
-                      <Code style={{ fontSize: 11 }}>{legacyAegis.shieldId}</Code>
-                    ) : null}
-                  </Group>
-                  <Text size="xs" c="dimmed" mt={4}>
-                    {server.guardrail
-                      ? 'Kept read-only for one release — the guardrail above is what enforces.'
-                      : 'This is what still enforces this server, through the default tool guardrail: shield IDs are dead references. Migrating keeps the mode and makes the binding explicit.'}
-                  </Text>
-                  {!server.guardrail ? (
-                    <Button
-                      mt={6}
-                      size="compact-xs"
-                      variant="default"
-                      loading={savingGuardrail}
-                      onClick={() => void handleSaveGuardrail({ mode: legacyAegis.mode })}
-                    >
-                      Migrate
-                    </Button>
-                  ) : null}
-                </Box>
               ) : null}
             </Paper>
             <Paper withBorder p="md" radius="md">

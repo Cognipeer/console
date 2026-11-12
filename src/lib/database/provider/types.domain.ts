@@ -2390,7 +2390,7 @@ export interface IWebSearchInstance {
 
 // ── Alert types ─────────────────────────────────────────────────────────
 
-export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation' | 'redteam' | 'aegis' | 'ai-app-gateway' | 'agents' | 'tools';
+export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation' | 'redteam' | 'ai-app-gateway' | 'agents' | 'tools';
 
 export type AlertMetric =
   // models
@@ -2406,15 +2406,9 @@ export type AlertMetric =
   | 'guardrail_fail_rate'
   | 'guardrail_avg_latency_ms'
   | 'guardrail_total_evaluations'
-  // guardrail enforcement (over hook decisions in the window). These are the
-  // renamed 'aegis_*' four below; the old strings CANNOT be dropped because
-  // stored alert rules carry them in a `metric` column, so both spellings
-  // resolve to the same collector for now.
+  // guardrail enforcement (over hook decisions in the window)
   | 'guardrail_block_rate'
-  /**
-   * Vestigial: kept only so the rename of 'aegis_approval_rate' is total.
-   * The approval rung has no store and nothing emits it, so it reports 0.
-   */
+  /** The approval rung has no store and nothing emits it, so it reports 0. */
   | 'guardrail_approval_rate'
   | 'guardrail_avg_risk_score'
   | 'guardrail_total_decisions'
@@ -2436,14 +2430,6 @@ export type AlertMetric =
   // red-team (percentages, 0–100, averaged over completed scans in the window)
   | 'redteam_attack_success_rate'
   | 'redteam_resilience_score'
-  // aegis enforcement plane (over decisions in the window).
-  // @deprecated Superseded by the 'guardrail_*' four above. Retained because
-  // stored IAlertRule rows reference these strings; removing them would make
-  // every existing rule fail validation.
-  | 'aegis_block_rate'
-  | 'aegis_approval_rate'
-  | 'aegis_avg_risk_score'
-  | 'aegis_total_decisions'
   // AI App Gateway (over requests logged in the window)
   | 'appgw_requests'
   | 'appgw_block_rate'

@@ -88,12 +88,6 @@ interface McpCapabilities {
    * served by an API binary that predates the rename.
    */
   guardrail?: { available: boolean };
-  /**
-   * @deprecated Pre-rename spelling of `guardrail`, read only as a fallback.
-   * On that older binary the hook really was enterprise-gated, so a `false`
-   * here is an accurate "not enforcing" for that deployment.
-   */
-  aegis?: { hookAvailable: boolean };
   mcpHub?: { available: boolean; enterpriseBuild: boolean; licenseEnterprise?: boolean };
   /** Issuer details shown under the Console identity auth option (absent on an older API). */
   consoleIdentity?: ConsoleIdentityIssuerInfo;
@@ -701,12 +695,7 @@ export default function CreateMcpModal({
   const sandboxAvailable = capabilities?.stdioSandbox.available ?? false;
   const subprocessEnabled = capabilities?.stdioSubprocess.enabled ?? true;
   const uvxAvailable = capabilities?.stdioSubprocess.uvx ?? true;
-  // `guardrail.available` on a current API; `aegis.hookAvailable` is the
-  // pre-rename key, read so this UI still tells the truth against an API binary
-  // that has not been redeployed yet.
-  const guardrailAvailable = capabilities?.guardrail?.available
-    ?? capabilities?.aegis?.hookAvailable
-    ?? false;
+  const guardrailAvailable = capabilities?.guardrail?.available ?? false;
   // Distinguish "off because no ENTERPRISE license" (upgradeable on this SaaS
   // deployment) from "off because community build" (edition has no seam).
   const sandboxNeedsPlan = (capabilities?.stdioSandbox.seamAvailable ?? capabilities?.stdioSandbox.enterpriseBuild ?? false)

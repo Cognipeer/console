@@ -38,9 +38,8 @@ single thing people get wrong.
 | Optional — a guardrail, already enabled | [Add a guardrail and a PII policy](/how-to/guardrail-and-pii). The picker lists enabled guardrails only. |
 | Optional — an upstream API spec or an MCP server to bind as tools | Covered in [step 3](#_3-give-it-tools) |
 
-Everything on this page runs on a community install. Three sub-features are Enterprise and are marked
-where they appear: **MCP Hubs**, the **persistent sandbox** execution mode for stdio MCP servers, and
-**Aegis shield** enforcement.
+Everything on this page runs on a community install. Two sub-features are Enterprise and are marked
+where they appear: **MCP Hubs** and the **persistent sandbox** execution mode for stdio MCP servers.
 
 ---
 
@@ -196,7 +195,7 @@ apart from the two sub-features flagged below.
 | 2 · Tool source | **Source type**: **OpenAPI spec** · **Remote MCP URL** · **npx / uvx package** |
 | 3 · Upstream authentication | **Authentication type**: None · Bearer token · Custom header · Basic auth · Console identity (a token for the person behind each call, for remote and OpenAPI servers). "Secrets are encrypted at rest." Not shown for the npx / uvx source, which makes no upstream HTTP call — the two sections below then renumber to 3 and 4. |
 | 4 · Endpoint exposure | **Protocols** — **Streamable HTTP (JSON-RPC)**, **SSE (legacy)**; at least one must stay enabled. **Access mode** — **API token required** or **Public URL (no auth)**. |
-| 5 · Aegis shield | **Mode** — Off · Monitor · Enforce — and **Shield**. |
+| 5 · Guardrail | **Mode** — Off · Monitor · Enforce — and **Guardrail** (the default tool guardrail unless you pick one). Community. |
 
 What each source type asks for:
 
@@ -206,10 +205,9 @@ What each source type asks for:
 | **Remote MCP URL** | **MCP server URL** ("Tools are discovered from this server and proxied through the gateway"), **Upstream transport** — **Streamable HTTP** or **SSE (legacy)**. |
 | **npx / uvx package** | **Runtime** (**npx (Node)** / **uvx (Python)**), **Package**, **Arguments**, **Environment variables** ("One KEY=value per line. Values are encrypted at rest."), **Execution mode**, and for sandbox mode **CPU cores** and **Memory (MB)**. |
 
-::: warning Two Enterprise sub-features on this form
-**Execution mode → Persistent sandbox** and **Aegis shield → Monitor / Enforce** both require an
-Enterprise build *and* an active Enterprise licence. The client API rejects a sandbox-mode server with
-HTTP **402**; the dashboard shows an "Enterprise features inactive" banner on the server's Overview tab
+::: warning Enterprise sub-feature on this form
+**Execution mode → Persistent sandbox** requires an Enterprise build *and* an active Enterprise
+licence. The client API rejects a sandbox-mode server with HTTP **402**; the dashboard shows an "Enterprise features inactive" banner on the server's Overview tab
 and the server will not run. **Stateless subprocess** is the community execution mode.
 :::
 

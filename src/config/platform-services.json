@@ -380,8 +380,7 @@
         "enforcement",
         "dlp",
         "redaction",
-        "tool call",
-        "aegis"
+        "tool call"
       ],
       "badge": "new"
     },

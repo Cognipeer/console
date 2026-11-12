@@ -67,7 +67,6 @@ import {
   auditContextFor,
   jsonRpcError,
   jsonRpcOk,
-  parseAegis,
   parseExposure,
   parseGuardrail,
   parseRemoteConfig,
@@ -683,7 +682,6 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       // Same enterprise-sandbox gate as create (mirrors the dashboard PATCH).
       const licenseEnterprise = isEnterpriseLicenseType(ctx.tenant.licenseType);
       const nextStdioConfig = body.stdioConfig !== undefined ? parseStdioConfig(body.stdioConfig) : undefined;
-      const nextAegis = body.aegis !== undefined ? parseAegis(body.aegis) : undefined;
       const nextGuardrail = body.guardrail !== undefined ? parseGuardrail(body.guardrail) : undefined;
       if (nextStdioConfig?.executionMode === 'sandbox' && !(licenseEnterprise && mcpSandboxRunner.current)) {
         return reply.code(402).send({
@@ -715,7 +713,6 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         remoteConfig: body.remoteConfig !== undefined ? parseRemoteConfig(body.remoteConfig) : undefined,
         stdioConfig: nextStdioConfig,
         exposure: body.exposure !== undefined ? parseExposure(body.exposure) : undefined,
-        aegis: nextAegis,
         guardrail: nextGuardrail,
         ...(nextAccess?.ok ? { access: nextAccess.access } : {}),
         runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,

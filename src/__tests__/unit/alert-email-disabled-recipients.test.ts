@@ -10,7 +10,7 @@ import { EmailAlertChannel, resetAlertEmailUserCache } from '@/lib/services/aler
 const event = {
   kind: 'fired',
   rule: {
-    id: 'r1', name: 'Latency', module: 'models', metric: 'avg_latency_ms', metricLabel: 'Average Latency', unit: 'ms',
+    id: 'r1', name: 'Latency', module: 'guardrails', metric: 'guardrail_avg_latency_ms', metricLabel: 'Average Latency', unit: 'ms',
     mode: 'threshold', windowMinutes: 15, operator: 'gt', threshold: 1,
   },
   value: 2, severity: 'warning', firedAt: new Date(), projectName: 'P', companyName: 'Acme', dashboardUrl: 'u',

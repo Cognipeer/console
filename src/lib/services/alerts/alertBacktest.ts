@@ -4,8 +4,8 @@
  * `evaluateCondition`, `advanceAlertState`) and count what the rule WOULD have
  * fired. Read-only; nothing is stored or sent.
  *
- * Replayable: entity-source metrics in threshold and absence mode. Legacy
- * collectors query live tables and baseline / SLO modes call enterprise
+ * Replayable: entity-source metrics in threshold and absence mode. Collector
+ * metrics query live tables and baseline / SLO modes call enterprise
  * providers per step, so they answer `supported: false`.
  */
 
@@ -33,7 +33,7 @@ const MAX_KEYS_PER_QUERY = 500;
 const SUGGESTION_MAX_FIRES = 2;
 const MAX_ABSENCE_LOOKBACK_HOURS = 24 * 7;
 
-export type BacktestUnsupportedReason = 'legacy_metric' | 'mode_not_replayable';
+export type BacktestUnsupportedReason = 'collector_metric' | 'mode_not_replayable';
 
 export interface BacktestResult {
   supported: boolean;
@@ -170,7 +170,7 @@ export class AlertBacktestService {
     const mode: AlertConditionMode = rule.condition.mode ?? 'threshold';
 
     if (!def || def.source !== 'entity' || !def.entityType) {
-      return unsupported('legacy_metric', 'Backtesting needs a per-entity metric (agents, models, knowledge bases, MCP servers, tools).');
+      return unsupported('collector_metric', 'Backtesting needs a per-entity metric (agents, models, knowledge bases, MCP servers, tools).');
     }
     if (mode !== 'threshold' && mode !== 'absence') {
       return unsupported('mode_not_replayable', 'Only threshold and absence rules can be backtested.');

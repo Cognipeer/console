@@ -34,15 +34,15 @@ describe('deriveSeverity (operator-aware)', () => {
     ['gt', 5, 0, 'warning'],
     ['lt', 5, -1, 'warning'],
   ] as const)('%s actual=%s threshold=%s -> %s', (operator, actual, threshold, expected) => {
-    expect(deriveSeverity('error_rate', actual, threshold, operator)).toBe(expected);
+    expect(deriveSeverity('guardrail_fail_rate', actual, threshold, operator)).toBe(expected);
   });
 
   it('keeps the legacy heuristic when no operator is known', () => {
-    expect(deriveSeverity('error_rate', 20, 10)).toBe('critical');
-    expect(deriveSeverity('error_rate', 12, 10)).toBe('warning');
-    expect(deriveSeverity('avg_latency_ms', 30, 10)).toBe('critical');
-    expect(deriveSeverity('avg_latency_ms', 15, 10)).toBe('warning');
-    expect(deriveSeverity('avg_latency_ms', 11, 10)).toBe('info');
+    expect(deriveSeverity('guardrail_fail_rate', 20, 10)).toBe('critical');
+    expect(deriveSeverity('guardrail_fail_rate', 12, 10)).toBe('warning');
+    expect(deriveSeverity('guardrail_avg_latency_ms', 30, 10)).toBe('critical');
+    expect(deriveSeverity('guardrail_avg_latency_ms', 15, 10)).toBe('warning');
+    expect(deriveSeverity('guardrail_avg_latency_ms', 11, 10)).toBe('info');
   });
 });
 

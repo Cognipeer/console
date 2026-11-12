@@ -1,7 +1,7 @@
 /**
  * Alert metric catalog — the server-side single source of truth for every
  * alertable metric: its module, label, unit, supported condition modes and
- * whether it is evaluated per entity (from `entity_metrics`) or by a legacy
+ * whether it is evaluated per entity (from `entity_metrics`) or by a
  * collector over one scope.
  *
  * The module-to-metrics table, email/notification labels and units, and the
@@ -23,16 +23,14 @@ export interface AlertMetricDef {
   /** Standalone English label (used by email and chat notifications). */
   label: string;
   unit: '%' | 'ms' | '$' | 'count' | 'score' | '';
-  /** 'entity' metrics are evaluated per entity from entity_metrics; 'legacy' ones by a collector over one scope. */
-  source: 'legacy' | 'entity';
+  /** 'entity' metrics are evaluated per entity from entity_metrics; 'collector' ones by a collector over one scope. */
+  source: 'collector' | 'entity';
   entityType?: EntityMetricType;
   /** Condition modes the metric supports ('threshold' always). */
   modes: AlertConditionMode[];
   goodDirection: 'down' | 'up';
   /** Count metrics evaluate as 0 when there are no samples, so "less than" rules can fire. */
   zeroWhenEmpty?: boolean;
-  /** Legacy duplicates and deprecated spellings: not offered when authoring a new rule. */
-  hiddenForNewRules?: boolean;
 }
 
 /** Entity metric to alert module (and back through `entityType`). */
@@ -44,25 +42,21 @@ export const MODULE_ENTITY_TYPE: Partial<Record<AlertModule, EntityMetricType>> 
   tools: 'tool',
 };
 
-type LegacyOptions = Pick<AlertMetricDef, 'hiddenForNewRules'>;
-
-function legacy(
+function collector(
   id: AlertMetric,
   module: AlertModule,
   label: string,
   unit: AlertMetricDef['unit'],
   goodDirection: AlertMetricDef['goodDirection'],
-  options: LegacyOptions = {},
 ): AlertMetricDef {
   return {
     id,
     module,
     label,
     unit,
-    source: 'legacy',
+    source: 'collector',
     modes: ['threshold'],
     goodDirection,
-    ...(options.hiddenForNewRules ? { hiddenForNewRules: true } : {}),
   };
 }
 
@@ -92,56 +86,38 @@ function entity(
 }
 
 export const ALERT_METRIC_CATALOG: AlertMetricDef[] = [
-  // ── models (legacy; per-model entity metrics below) ───────────────────
-  legacy('error_rate', 'models', 'Error Rate', '%', 'down', { hiddenForNewRules: true }),
-  legacy('avg_latency_ms', 'models', 'Average Latency', 'ms', 'down', { hiddenForNewRules: true }),
-  legacy('p95_latency_ms', 'models', 'P95 Latency', 'ms', 'down', { hiddenForNewRules: true }),
-  legacy('total_cost', 'models', 'Total Cost', '$', 'down', { hiddenForNewRules: true }),
-  legacy('total_requests', 'models', 'Total Requests', '', 'up', { hiddenForNewRules: true }),
-
   // ── inference ─────────────────────────────────────────────────────────
-  legacy('gpu_cache_usage', 'inference', 'GPU Cache Usage', '%', 'down'),
-  legacy('request_queue_depth', 'inference', 'Request Queue Depth', '', 'down'),
+  collector('gpu_cache_usage', 'inference', 'GPU Cache Usage', '%', 'down'),
+  collector('request_queue_depth', 'inference', 'Request Queue Depth', '', 'down'),
 
-  // ── guardrails (+ the deprecated aegis spellings stored rules may carry) ──
-  legacy('guardrail_fail_rate', 'guardrails', 'Guardrail Fail Rate', '%', 'down'),
-  legacy('guardrail_avg_latency_ms', 'guardrails', 'Guardrail Avg Latency', 'ms', 'down'),
-  legacy('guardrail_total_evaluations', 'guardrails', 'Guardrail Total Evaluations', '', 'up'),
-  legacy('guardrail_block_rate', 'guardrails', 'Guardrail Block Rate', '%', 'down'),
-  legacy('guardrail_approval_rate', 'guardrails', 'Guardrail Approval Rate', '%', 'down'),
-  legacy('guardrail_avg_risk_score', 'guardrails', 'Guardrail Avg Risk Score', '', 'down'),
-  legacy('guardrail_total_decisions', 'guardrails', 'Guardrail Total Decisions', '', 'up'),
-  legacy('aegis_block_rate', 'guardrails', 'Guardrail Block Rate', '%', 'down', { hiddenForNewRules: true }),
-  legacy('aegis_approval_rate', 'guardrails', 'Guardrail Approval Rate', '%', 'down', { hiddenForNewRules: true }),
-  legacy('aegis_avg_risk_score', 'guardrails', 'Guardrail Avg Risk Score', '', 'down', { hiddenForNewRules: true }),
-  legacy('aegis_total_decisions', 'guardrails', 'Guardrail Total Decisions', '', 'up', { hiddenForNewRules: true }),
+  // ── guardrails ────────────────────────────────────────────────────────
+  collector('guardrail_fail_rate', 'guardrails', 'Guardrail Fail Rate', '%', 'down'),
+  collector('guardrail_avg_latency_ms', 'guardrails', 'Guardrail Avg Latency', 'ms', 'down'),
+  collector('guardrail_total_evaluations', 'guardrails', 'Guardrail Total Evaluations', '', 'up'),
+  collector('guardrail_block_rate', 'guardrails', 'Guardrail Block Rate', '%', 'down'),
+  collector('guardrail_approval_rate', 'guardrails', 'Guardrail Approval Rate', '%', 'down'),
+  collector('guardrail_avg_risk_score', 'guardrails', 'Guardrail Avg Risk Score', '', 'down'),
+  collector('guardrail_total_decisions', 'guardrails', 'Guardrail Total Decisions', '', 'up'),
 
   // ── rag ───────────────────────────────────────────────────────────────
-  legacy('rag_avg_latency_ms', 'rag', 'Knowledge Engine Avg Query Latency', 'ms', 'down', { hiddenForNewRules: true }),
-  legacy('rag_total_queries', 'rag', 'Knowledge Engine Total Queries', '', 'up', { hiddenForNewRules: true }),
-  legacy('rag_failed_documents', 'rag', 'Knowledge Engine Failed Documents', '', 'down'),
-
-  // ── mcp ───────────────────────────────────────────────────────────────
-  legacy('mcp_error_rate', 'mcp', 'MCP Error Rate', '%', 'down', { hiddenForNewRules: true }),
-  legacy('mcp_avg_latency_ms', 'mcp', 'MCP Average Latency', 'ms', 'down', { hiddenForNewRules: true }),
-  legacy('mcp_total_requests', 'mcp', 'MCP Total Requests', '', 'up', { hiddenForNewRules: true }),
+  collector('rag_failed_documents', 'rag', 'Knowledge Engine Failed Documents', '', 'down'),
 
   // ── analysis / evaluation / red team (percentages averaged over completed runs) ──
-  legacy('analysis_pass_rate', 'analysis', 'Analysis Pass Rate', '%', 'up'),
-  legacy('analysis_avg_judge_score', 'analysis', 'Analysis Avg Judge Score', '%', 'up'),
-  legacy('analysis_avg_accuracy', 'analysis', 'Analysis Avg Accuracy', '%', 'up'),
-  legacy('evaluation_pass_rate', 'evaluation', 'Evaluation Pass Rate', '%', 'up'),
-  legacy('evaluation_avg_score', 'evaluation', 'Evaluation Avg Score', '%', 'up'),
-  legacy('redteam_attack_success_rate', 'redteam', 'Red Team Attack Success Rate', '%', 'down'),
-  legacy('redteam_resilience_score', 'redteam', 'Red Team Resilience Score', '%', 'up'),
+  collector('analysis_pass_rate', 'analysis', 'Analysis Pass Rate', '%', 'up'),
+  collector('analysis_avg_judge_score', 'analysis', 'Analysis Avg Judge Score', '%', 'up'),
+  collector('analysis_avg_accuracy', 'analysis', 'Analysis Avg Accuracy', '%', 'up'),
+  collector('evaluation_pass_rate', 'evaluation', 'Evaluation Pass Rate', '%', 'up'),
+  collector('evaluation_avg_score', 'evaluation', 'Evaluation Avg Score', '%', 'up'),
+  collector('redteam_attack_success_rate', 'redteam', 'Red Team Attack Success Rate', '%', 'down'),
+  collector('redteam_resilience_score', 'redteam', 'Red Team Resilience Score', '%', 'up'),
 
   // ── AI App Gateway (collector lives in the enterprise build) ───────────
-  legacy('appgw_requests', 'ai-app-gateway', 'AI App Gateway Requests', '', 'up'),
-  legacy('appgw_block_rate', 'ai-app-gateway', 'AI App Gateway Block Rate', '%', 'down'),
-  legacy('appgw_error_rate', 'ai-app-gateway', 'AI App Gateway Error Rate', '%', 'down'),
-  legacy('appgw_requests_per_user', 'ai-app-gateway', 'AI App Gateway Busiest User (requests)', '', 'up'),
-  legacy('appgw_output_limit_turns', 'ai-app-gateway', 'AI App Gateway Output-Limit Turns', '', 'down'),
-  legacy('appgw_output_limit_rate', 'ai-app-gateway', 'AI App Gateway Output-Limit Rate', '%', 'down'),
+  collector('appgw_requests', 'ai-app-gateway', 'AI App Gateway Requests', '', 'up'),
+  collector('appgw_block_rate', 'ai-app-gateway', 'AI App Gateway Block Rate', '%', 'down'),
+  collector('appgw_error_rate', 'ai-app-gateway', 'AI App Gateway Error Rate', '%', 'down'),
+  collector('appgw_requests_per_user', 'ai-app-gateway', 'AI App Gateway Busiest User (requests)', '', 'up'),
+  collector('appgw_output_limit_turns', 'ai-app-gateway', 'AI App Gateway Output-Limit Turns', '', 'down'),
+  collector('appgw_output_limit_rate', 'ai-app-gateway', 'AI App Gateway Output-Limit Rate', '%', 'down'),
 
   // ── agents (entity_metrics; traced and hosted agents) ──────────────────
   entity('agent_sessions', 'agents', 'agent', 'Agent Sessions', 'count', 'up', { zeroWhenEmpty: true }),
@@ -186,10 +162,7 @@ export function getMetricDef(id: AlertMetric | string): AlertMetricDef | undefin
   return BY_ID.get(id as AlertMetric);
 }
 
-/**
- * Module to metric ids. The deprecated `aegis` module points at the same list
- * as `guardrails` so a stored rule filed under it still resolves its metric.
- */
+/** Module to metric ids. */
 export const ALERT_MODULE_METRICS: Record<AlertModule, AlertMetric[]> = (() => {
   const table: Record<AlertModule, AlertMetric[]> = {
     models: [],
@@ -200,12 +173,10 @@ export const ALERT_MODULE_METRICS: Record<AlertModule, AlertMetric[]> = (() => {
     analysis: [],
     evaluation: [],
     redteam: [],
-    aegis: [],
     'ai-app-gateway': [],
     agents: [],
     tools: [],
   };
   for (const def of ALERT_METRIC_CATALOG) table[def.module].push(def.id);
-  table.aegis = table.guardrails;
   return table;
 })();

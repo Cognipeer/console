@@ -291,7 +291,7 @@ export function templateRuleInput(def: AlertTemplateDefinition): CreateAlertRule
     condition: structuredClone(def.condition),
     windowMinutes: def.windowMinutes,
     cooldownMinutes: def.cooldownMinutes,
-    // Legacy metrics have no entity: they watch the whole project.
+    // Collector metrics have no entity: they watch the whole project.
     ...(metricDef?.source === 'entity' && metricDef.entityType ? { entity: { entityType: metricDef.entityType, mode: 'all' as const } } : {}),
     severity: 'auto',
     notifyOnResolve: true,
@@ -382,7 +382,7 @@ export function defaultSetProgress(rules: IAlertRule[]): { done: number; total: 
 }
 
 async function availabilityOf(def: AlertTemplateDefinition, gate: ModeGate): Promise<AlertTemplateAvailability> {
-  // The collector of a legacy metric can live in the enterprise build only.
+  // The collector of a metric can live in the enterprise build only.
   if (!getCollectorForMetric(def.metric)) return { available: false, reason: 'not_enterprise_build' };
   return gate.check(def.condition.mode);
 }

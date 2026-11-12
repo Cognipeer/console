@@ -458,7 +458,7 @@ describe('public MCP routes', () => {
 
     it('does not reveal why a guardrail or a disabled tool refused', async () => {
       await start();
-      vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error('Blocked by Aegis shield: contains customer IBAN'));
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error('Blocked by guardrail: contains customer IBAN'));
       vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error('Tool "echo" is disabled on MCP server "Payments prod"'));
       for (let i = 0; i < 2; i += 1) {
         const response = await post(callTool());
