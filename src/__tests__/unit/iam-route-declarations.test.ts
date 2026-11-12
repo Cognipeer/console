@@ -17,6 +17,8 @@ describe('route authorization declarations', () => {
     expect(routes.length).toBeGreaterThan(500); // sanity: the whole app was registered
     const problems = auditRouteDeclarations(routes);
     expect(problems, problems.join('\n')).toEqual([]);
+    // the registration check (AUTHZ_STRICT_REGISTRATION / NODE_ENV=test) would have thrown on any of these
+    expect(routes.filter((r) => r.kind === 'undeclared').map((r) => `${r.method} ${r.url}`)).toEqual([]);
     // sanity: the gate marker is really detected (a collector that sees nothing gated would hide bare handlers)
     expect(routes.filter((r) => r.kind === 'service' && r.gated).length).toBeGreaterThan(300);
   }, 60_000);
