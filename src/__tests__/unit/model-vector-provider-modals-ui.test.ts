@@ -10,7 +10,6 @@ import {
   click,
   installApiMock,
   installDomStubs,
-  mount,
   q,
   qa,
   setInput,
@@ -19,6 +18,7 @@ import {
   type ApiMock,
   type Mounted,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import ModelProviderModal from '@/components/models/ModelProviderModal';
 import VectorProviderModal from '@/components/vector/VectorProviderModal';
 import type { ProviderDescriptor, ProviderFormSchema } from '@/lib/providers';
@@ -106,7 +106,7 @@ async function open(domain: 'models' | 'vector') {
     domain === 'models'
       ? createElement(ModelProviderModal, { opened: true, onClose: vi.fn(), onCreated: created })
       : createElement(VectorProviderModal, { opened: true, onClose: vi.fn(), onCreated: created });
-  mounted = await mount(element);
+  mounted = await renderWithQuery(element);
   await settle(120);
   return { created };
 }

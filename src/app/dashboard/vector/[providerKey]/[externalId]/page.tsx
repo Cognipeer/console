@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   Badge,
@@ -49,7 +49,17 @@ import {
   IconTargetArrow,
   IconTrash,
 } from '@tabler/icons-react';
-import type { VectorIndexView, VectorQueryResponse, VectorProviderView } from '@/lib/services/vector';
+import type { VectorQueryResponse } from '@/lib/services/vector';
+import { errorMessage, isApiError } from '@/lib/api/client';
+import {
+  useDeleteVectorIndex,
+  useDeleteVectorItem,
+  useQueryVectorIndex,
+  useUpdateVectorIndex,
+  useUpsertVectorItem,
+  useVectorIndex,
+  useVectorIndexStats,
+} from '@/lib/api/queries/vector';
 import EditVectorIndexModal from '@/components/vector/EditVectorIndexModal';
 import UpsertVectorItemModal from '@/components/vector/UpsertVectorItemModal';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
@@ -202,18 +212,31 @@ export default function VectorIndexDetailPage() {
   const providerKey = Array.isArray(providerKeyParam) ? providerKeyParam[0] : providerKeyParam;
   const indexKey = Array.isArray(indexKeyParam) ? indexKeyParam[0] : indexKeyParam;
 
-  const [provider, setProvider] = useState<VectorProviderView | null>(null);
-  const [index, setIndex] = useState<VectorIndexView | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const indexQuery = useVectorIndex(providerKey, indexKey);
+  const provider = indexQuery.data?.provider ?? null;
+  const index = indexQuery.data?.index ?? null;
+  // First load only: a refresh keeps the page on screen.
+  const loading = indexQuery.isLoading;
+  const refreshing = indexQuery.isFetching && !indexQuery.isLoading;
   const [queryResult, setQueryResult] = useState<VectorQueryResponse | null>(null);
-  const [queryLoading, setQueryLoading] = useState(false);
+  const runQuery = useQueryVectorIndex();
+  const queryLoading = runQuery.isPending;
+  const deleteIndex = useDeleteVectorIndex();
+  const updateIndex = useUpdateVectorIndex();
+  const upsertItem = useUpsertVectorItem();
+  const deleteItem = useDeleteVectorItem();
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [upsertModalOpen, setUpsertModalOpen] = useState(false);
   const [deleteVectorId, setDeleteVectorId] = useState('');
-  const [stats, setStats] = useState<StatsData | null>(null);
-  const [statsLoading, setStatsLoading] = useState(false);
   const [dateFilter, setDateFilter] = useDashboardDateFilterState();
+  const statsParams = useMemo(() => {
+    const params = buildDashboardDateSearchParams(dateFilter);
+    if (providerKey) params.set('providerKey', providerKey);
+    return params;
+  }, [dateFilter, providerKey]);
+  const statsQuery = useVectorIndexStats<StatsData>(providerKey, indexKey, statsParams);
+  const stats = statsQuery.data ?? null;
+  const statsLoading = statsQuery.isFetching;
 
   const description = useMemo(() => {
     if (!index?.metadata) return '';
@@ -244,76 +267,21 @@ export default function VectorIndexDetailPage() {
     },
   });
 
-  const loadIndex = useCallback(async (isRefresh = false) => {
-    if (!providerKey || !indexKey) {
-      setIndex(null);
-      setProvider(null);
-      setLoading(false);
-      setRefreshing(false);
+  // A missing index sends the user back to the list; any other failure to load it is told.
+  const loadError = indexQuery.error;
+  useEffect(() => {
+    if (!loadError) return;
+    if (isApiError(loadError) && loadError.status === 404) {
+      router.push('/dashboard/vector');
       return;
     }
-    if (isRefresh) {
-      setRefreshing(true);
-    } else {
-      setLoading(true);
-    }
-    try {
-      const response = await fetch(
-        `/api/vector/indexes/${encodeURIComponent(indexKey)}?providerKey=${encodeURIComponent(providerKey)}`,
-        { cache: 'no-store' },
-      );
-      if (!response.ok) {
-        if (response.status === 404) {
-          router.push('/dashboard/vector');
-          return;
-        }
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error ?? 'Failed to load vector index');
-      }
-      const data = await response.json();
-      setIndex(data.index ?? null);
-      setProvider(data.provider ?? null);
-    } catch (error) {
-      console.error(error);
-      notifications.show({
-        color: 'red',
-        title: 'Unable to load index',
-        message: error instanceof Error ? error.message : 'Unexpected error',
-      });
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [providerKey, indexKey, router]);
-
-  const loadStats = useCallback(async () => {
-    if (!providerKey || !indexKey) return;
-    setStatsLoading(true);
-    try {
-      const params = buildDashboardDateSearchParams(dateFilter);
-      params.set('providerKey', providerKey);
-      const response = await fetch(
-        `/api/vector/indexes/${encodeURIComponent(indexKey)}/stats?${params.toString()}`,
-        { cache: 'no-store' },
-      );
-      if (response.ok) {
-        const data = await response.json();
-        setStats(data as StatsData);
-      }
-    } catch (error) {
-      console.error('[vector stats]', error);
-    } finally {
-      setStatsLoading(false);
-    }
-  }, [providerKey, indexKey, dateFilter]);
-
-  useEffect(() => {
-    void loadIndex(false);
-  }, [loadIndex]);
-
-  useEffect(() => {
-    void loadStats();
-  }, [loadStats]);
+    console.error(loadError);
+    notifications.show({
+      color: 'red',
+      title: 'Unable to load index',
+      message: errorMessage(loadError, 'Unexpected error'),
+    });
+  }, [loadError, router]);
 
   const handleDelete = async () => {
     if (!provider || !index) return;
@@ -324,13 +292,10 @@ export default function VectorIndexDetailPage() {
       id: index._id ? String(index._id) : undefined,
       extraWarning: tSafe('vectorIndexExtra'),
       action: async () => {
-        const response = await fetch(
-          `/api/vector/indexes/${encodeURIComponent(index.key)}?providerKey=${encodeURIComponent(provider.key)}`,
-          { method: 'DELETE' },
-        );
-        if (!response.ok) {
-          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-          throw new Error(error.error ?? 'Failed to delete index');
+        try {
+          await deleteIndex.mutateAsync({ indexKey: index.key, providerKey: provider.key });
+        } catch (error) {
+          throw new Error(errorMessage(error, 'Failed to delete index'));
         }
         notifications.show({
           color: 'green',
@@ -345,23 +310,12 @@ export default function VectorIndexDetailPage() {
   const handleUpdateIndex = async (values: { name: string; description?: string }) => {
     if (!provider || !index) return;
     try {
-      const response = await fetch(
-        `/api/vector/indexes/${encodeURIComponent(index.key)}?providerKey=${encodeURIComponent(provider.key)}`,
-        {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: values.name,
-            metadata: values.description ? { description: values.description } : {},
-          }),
-        },
-      );
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error ?? 'Failed to update index');
-      }
-      const data = await response.json();
-      setIndex(data.index ?? null);
+      await updateIndex.mutateAsync({
+        indexKey: index.key,
+        providerKey: provider.key,
+        name: values.name,
+        metadata: values.description ? { description: values.description } : {},
+      });
       notifications.show({
         color: 'green',
         title: 'Index updated',
@@ -372,14 +326,13 @@ export default function VectorIndexDetailPage() {
       notifications.show({
         color: 'red',
         title: 'Unable to update index',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        message: errorMessage(error, 'Unexpected error'),
       });
     }
   };
 
   const handleQuery = queryForm.onSubmit(async (values) => {
     if (!provider || !index) return;
-    setQueryLoading(true);
     setQueryResult(null);
     try {
       const vector = values.vector
@@ -401,61 +354,46 @@ export default function VectorIndexDetailPage() {
         }
       }
 
-      const response = await fetch(
-        `/api/vector/indexes/${encodeURIComponent(index.key)}/query?providerKey=${encodeURIComponent(provider.key)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: { vector, topK: values.topK, filter } }),
-        },
+      setQueryResult(
+        await runQuery.mutateAsync({
+          indexKey: index.key,
+          providerKey: provider.key,
+          vector,
+          topK: values.topK,
+          filter,
+        }),
       );
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error ?? 'Failed to run query');
-      }
-      const data = await response.json();
-      setQueryResult(data.result ?? null);
     } catch (error) {
       console.error(error);
       notifications.show({
         color: 'red',
         title: 'Query failed',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        message: errorMessage(error, 'Unexpected error'),
       });
-    } finally {
-      setQueryLoading(false);
     }
   });
 
   const handleUpsertItem = async (payload: { id: string; values: number[]; metadata?: Record<string, unknown> }) => {
     if (!provider || !index) return;
     try {
-      const response = await fetch(
-        `/api/vector/indexes/${encodeURIComponent(index.key)}/upsert?providerKey=${encodeURIComponent(provider.key)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            vectors: [{ id: payload.id, values: payload.values, metadata: payload.metadata }],
-          }),
-        },
-      );
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error ?? 'Failed to upsert item');
-      }
+      await upsertItem.mutateAsync({
+        indexKey: index.key,
+        providerKey: provider.key,
+        id: payload.id,
+        values: payload.values,
+        metadata: payload.metadata,
+      });
       notifications.show({
         color: 'green',
         title: 'Vector item upserted',
         message: `${payload.id} has been stored.`,
       });
-      await loadIndex();
     } catch (error) {
       console.error(error);
       notifications.show({
         color: 'red',
         title: 'Unable to upsert item',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        message: errorMessage(error, 'Unexpected error'),
       });
     }
   };
@@ -466,17 +404,10 @@ export default function VectorIndexDetailPage() {
       noun: tSafe('nouns.vectorItem'),
       name: itemId,
       action: async () => {
-        const response = await fetch(
-          `/api/vector/indexes/${encodeURIComponent(index.key)}/vectors?providerKey=${encodeURIComponent(provider.key)}`,
-          {
-            method: 'DELETE',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ids: [itemId] }),
-          },
-        );
-        if (!response.ok) {
-          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-          throw new Error(error.error ?? 'Failed to delete vector item');
+        try {
+          await deleteItem.mutateAsync({ indexKey: index.key, providerKey: provider.key, id: itemId });
+        } catch (error) {
+          throw new Error(errorMessage(error, 'Failed to delete vector item'));
         }
         notifications.show({
           color: 'green',
@@ -645,7 +576,7 @@ export default function VectorIndexDetailPage() {
               variant="light"
               size="xs"
               leftSection={<IconRefresh size={14} />}
-              onClick={() => void loadIndex(true)}
+              onClick={() => void indexQuery.refetch()}
               loading={refreshing}
             >
               Refresh

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   ActionIcon,
@@ -19,6 +19,15 @@ import {
 import { notifications } from '@mantine/notifications';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useCancelVectorMigration,
+  useDeleteVectorMigration,
+  useStartVectorMigration,
+  useVectorIndexesOfProviders,
+  useVectorMigrations,
+  useVectorProviders,
+} from '@/lib/api/queries/vector';
 import {
   IconArrowRight,
   IconDatabaseExport,
@@ -74,114 +83,65 @@ export default function VectorMigrationsPage() {
   const deleteResource = useDeleteResource();
   const tSafe = useTranslations('common.confirm.dataSafety');
   const router = useRouter();
-  const [migrations, setMigrations] = useState<IVectorMigration[]>([]);
-  const [loading, setLoading] = useState(true);
+  const migrationsQuery = useVectorMigrations(POLL_INTERVAL_MS);
+  const migrations = useMemo<IVectorMigration[]>(() => migrationsQuery.data ?? [], [migrationsQuery.data]);
+  const loading = migrationsQuery.isPending;
   const [refreshing, setRefreshing] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
-  const [providers, setProviders] = useState<VectorProviderView[]>([]);
-  const [indexesByProvider, setIndexesByProvider] = useState<Record<string, VectorIndexRecord[]>>({});
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const hasRunning = useMemo(
-    () => migrations.some((m) => isActive(m.status)),
-    [migrations],
+  const providersQuery = useVectorProviders();
+  const providers = useMemo<VectorProviderView[]>(() => providersQuery.data ?? [], [providersQuery.data]);
+  const providerKeys = useMemo(() => providers.map((p) => p.key), [providers]);
+  const indexesQuery = useVectorIndexesOfProviders(providerKeys);
+  const indexesByProvider = useMemo<Record<string, VectorIndexRecord[]>>(
+    () => indexesQuery.data ?? {},
+    [indexesQuery.data],
   );
+  const startMigration = useStartVectorMigration();
+  const cancelMigration = useCancelVectorMigration();
+  const deleteMigration = useDeleteVectorMigration();
 
-  const loadMigrations = useCallback(async (silent = false) => {
-    if (!silent) setRefreshing(true);
+  // The first load that fails is told; later poll failures stay quiet.
+  const loadError = migrationsQuery.isError && migrationsQuery.data === undefined ? migrationsQuery.error : null;
+  useEffect(() => {
+    if (!loadError) return;
+    notifications.show({
+      color: 'red',
+      title: 'Unable to load migrations',
+      message: errorMessage(loadError, 'Unexpected error'),
+    });
+  }, [loadError]);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
     try {
-      const res = await fetch('/api/vector/migrations', { cache: 'no-store' });
-      if (!res.ok) throw new Error('Failed to load migrations');
-      const data = await res.json();
-      setMigrations((data.migrations ?? []) as IVectorMigration[]);
-    } catch (err) {
-      if (!silent) {
+      const result = await migrationsQuery.refetch();
+      if (result.isError) {
         notifications.show({
           color: 'red',
           title: 'Unable to load migrations',
-          message: err instanceof Error ? err.message : 'Unexpected error',
+          message: errorMessage(result.error, 'Unexpected error'),
         });
       }
     } finally {
-      setLoading(false);
-      if (!silent) setRefreshing(false);
+      setRefreshing(false);
     }
-  }, []);
-
-  const loadProvidersAndIndexes = useCallback(async () => {
-    try {
-      const res = await fetch('/api/vector/providers', { cache: 'no-store' });
-      if (!res.ok) return;
-      const data = await res.json();
-      const fetchedProviders: VectorProviderView[] = data.providers ?? [];
-      setProviders(fetchedProviders);
-
-      const entries = await Promise.all(
-        fetchedProviders.map(async (p) => {
-          try {
-            const r = await fetch(`/api/vector/indexes?providerKey=${encodeURIComponent(p.key)}`, { cache: 'no-store' });
-            if (!r.ok) return [p.key, [] as VectorIndexRecord[]] as const;
-            const d = await r.json();
-            return [p.key, (d.indexes ?? []) as VectorIndexRecord[]] as const;
-          } catch {
-            return [p.key, [] as VectorIndexRecord[]] as const;
-          }
-        }),
-      );
-
-      const map: Record<string, VectorIndexRecord[]> = {};
-      entries.forEach(([k, v]) => { map[k] = v; });
-      setIndexesByProvider(map);
-    } catch {
-      // best-effort
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadMigrations();
-    void loadProvidersAndIndexes();
-  }, [loadMigrations, loadProvidersAndIndexes]);
-
-  // Poll while any migration is running
-  useEffect(() => {
-    if (hasRunning) {
-      pollRef.current = setInterval(() => void loadMigrations(true), POLL_INTERVAL_MS);
-    } else {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-    }
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [hasRunning, loadMigrations]);
+  };
 
   const handleStart = async (m: IVectorMigration) => {
     try {
-      const res = await fetch(`/api/vector/migrations/${encodeURIComponent(m.key)}/start`, { method: 'POST' });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Failed to start');
-      }
+      await startMigration.mutateAsync(m.key);
       notifications.show({ color: 'teal', title: 'Migration started', message: m.name });
-      await loadMigrations();
     } catch (err) {
-      notifications.show({ color: 'red', title: 'Unable to start migration', message: err instanceof Error ? err.message : 'Unexpected error' });
+      notifications.show({ color: 'red', title: 'Unable to start migration', message: errorMessage(err, 'Unexpected error') });
     }
   };
 
   const handleCancel = async (m: IVectorMigration) => {
     try {
-      const res = await fetch(`/api/vector/migrations/${encodeURIComponent(m.key)}/cancel`, { method: 'POST' });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Failed to cancel');
-      }
+      await cancelMigration.mutateAsync(m.key);
       notifications.show({ color: 'yellow', title: 'Migration cancelled', message: m.name });
-      await loadMigrations();
     } catch (err) {
-      notifications.show({ color: 'red', title: 'Unable to cancel migration', message: err instanceof Error ? err.message : 'Unexpected error' });
+      notifications.show({ color: 'red', title: 'Unable to cancel migration', message: errorMessage(err, 'Unexpected error') });
     }
   };
 
@@ -190,13 +150,12 @@ export default function VectorMigrationsPage() {
       noun: tSafe('nouns.vectorMigration'),
       name: m.name,
       action: async () => {
-        const res = await fetch(`/api/vector/migrations/${encodeURIComponent(m.key)}`, { method: 'DELETE' });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-          throw new Error(err.error ?? 'Failed to delete');
+        try {
+          await deleteMigration.mutateAsync(m.key);
+        } catch (err) {
+          throw new Error(errorMessage(err, 'Failed to delete'));
         }
         notifications.show({ color: 'green', title: 'Migration deleted', message: m.name });
-        setMigrations((prev) => prev.filter((item) => item.key !== m.key));
       },
     });
 
@@ -325,7 +284,7 @@ export default function VectorMigrationsPage() {
               variant="light"
               size="xs"
               leftSection={refreshing ? <Loader size={12} /> : <IconRefresh size={14} />}
-              onClick={() => void loadMigrations()}
+              onClick={() => void handleRefresh()}
               disabled={refreshing}
             >
               Refresh
@@ -414,7 +373,6 @@ export default function VectorMigrationsPage() {
         providers={providers}
         indexesByProvider={indexesByProvider}
         onCreated={(migration) => {
-          setMigrations((prev) => [migration, ...prev]);
           setCreateModalOpen(false);
           router.push(`/dashboard/vector/migrations/${migration.key}`);
         }}

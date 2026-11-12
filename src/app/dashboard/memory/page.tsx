@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
@@ -17,19 +17,7 @@ import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
 import CreateMemoryStoreModal from '@/components/memory/CreateMemoryStoreModal';
-
-interface MemoryStoreItem {
-  _id: string;
-  key: string;
-  name: string;
-  description?: string;
-  vectorProviderKey: string;
-  embeddingModelKey: string;
-  status: string;
-  memoryCount: number;
-  createdAt?: string;
-  lastActivityAt?: string;
-}
+import { useMemoryStores, type MemoryStoreListItem as MemoryStoreItem } from '@/lib/api/queries/memory';
 
 function formatDate(value?: string | Date) {
   if (!value) return '—';
@@ -41,35 +29,17 @@ function formatDate(value?: string | Date) {
 export default function MemoryPage() {
   const router = useRouter();
   const t = useTranslations('memory');
-  const [stores, setStores] = useState<MemoryStoreItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const storesQuery = useMemoryStores();
+  const stores = useMemo<MemoryStoreItem[]>(() => storesQuery.data ?? [], [storesQuery.data]);
+  // Only the first load shows the table's loading state; a refetch (after creating a store) keeps the rows.
+  const loading = storesQuery.isPending;
+  const refreshing = storesQuery.isFetching && !storesQuery.isPending;
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
 
-  const loadStores = useCallback(async () => {
-    try {
-      const res = await fetch('/api/memory/stores', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setStores(data.stores || []);
-      }
-    } catch (err) {
-      console.error('Failed to load memory stores', err);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadStores();
-  }, [loadStores]);
-
   const handleRefresh = () => {
-    setRefreshing(true);
-    void loadStores();
+    void storesQuery.refetch();
   };
 
   const handleCreated = () => {
@@ -79,7 +49,6 @@ export default function MemoryPage() {
       message: t('storeCreatedMessage'),
       color: 'teal',
     });
-    handleRefresh();
   };
 
   const filtered = useMemo(() => {

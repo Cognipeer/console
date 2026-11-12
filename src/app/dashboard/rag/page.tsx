@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
@@ -21,27 +21,8 @@ import { CHUNK_STRATEGIES } from '@/components/rag/ragModuleForm';
 import type { RagChunkStrategy } from '@/lib/database';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
-
-interface RagModuleView {
-  _id: string;
-  key: string;
-  name: string;
-  description?: string;
-  embeddingModelKey: string;
-  vectorProviderKey: string;
-  vectorIndexKey: string;
-  chunkConfig: {
-    strategy: string;
-    chunkSize: number;
-    chunkOverlap: number;
-  };
-  status: string;
-  /** Stored vectors no longer match the module's chunking or embedding model. */
-  reindexRequired?: boolean;
-  totalDocuments?: number;
-  totalChunks?: number;
-  createdAt?: string;
-}
+import { errorMessage } from '@/lib/api/client';
+import { useDeleteRagModule, useRagModules, type RagModuleListItem as RagModuleView } from '@/lib/api/queries/rag';
 
 function formatDate(value?: string | Date) {
   if (!value) return '—';
@@ -58,36 +39,14 @@ export default function RagDashboardPage() {
   const router = useRouter();
   const deleteResource = useDeleteResource();
   const tSafe = useTranslations('common.confirm.dataSafety');
-  const [modules, setModules] = useState<RagModuleView[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const modulesQuery = useRagModules();
+  const deleteModule = useDeleteRagModule();
+  const modules = useMemo<RagModuleView[]>(() => modulesQuery.data ?? [], [modulesQuery.data]);
+  const loading = modulesQuery.isPending;
+  const refreshing = modulesQuery.isFetching;
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
-
-  const loadModules = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const res = await fetch('/api/rag/modules', { cache: 'no-store' });
-      if (!res.ok) throw new Error('Failed to load Knowledge Engine modules');
-      const data = await res.json();
-      setModules(data.modules ?? []);
-    } catch (error) {
-      console.error(error);
-      notifications.show({
-        color: 'red',
-        title: 'Unable to load Knowledge Engine modules',
-        message: error instanceof Error ? error.message : 'Unexpected error',
-      });
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadModules();
-  }, [loadModules]);
 
   const confirmDelete = (target: RagModuleView) =>
     deleteResource({
@@ -97,20 +56,16 @@ export default function RagDashboardPage() {
       id: target._id,
       extraWarning: tSafe('ragModuleExtra'),
       action: async () => {
-        const res = await fetch(
-          `/api/rag/modules/${encodeURIComponent(target.key)}`,
-          { method: 'DELETE' },
-        );
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-          throw new Error(err.error ?? 'Failed to delete module');
+        try {
+          await deleteModule.mutateAsync(target.key);
+        } catch (error) {
+          throw new Error(errorMessage(error, 'Failed to delete module'));
         }
         notifications.show({
           color: 'green',
           title: 'Knowledge Engine module deleted',
           message: `${target.name} has been removed.`,
         });
-        setModules((prev) => prev.filter((m) => m.key !== target.key));
       },
     });
 
@@ -288,7 +243,7 @@ export default function RagDashboardPage() {
             ],
           },
         ]}
-        onRefresh={loadModules}
+        onRefresh={() => void modulesQuery.refetch()}
         refreshing={refreshing}
         empty={{
           icon: <IconBook2 size={26} stroke={1.7} />,

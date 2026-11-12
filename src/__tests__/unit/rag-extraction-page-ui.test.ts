@@ -8,7 +8,8 @@
 import { createElement as h } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import RagModulePage from '@/app/dashboard/rag/[key]/page';
-import { buttonByText, click, installApiMock, installDomStubs, jsonResponse, mount, q, qa, text, wait, type ApiMock, type Mounted } from '../helpers/iamCenterUi';
+import { buttonByText, click, installApiMock, installDomStubs, jsonResponse, q, qa, text, wait, type ApiMock, type Mounted } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import { until } from '../helpers/filesUploadDetailHarness';
 
 const notify = vi.hoisted(() => ({ show: vi.fn() }));
@@ -71,7 +72,7 @@ async function open(extraction?: Record<string, unknown>) {
     ['GET', /^\/api\/rag\/modules\/kb\/(usage|score-distribution|queries)/, () => ({ logs: [], buckets: [], queries: [] })],
     ['POST', '/api/rag/modules/kb/documents/d1', () => jsonResponse({ document: documents[0] })],
   ]);
-  mounted = await mount(h(RagModulePage));
+  mounted = await renderWithQuery(h(RagModulePage));
   await until(() => text().includes('Support KB'), 'the page');
 }
 

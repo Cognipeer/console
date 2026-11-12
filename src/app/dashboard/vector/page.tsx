@@ -1,11 +1,21 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useProjectScope } from '@/lib/api/queries/projectScope';
+import {
+  useDeleteVectorIndex,
+  useVectorDashboard,
+  useVectorProvidersWithIndexes,
+  vectorKeys,
+  type VectorProvidersWithIndexes,
+} from '@/lib/api/queries/vector';
 import {
   IconChartDots3,
   IconDatabase,
@@ -34,20 +44,6 @@ import {
   defaultDashboardDateFilter,
 } from '@/lib/utils/dashboardDateFilter';
 
-interface VectorDashboardData {
-  overview: {
-    totalProviders: number;
-    activeProviders: number;
-    disabledProviders: number;
-    erroredProviders: number;
-    totalIndexes: number;
-  };
-  providerBreakdown: Array<{ key: string; label: string; driver: string; status: string; indexCount: number }>;
-  dimensionDistribution: Array<{ dimension: number; count: number }>;
-  metricDistribution: Array<{ metric: string; count: number }>;
-  recentIndexes: Array<{ key: string; name: string; providerKey: string; dimension: number; metric: string; createdAt?: string }>;
-}
-
 interface VectorIndexRow {
   provider: VectorProviderView;
   index: VectorIndexView;
@@ -65,79 +61,27 @@ export default function VectorIndexPage() {
   const tSafe = useTranslations('common.confirm.dataSafety');
   const tPlatform = useTranslations('platformStorage');
   const router = useRouter();
-  const [providers, setProviders] = useState<VectorProviderView[]>([]);
-  const [indexesByProvider, setIndexesByProvider] = useState<
-    Record<string, VectorIndexView[]>
-  >({});
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const queryClient = useQueryClient();
+  const project = useProjectScope();
+  const providersQuery = useVectorProvidersWithIndexes();
+  const deleteIndex = useDeleteVectorIndex();
+  const providers = useMemo<VectorProviderView[]>(() => providersQuery.data?.providers ?? [], [providersQuery.data]);
+  const indexesByProvider = useMemo<Record<string, VectorIndexView[]>>(
+    () => providersQuery.data?.indexesByProvider ?? {},
+    [providersQuery.data],
+  );
+  const loading = providersQuery.isPending;
+  const refreshing = providersQuery.isFetching;
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [providerModalOpen, setProviderModalOpen] = useState(false);
   // Adding a provider or an index is a write to Vector (POST /api/vector/providers, /api/vector/indexes). Unknown until
   // the session answers: the page then explains instead of offering a button that may be refused.
   const canWriteVector = useCanWriteService('vector');
-  const [dashboardData, setDashboardData] = useState<VectorDashboardData | null>(
-    null,
-  );
   const [dateFilter, setDateFilter] = useDashboardDateFilterState();
+  const dashboardParams = useMemo(() => buildDashboardDateSearchParams(dateFilter), [dateFilter]);
+  const dashboardData = useVectorDashboard(dashboardParams).data ?? null;
   const [query, setQuery] = useState('');
   const [providerFilter, setProviderFilter] = useState('all');
-
-  const loadDashboard = useCallback(async () => {
-    try {
-      const params = buildDashboardDateSearchParams(dateFilter);
-      const res = await fetch(`/api/vector/dashboard?${params.toString()}`, {
-        cache: 'no-store',
-      });
-      if (res.ok) {
-        setDashboardData((await res.json()) as VectorDashboardData);
-      }
-    } catch (err) {
-      console.error('Failed to load vector dashboard', err);
-    }
-  }, [dateFilter]);
-
-  const loadProvidersAndIndexes = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const providerResponse = await fetch(
-        '/api/vector/providers?includeIndexes=true',
-        { cache: 'no-store' },
-      );
-      if (!providerResponse.ok) {
-        throw new Error('Failed to load vector providers');
-      }
-      const providerData = await providerResponse.json();
-      const fetchedProviders: VectorProviderView[] = providerData.providers ?? [];
-      setProviders(fetchedProviders);
-
-      const nextIndexes: Record<string, VectorIndexView[]> = {};
-      Object.entries(
-        (providerData.indexesByProvider ?? {}) as Record<string, VectorIndexView[]>,
-      ).forEach(([key, value]) => {
-        nextIndexes[key] = [...value];
-      });
-      fetchedProviders.forEach((provider) => {
-        if (!nextIndexes[provider.key]) nextIndexes[provider.key] = [];
-      });
-      setIndexesByProvider(nextIndexes);
-    } catch (error) {
-      console.error(error);
-      notifications.show({
-        color: 'red',
-        title: 'Unable to load vector data',
-        message: error instanceof Error ? error.message : 'Unexpected error',
-      });
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadProvidersAndIndexes();
-    void loadDashboard();
-  }, [loadProvidersAndIndexes, loadDashboard]);
 
   const rows = useMemo<VectorIndexRow[]>(() => {
     return providers.flatMap((provider) =>
@@ -174,22 +118,23 @@ export default function VectorIndexPage() {
       id: target.index._id ? String(target.index._id) : undefined,
       extraWarning: tSafe('vectorIndexExtra'),
       action: async () => {
-        const response = await fetch(
-          `/api/vector/indexes/${encodeURIComponent(target.index.key)}?providerKey=${encodeURIComponent(target.provider.key)}`,
-          { method: 'DELETE' },
-        );
-        if (!response.ok) {
-          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-          throw new Error(error.error ?? 'Failed to delete index');
+        try {
+          await deleteIndex.mutateAsync({ indexKey: target.index.key, providerKey: target.provider.key });
+        } catch (error) {
+          throw new Error(errorMessage(error, 'Failed to delete index'));
         }
         notifications.show({
           color: 'green',
           title: 'Vector index deleted',
           message: `${target.index.name} has been removed.`,
         });
-        await loadProvidersAndIndexes();
       },
     });
+
+  const updateProviders = (update: (current: VectorProvidersWithIndexes) => VectorProvidersWithIndexes) =>
+    queryClient.setQueryData<VectorProvidersWithIndexes>(vectorKeys.providersWithIndexes(project), (current) =>
+      update(current ?? { providers: [], indexesByProvider: {} }),
+    );
 
   const handleIndexCreated = ({
     index,
@@ -198,20 +143,24 @@ export default function VectorIndexPage() {
     index: VectorIndexView;
     provider: VectorProviderView;
   }) => {
-    setIndexesByProvider((current) => ({
-      ...current,
-      [provider.key]: [...(current[provider.key] ?? []), index],
+    // The create mutation rereads the lists; the row is shown at once meanwhile.
+    updateProviders((current) => ({
+      providers: current.providers.some((p) => p.key === provider.key) ? current.providers : [...current.providers, provider],
+      indexesByProvider: {
+        ...current.indexesByProvider,
+        [provider.key]: [...(current.indexesByProvider[provider.key] ?? []), index],
+      },
     }));
-    if (!providers.find((p) => p.key === provider.key)) {
-      setProviders((current) => [...current, provider]);
-    }
     setCreateModalOpen(false);
     router.push(`/dashboard/vector/${provider.key}/${index.key}`);
   };
 
   /** A provider was added from the empty state: the index form comes next, with it selected. */
   const handleProviderCreated = (provider: VectorProviderView) => {
-    setProviders((current) => (current.some((p) => p.key === provider.key) ? current : [...current, provider]));
+    updateProviders((current) => ({
+      providers: current.providers.some((p) => p.key === provider.key) ? current.providers : [...current.providers, provider],
+      indexesByProvider: { ...current.indexesByProvider, [provider.key]: current.indexesByProvider[provider.key] ?? [] },
+    }));
     setProviderModalOpen(false);
     setCreateModalOpen(true);
   };
@@ -367,7 +316,7 @@ export default function VectorIndexPage() {
             ],
           },
         ]}
-        onRefresh={loadProvidersAndIndexes}
+        onRefresh={() => void providersQuery.refetch()}
         refreshing={refreshing}
         empty={
           providers.length === 0

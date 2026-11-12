@@ -9,7 +9,8 @@
 import { act, createElement as h } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import RagModulePage from '@/app/dashboard/rag/[key]/page';
-import { buttonByText, click, installDomStubs, jsonResponse, mount, q, qa, setInput, settle, text, wait, type ApiMock, type Mounted, type RecordedCall } from '../helpers/iamCenterUi';
+import { buttonByText, click, installDomStubs, jsonResponse, q, qa, setInput, settle, text, wait, type ApiMock, type Mounted, type RecordedCall } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import { makeFile, until } from '../helpers/filesUploadDetailHarness';
 import { ALL_FOLDERS, HANDBOOK, HOLIDAY, LEAVE_DOC, SALARY, SITE_DOC, doc, installKbApi, type FixtureDoc, type KbApiOptions } from '../helpers/ragLibraryFixtures';
 
@@ -107,7 +108,7 @@ async function open(options: OpenOptions = {}) {
   const { tab, ...kb } = options;
   nav.search = new URLSearchParams(tab ? `tab=${tab}` : '');
   api = installKbApi(kb);
-  mounted = await mount(h(RagModulePage));
+  mounted = await renderWithQuery(h(RagModulePage));
   await until(() => text().includes('HR Policies'), 'the page');
 }
 

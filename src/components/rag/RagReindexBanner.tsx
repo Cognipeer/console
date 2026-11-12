@@ -1,10 +1,12 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { Alert, Button, Group, Loader, Progress, Stack, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconAlertTriangle, IconPlayerStop, IconRefresh } from '@tabler/icons-react';
 import type { IRagReindexRun } from '@/lib/database/provider/types.domain';
+import { errorMessage } from '@/lib/api/client';
+import { useCancelRagReindex, useRagReindexRuns, useStartRagReindex } from '@/lib/api/queries/rag';
 
 const POLL_INTERVAL_MS = 2500;
 
@@ -41,40 +43,35 @@ export function useRagReindex(
   moduleKey: string | undefined,
   onSettled?: () => void,
 ): RagReindexState {
-  const [runs, setRuns] = useState<IRagReindexRun[]>([]);
-  const [busy, setBusy] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const runsQuery = useRagReindexRuns(moduleKey, POLL_INTERVAL_MS);
+  const startMutation = useStartRagReindex(moduleKey ?? '');
+  const cancelMutation = useCancelRagReindex(moduleKey ?? '');
   const activeKeyRef = useRef<string | null>(null);
   const settledRef = useRef(onSettled);
+  const runs = runsQuery.data;
+  const { refetch: refetchRuns } = runsQuery;
 
   useEffect(() => {
     settledRef.current = onSettled;
   }, [onSettled]);
 
-  const refresh = useCallback(async (silent = false) => {
-    if (!moduleKey) return;
-    try {
-      const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}/reindex`, { cache: 'no-store' });
-      if (!res.ok) throw new Error('Failed to load re-index runs');
-      const data = await res.json() as { runs?: IRagReindexRun[] };
-      setRuns(data.runs ?? []);
-    } catch (err) {
-      if (!silent) {
+  const refresh = useCallback(
+    async (silent = false) => {
+      if (!moduleKey) return;
+      const result = await refetchRuns();
+      if (result.isError && !silent) {
         notifications.show({
           color: 'red',
           title: 'Unable to load re-index runs',
-          message: err instanceof Error ? err.message : 'Unexpected error',
+          message: errorMessage(result.error, 'Unexpected error'),
         });
       }
-    }
-  }, [moduleKey]);
+    },
+    [moduleKey, refetchRuns],
+  );
 
-  useEffect(() => {
-    void refresh(true);
-  }, [refresh]);
-
-  const activeRun = runs.find((run) => isActive(run.status)) ?? null;
-  const latestRun = runs[0] ?? null;
+  const activeRun = runs?.find((run) => isActive(run.status)) ?? null;
+  const latestRun = runs?.[0] ?? null;
 
   // A run that was active on the previous poll and is not any more has just
   // rewritten every chunk of every document; whatever the page is showing is stale.
@@ -84,70 +81,50 @@ export function useRagReindex(
     if (previous && !activeRun) settledRef.current?.();
   }, [activeRun]);
 
-  useEffect(() => {
-    if (activeRun) {
-      pollRef.current = setInterval(() => { void refresh(true); }, POLL_INTERVAL_MS);
-    } else if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [activeRun, refresh]);
-
   const start = useCallback(async () => {
     if (!moduleKey) return;
-    setBusy(true);
     try {
-      const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}/reindex`, { method: 'POST' });
-      const data = await res.json().catch(() => ({ error: 'Unknown error' }));
-      if (!res.ok) throw new Error(data.error ?? 'Failed to start re-index');
+      await startMutation.mutateAsync(undefined);
       notifications.show({
         color: 'teal',
         title: 'Re-index started',
         message: 'Every document in this module is being re-chunked and re-embedded.',
       });
-      await refresh();
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Unable to start re-index',
-        message: err instanceof Error ? err.message : 'Unexpected error',
+        message: errorMessage(err, 'Unexpected error'),
       });
-    } finally {
-      setBusy(false);
     }
-  }, [moduleKey, refresh]);
+  }, [moduleKey, startMutation]);
 
   const cancel = useCallback(async () => {
     if (!moduleKey || !activeRun) return;
-    setBusy(true);
     try {
-      const res = await fetch(
-        `/api/rag/modules/${encodeURIComponent(moduleKey)}/reindex/${encodeURIComponent(activeRun.key)}/cancel`,
-        { method: 'POST' },
-      );
-      const data = await res.json().catch(() => ({ error: 'Unknown error' }));
-      if (!res.ok) throw new Error(data.error ?? 'Failed to cancel re-index');
+      await cancelMutation.mutateAsync(activeRun.key);
       notifications.show({
         color: 'yellow',
         title: 'Re-index cancelled',
         message: 'Documents already rebuilt keep the new configuration; the rest keep the old one.',
       });
-      await refresh();
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Unable to cancel re-index',
-        message: err instanceof Error ? err.message : 'Unexpected error',
+        message: errorMessage(err, 'Unexpected error'),
       });
-    } finally {
-      setBusy(false);
     }
-  }, [moduleKey, activeRun, refresh]);
+  }, [moduleKey, activeRun, cancelMutation]);
 
-  return { activeRun, latestRun, busy, start, cancel, refresh };
+  return {
+    activeRun,
+    latestRun,
+    busy: startMutation.isPending || cancelMutation.isPending,
+    start,
+    cancel,
+    refresh,
+  };
 }
 
 interface RagReindexBannerProps extends RagReindexState {

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import { NumberInput, Select, Slider, TagsInput } from '@mantine/core';
 import { ChipPicker, FormField, FormRow, ToggleRow } from '@/components/common/ui/FormShell';
 import {
@@ -14,6 +14,7 @@ import {
   type ChunkFormValues,
 } from './ragModuleForm';
 import type { RagChunkStrategy } from '@/lib/database';
+import { useModelsByCategory } from '@/lib/api/queries/rag';
 
 interface ChatModel {
   key: string;
@@ -34,31 +35,15 @@ export default function ChunkConfigFields({
   errors,
   notice,
 }: ChunkConfigFieldsProps) {
-  const [chatModels, setChatModels] = useState<ChatModel[]>([]);
   const unit = chunkSizeUnit(values.strategy);
-
-  const loadChatModels = useCallback(async () => {
-    try {
-      const res = await fetch('/api/models?category=llm', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setChatModels((data.models ?? []).map((m: Record<string, string>) => ({
-          key: m.key,
-          name: m.name,
-        })));
-      }
-    } catch (err) {
-      console.error('Failed to load chat models', err);
-    }
-  }, []);
 
   // Only the contextual-header picker needs the chat model list, and most
   // modules never turn it on, so it is fetched on first use rather than on open.
-  useEffect(() => {
-    if (values.contextualHeaderEnabled && chatModels.length === 0) {
-      void loadChatModels();
-    }
-  }, [values.contextualHeaderEnabled, chatModels.length, loadChatModels]);
+  const chatModelsQuery = useModelsByCategory('llm', values.contextualHeaderEnabled);
+  const chatModels = useMemo<ChatModel[]>(
+    () => (chatModelsQuery.data ?? []).map((m) => ({ key: m.key, name: m.name ?? '' })),
+    [chatModelsQuery.data],
+  );
 
   return (
     <>

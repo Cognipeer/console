@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { NumberInput, Select, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
@@ -13,6 +13,8 @@ import FormShell, {
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
+import { errorMessage } from '@/lib/api/client';
+import { useCreateVectorMigration } from '@/lib/api/queries/vector';
 import type { VectorIndexRecord, VectorProviderView } from '@/lib/services/vector';
 import type { IVectorMigration } from '@/lib/database/provider/types.base';
 
@@ -41,7 +43,8 @@ export default function CreateVectorMigrationModal({
   indexesByProvider,
   onCreated,
 }: CreateVectorMigrationModalProps) {
-  const [submitting, setSubmitting] = useState(false);
+  const createMigration = useCreateVectorMigration();
+  const submitting = createMigration.isPending;
   const wasOpenedRef = useRef(false);
 
   const activeProviders = useMemo(
@@ -182,44 +185,31 @@ export default function CreateVectorMigrationModal({
       return;
     }
 
-    setSubmitting(true);
     try {
-      const response = await fetch('/api/vector/migrations', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: values.name,
-          description: values.description || undefined,
-          sourceProviderKey: values.sourceProviderKey,
-          sourceIndexKey: values.sourceIndexKey,
-          destinationProviderKey: values.destinationProviderKey,
-          destinationIndexKey: values.destinationIndexKey,
-          batchSize: values.batchSize || undefined,
-        }),
+      const migration = await createMigration.mutateAsync({
+        name: values.name,
+        description: values.description || undefined,
+        sourceProviderKey: values.sourceProviderKey,
+        sourceIndexKey: values.sourceIndexKey,
+        destinationProviderKey: values.destinationProviderKey,
+        destinationIndexKey: values.destinationIndexKey,
+        batchSize: values.batchSize || undefined,
       });
 
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error ?? 'Failed to create migration');
-      }
-
-      const data = await response.json();
       notifications.show({
         color: 'teal',
         title: 'Migration created',
         message: `"${values.name}" is ready to start.`,
       });
-      onCreated(data.migration as IVectorMigration);
+      onCreated(migration);
       onClose();
       reset();
     } catch (error: unknown) {
       notifications.show({
         color: 'red',
         title: 'Unable to create migration',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        message: errorMessage(error, 'Unexpected error'),
       });
-    } finally {
-      setSubmitting(false);
     }
   };
 
