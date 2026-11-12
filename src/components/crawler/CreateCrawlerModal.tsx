@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { NumberInput, Textarea, TextInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
@@ -17,6 +17,8 @@ import FormShell, {
   ToggleRow,
 } from '@/components/common/ui/FormShell';
 import type { CrawlerView } from '@/lib/services/crawler';
+import { errorMessage } from '@/lib/api/client';
+import { useCreateCrawler } from '@/lib/api/queries/crawler';
 
 type Engine = 'auto' | 'axios' | 'playwright';
 
@@ -57,7 +59,8 @@ export default function CreateCrawlerModal({
   onClose,
   onCreated,
 }: CreateCrawlerModalProps) {
-  const [submitting, setSubmitting] = useState(false);
+  const createCrawler = useCreateCrawler();
+  const submitting = createCrawler.isPending;
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -81,41 +84,29 @@ export default function CreateCrawlerModal({
     if (validation.hasErrors) return;
     const values = form.getValues();
 
-    setSubmitting(true);
     try {
-      const res = await fetch('/api/crawler/crawlers', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          name: values.name.trim(),
-          description: values.description.trim() || undefined,
-          seeds: seeds.length > 0 ? seeds : undefined,
-          engine: values.engine,
-          autoCrawl: values.autoCrawl,
-          maxDepth: values.maxDepth === '' ? 0 : Number(values.maxDepth),
-          maxPages: values.maxPages === '' ? 0 : Number(values.maxPages),
-        }),
+      const crawler = await createCrawler.mutateAsync({
+        name: values.name.trim(),
+        description: values.description.trim() || undefined,
+        seeds: seeds.length > 0 ? seeds : undefined,
+        engine: values.engine,
+        autoCrawl: values.autoCrawl,
+        maxDepth: values.maxDepth === '' ? 0 : Number(values.maxDepth),
+        maxPages: values.maxPages === '' ? 0 : Number(values.maxPages),
       });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || 'Failed to create crawler');
-      }
-      const data = await res.json();
       notifications.show({
         color: 'teal',
         title: 'Crawler created',
         message: `${values.name.trim()} is ready — add URLs or run it now.`,
       });
       form.reset();
-      onCreated(data.crawler as CrawlerView);
+      onCreated(crawler);
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Failed to create crawler',
-        message: err instanceof Error ? err.message : 'Unexpected error',
+        message: errorMessage(err, 'Unexpected error'),
       });
-    } finally {
-      setSubmitting(false);
     }
   };
 

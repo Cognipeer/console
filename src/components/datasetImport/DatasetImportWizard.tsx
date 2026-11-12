@@ -70,6 +70,16 @@ import FormShell, {
 } from '@/components/common/ui/FormShell';
 import StatTile from '@/components/common/ui/StatTile';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useCreateDatasetImport,
+  useDetectImportFormat,
+  useFetchImportUrl,
+  useImportPiiCategories,
+  type DetectResponse,
+  type ImportResult,
+  type PiiCategoryOption,
+} from '@/lib/api/queries/datasetImport';
 import {
   DATASET_IMPORT_FORMATS,
   MAX_IMPORT_BYTES,
@@ -85,40 +95,6 @@ import {
 type Strategy = 'mask' | 'pseudonym';
 type ContentOrigin = 'paste' | 'file' | 'url';
 
-/** Row shape of GET /api/pii/categories → categories[]. */
-interface PiiCategoryOption {
-  id: string;
-  label: string;
-  description: string;
-  severity: 'low' | 'medium' | 'high';
-  defaultEnabled: boolean;
-}
-
-/** Pinned POST /api/dataset-import/detect response shape. */
-interface DetectPreviewItem {
-  input: Array<{ role: string; content: unknown }>;
-  tools?: unknown[];
-  expected?: {
-    reference?: string;
-    toolCalls?: Array<{ name: string; args?: Record<string, unknown> }>;
-  };
-}
-interface DetectResponse {
-  format?: DatasetImportFormat;
-  preview: {
-    items: DetectPreviewItem[];
-    counts: { parsed: number; skipped: Record<string, number> };
-  };
-}
-
-/** Pinned POST /api/dataset-import response shape. */
-interface ImportResult {
-  datasetId: string;
-  created: number;
-  skipped: Record<string, number>;
-  piiFindings: number;
-}
-
 const SEVERITY_COLOR: Record<PiiCategoryOption['severity'], string> = {
   low: 'gray',
   medium: 'orange',
@@ -133,6 +109,7 @@ const ROLE_COLOR: Record<string, string> = {
 };
 
 const DETECT_DEBOUNCE_MS = 600;
+const EMPTY_CATALOG: PiiCategoryOption[] = [];
 const PREVIEW_MESSAGES_SHOWN = 3;
 
 export default function DatasetImportWizard() {
@@ -147,16 +124,20 @@ export default function DatasetImportWizard() {
   const [pasteText, setPasteText] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [url, setUrl] = useState('');
-  const [fetching, setFetching] = useState(false);
+  const fetchUrl = useFetchImportUrl();
+  const fetching = fetchUrl.isPending;
 
   // ── 2. Format & preview ──
   const [detect, setDetect] = useState<DetectResponse | null>(null);
   const [detecting, setDetecting] = useState(false);
+  const detectFormat = useDetectImportFormat();
+  const { mutateAsync: detectContent } = detectFormat;
   const [formatOverride, setFormatOverride] = useState<DatasetImportFormat | null>(null);
 
   // ── 3. Anonymization (required) ──
-  const [catalog, setCatalog] = useState<PiiCategoryOption[]>([]);
-  const [catalogLoading, setCatalogLoading] = useState(true);
+  const catalogQuery = useImportPiiCategories(locale);
+  const catalog = catalogQuery.data ?? EMPTY_CATALOG;
+  const catalogLoading = catalogQuery.isPending;
   const [selectedCategories, setSelectedCategories] = useState<Set<string>>(new Set());
   const [strategy, setStrategy] = useState<Strategy>('mask');
   const [salt, setSalt] = useState('');
@@ -165,38 +146,26 @@ export default function DatasetImportWizard() {
   const [name, setName] = useState('');
   const [nameEdited, setNameEdited] = useState(false);
   const [sourceLabel, setSourceLabel] = useState('');
-  const [creating, setCreating] = useState(false);
+  const createImport = useCreateDatasetImport();
+  const creating = createImport.isPending;
   const [created, setCreated] = useState<ImportResult | null>(null);
 
-  // Built-in PII category catalog (localized labels; defaults preselected).
+  // Built-in PII category catalog (localized labels; defaults preselected once it is read).
+  const catalogData = catalogQuery.data;
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setCatalogLoading(true);
-      try {
-        const res = await fetch(`/api/pii/categories?locale=${encodeURIComponent(locale)}`);
-        const payload = await res.json();
-        if (!res.ok) throw new Error(payload.error ?? 'Failed to load PII categories');
-        if (cancelled) return;
-        const categories: PiiCategoryOption[] = payload.categories ?? [];
-        setCatalog(categories);
-        setSelectedCategories(
-          new Set(categories.filter((c) => c.defaultEnabled).map((c) => c.id)),
-        );
-      } catch (error) {
-        if (!cancelled) {
-          notifications.show({
-            color: 'red',
-            title: t('piiCategories'),
-            message: error instanceof Error ? error.message : 'Unknown error',
-          });
-        }
-      } finally {
-        if (!cancelled) setCatalogLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [locale, t]);
+    if (!catalogData) return;
+    setSelectedCategories(new Set(catalogData.filter((c) => c.defaultEnabled).map((c) => c.id)));
+  }, [catalogData]);
+
+  const catalogError = catalogQuery.error;
+  useEffect(() => {
+    if (!catalogError) return;
+    notifications.show({
+      color: 'red',
+      title: t('piiCategories'),
+      message: errorMessage(catalogError, 'Unknown error'),
+    });
+  }, [catalogError, t]);
 
   // Debounced format detection: any content change invalidates the previous
   // detection AND a manual override (the override belongs to the old content).
@@ -211,20 +180,14 @@ export default function DatasetImportWizard() {
     setDetecting(true);
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch('/api/dataset-import/detect', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content }),
-        });
-        const payload = await res.json();
-        if (!res.ok) throw new Error(payload.error ?? 'Detection failed');
-        if (!cancelled) setDetect(payload as DetectResponse);
+        const payload = await detectContent(content);
+        if (!cancelled) setDetect(payload);
       } catch (error) {
         if (!cancelled) {
           notifications.show({
             color: 'red',
             title: t('detect'),
-            message: error instanceof Error ? error.message : 'Unknown error',
+            message: errorMessage(error, 'Unknown error'),
           });
         }
       } finally {
@@ -235,7 +198,7 @@ export default function DatasetImportWizard() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [content, t]);
+  }, [content, t, detectContent]);
 
   const applyContent = (next: string, from: ContentOrigin) => {
     setContent(next);
@@ -261,24 +224,15 @@ export default function DatasetImportWizard() {
   const fetchFromUrl = async () => {
     const target = url.trim();
     if (!target) return;
-    setFetching(true);
     try {
-      const res = await fetch('/api/dataset-import/fetch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: target }),
-      });
-      const payload = await res.json();
-      if (!res.ok) throw new Error(payload.error ?? 'Fetch failed');
-      applyContent(String(payload.content ?? ''), 'url');
+      const fetched = await fetchUrl.mutateAsync(target);
+      applyContent(String(fetched ?? ''), 'url');
     } catch (error) {
       notifications.show({
         color: 'red',
         title: t('fetch'),
-        message: error instanceof Error ? error.message : 'Unknown error',
+        message: errorMessage(error, 'Unknown error'),
       });
-    } finally {
-      setFetching(false);
     }
   };
 
@@ -310,12 +264,9 @@ export default function DatasetImportWizard() {
 
   const create = async () => {
     if (!canCreate || !effectiveFormat) return;
-    setCreating(true);
     try {
-      const res = await fetch('/api/dataset-import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      setCreated(
+        await createImport.mutateAsync({
           content,
           format: effectiveFormat,
           name: effectiveName.trim(),
@@ -327,18 +278,13 @@ export default function DatasetImportWizard() {
             ...(salt.trim() ? { salt: salt.trim() } : {}),
           },
         }),
-      });
-      const payload = await res.json();
-      if (!res.ok) throw new Error(payload.error ?? 'Import failed');
-      setCreated(payload as ImportResult);
+      );
     } catch (error) {
       notifications.show({
         color: 'red',
         title: t('create'),
-        message: error instanceof Error ? error.message : 'Unknown error',
+        message: errorMessage(error, 'Unknown error'),
       });
-    } finally {
-      setCreating(false);
     }
   };
 

@@ -5,7 +5,7 @@
  */
 
 import { act } from 'react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ragKeys,
   useCancelRagReindex,
@@ -44,6 +44,7 @@ describe('Knowledge Engine hooks', () => {
       return undefined;
     });
     const client = newTestQueryClient();
+    const removed = vi.spyOn(client, 'removeQueries');
     const probe = await renderHook(client, () => ({
       list: useRagModules(),
       create: useCreateRagModule(),
@@ -70,7 +71,8 @@ describe('Knowledge Engine hooks', () => {
     await act(async () => {
       await probe.current.remove.mutateAsync('kb');
     });
-    expect(client.getQueryData(ragKeys.detail(getProjectScope(), 'kb'))).toBeUndefined();
+    // The screen is gone by then; a still-mounted observer would only fetch the removed key again.
+    expect(removed).toHaveBeenCalledWith({ queryKey: ragKeys.module(getProjectScope(), 'kb') });
   });
 
   it('reads the models of one category, and the failure message of a request reaches the screen', async () => {

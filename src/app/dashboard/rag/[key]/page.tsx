@@ -35,6 +35,23 @@ import { useDebouncedValue } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import { ResourceUsageSection, useConfirm, useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { ApiError, errorMessage } from '@/lib/api/client';
+import {
+  useDeleteRagDocument,
+  useDeleteRagModule,
+  useImportRagBatch,
+  useIngestRagDocument,
+  useQueryRagModule,
+  useRagDocuments,
+  useRagInsights,
+  useRagModule,
+  useRagUsage,
+  useReingestRagDocument,
+  type RagDocumentView,
+  type RagQueryLogView,
+  type RagQueryResult,
+  type UsageTotals,
+} from '@/lib/api/queries/rag';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import DataGrid, { type DataGridColumn, type DataGridRowAction } from '@/components/common/ui/DataGrid';
 import {
@@ -77,7 +94,7 @@ import {
   type ChunkFormValues,
 } from '@/components/rag/ragModuleForm';
 import { englishOcrText } from '@/components/extraction/ocrEnglish';
-import { describeOcr, ocrIsOn, type OcrSettings } from '@/components/extraction/ocrForm';
+import { describeOcr, ocrIsOn } from '@/components/extraction/ocrForm';
 import { replaceUrlParams } from '@/components/iam/principals/urlState';
 import { RagAccessChip } from '@/components/rag/access/RagAccessChip';
 import { RagAccessTab } from '@/components/rag/access/RagAccessTab';
@@ -99,117 +116,24 @@ const IMAGE_ACCEPT = '.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff';
 const IMPORT_BATCH_SIZE = 1000;
 const IMPORT_FORMAT_NAME = 'cognipeer.rag-module';
 
-/** Which busy indicator a reload drives — 'silent' drives none, for polling. */
-type LoadIndicator = 'initial' | 'refresh' | 'silent';
-
 /* ── Types ─────────────────────────────────────────────────────────────── */
-
-interface RagModuleView {
-  _id: string;
-  key: string;
-  name: string;
-  description?: string;
-  embeddingModelKey: string;
-  vectorProviderKey: string;
-  vectorIndexKey: string;
-  fileBucketKey?: string;
-  fileProviderKey?: string;
-  chunkConfig: IRagChunkConfig;
-  extraction?: { ocr?: OcrSettings | null } | null;
-  /** Document-level access control; absent or null = off. */
-  access?: { enabled: boolean; adminBypass?: boolean } | null;
-  status: string;
-  hybrid?: { enabled: boolean; mode?: 'rrf' | 'weighted'; alpha?: number; k?: number } | null;
-  isolateByModule?: boolean | null;
-  reindexRequired?: boolean;
-  rerankerKey?: string | null;
-  rerankerOversample?: number | null;
-  defaultTopK?: number | null;
-  defaultMinScore?: number | null;
-  defaultFilter?: Record<string, unknown> | null;
-  filterableFields?: string[] | null;
-  responseDetail?: 'full' | 'text' | null;
-  totalDocuments?: number;
-  totalChunks?: number;
-  createdAt?: string;
-  updatedAt?: string;
-  lastReindexAt?: string;
-}
-
-interface RagDocumentView {
-  _id: string;
-  ragModuleKey: string;
-  fileKey?: string;
-  fileName: string;
-  status: string;
-  chunkCount?: number;
-  errorMessage?: string;
-  lastIndexedAt?: string;
-  createdAt?: string;
-  /** The folder the document sits in; absent = the top level. */
-  folderId?: string;
-  /** The document has permissions of its own (absent = it follows its folder). */
-  aclMode?: 'own';
-  /** A connected source owns the document's folder and permissions. */
-  aclManaged?: 'sync';
-  /** How the text was read (OCR pages) and, while the file is still being read, where that stands. */
-  extraction?: {
-    sourceType?: string;
-    pageCount?: number;
-    ocrPages?: number;
-    ocrImages?: number;
-    stage?: 'queued' | 'running';
-    progress?: { completed: number; total: number };
-    warnings?: string[];
-  };
-}
 
 /** What the Status column says about the OCR of a document: the finished run, or the one in flight. */
 const extractionNote = (doc: RagDocumentView): string | undefined => documentExtractionNote(doc.extraction);
 
 /** The list while the documents of another place are still on their way. */
 const NO_DOCUMENTS: RagDocumentView[] = [];
+const NO_QUERY_LOGS: RagQueryLogView[] = [];
+const NO_BUCKETS: ScoreBucket[] = [];
 
-/**
- * A match as the query endpoint returns it — not as the service produced it.
- * A module set to `responseDetail: 'text'` has every field but `content`
- * stripped by shapeRagQueryResponse, so nothing here may be assumed present.
- */
-interface RagQueryMatch {
-  id?: string;
-  score?: number;
-  content?: string;
-  fileName?: string;
-  chunkIndex?: number;
-  metadata?: Record<string, unknown>;
+/** What a failed read of `what` says (the status of a refused request, as the page always did). */
+function failureText(error: unknown, fallback: string, what: string): string {
+  if (error instanceof ApiError) return `Failed to load ${what} (HTTP ${error.status})`;
+  return errorMessage(error, fallback);
 }
 
-interface RagQueryResult {
-  matches: RagQueryMatch[];
-  query: string;
-  latencyMs: number;
-}
-
-interface RagQueryLogView {
-  _id: string;
-  query: string;
-  topK: number;
-  matchCount: number;
-  /** Matches the store returned before the minScore filter, when it was recorded. */
-  preFilterMatchCount?: number;
-  topScore?: number;
-  minScoreApplied?: number;
-  /** Absent on logs written before latency was recorded. */
-  latencyMs?: number;
-  createdAt?: string;
-}
-
-interface UsageTotals {
-  total: number;
-  avgLatencyMs: number;
-  zeroMatchCount: number;
-  minScoreFilteredCount: number;
-}
+/** What a failed action says: the page showed `String(error)`, i.e. `Error: <message>`. */
+const actionFailure = (error: unknown, fallback = 'Unknown error') => String(new Error(errorMessage(error, fallback)));
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
@@ -360,20 +284,17 @@ export default function RagModuleDetailPage() {
   const moduleKey = Array.isArray(params.key) ? params.key[0] : params.key;
 
   /* state */
-  const [mod, setMod] = useState<RagModuleView | null>(null);
-  const [loading, setLoading] = useState(true);
+  const moduleQuery = useRagModule(moduleKey);
+  const mod = moduleQuery.data ?? null;
+  const loading = moduleQuery.isPending && Boolean(moduleKey);
   const [refreshing, setRefreshing] = useState(false);
 
   /* documents */
-  const [documents, setDocuments] = useState<RagDocumentView[]>([]);
-  const [docTotal, setDocTotal] = useState(0);
   const [docPage, setDocPage] = useState(1);
   const [docPageSize, setDocPageSize] = useState(25);
   const [docSearch, setDocSearch] = useState('');
   const [docStatus, setDocStatus] = useState('all');
   const [debouncedDocSearch] = useDebouncedValue(docSearch.trim(), 300);
-  const [docsLoading, setDocsLoading] = useState(false);
-  const [docsError, setDocsError] = useState<string | null>(null);
   const [ingesting, setIngesting] = useState(false);
   const [ingestFileName, setIngestFileName] = useState('');
   const [ingestContent, setIngestContent] = useState('');
@@ -405,23 +326,22 @@ export default function RagModuleDetailPage() {
 
   /* playground */
   const [queryResult, setQueryResult] = useState<RagQueryResult | null>(null);
-  const [queryLoading, setQueryLoading] = useState(false);
 
-  /* usage */
-  const [queryLogs, setQueryLogs] = useState<RagQueryLogView[]>([]);
-  const [usageLoading, setUsageLoading] = useState(false);
-  const [usageTotals, setUsageTotals] = useState<UsageTotals | null>(null);
-  const [usageError, setUsageError] = useState<string | null>(null);
+  /* usage and insight panels */
+  const usageQuery = useRagUsage(moduleKey);
+  const insightsQuery = useRagInsights(moduleKey);
+  const queryLogs = usageQuery.data?.logs ?? NO_QUERY_LOGS;
+  const usageTotals: UsageTotals | null = usageQuery.data?.totals ?? null;
   /** 'own' when the caller does not administer the module: the logs are only their queries (the counters are not). */
-  const [queryLogScope, setQueryLogScope] = useState<'all' | 'own'>('all');
-
-  /* insight panels */
-  const [scoreBuckets, setScoreBuckets] = useState<ScoreBucket[]>([]);
-  const [zeroQueries, setZeroQueries] = useState<RagQueryLogView[]>([]);
+  const queryLogScope = usageQuery.data?.scope ?? 'all';
+  const usageLoading = usageQuery.isFetching;
+  const usageError = usageQuery.isError ? failureText(usageQuery.error, 'Failed to load usage', 'usage') : null;
+  const scoreBuckets = insightsQuery.data?.buckets ?? NO_BUCKETS;
+  const zeroQueries = insightsQuery.data?.zeroQueries ?? NO_QUERY_LOGS;
   /** The zero-result feed's own answer: it is fetched apart from the history and may come back on its own. */
-  const [zeroQueriesScope, setZeroQueriesScope] = useState<'all' | 'own'>('all');
-  const [insightsLoading, setInsightsLoading] = useState(false);
-  const [insightsError, setInsightsError] = useState<string | null>(null);
+  const zeroQueriesScope = insightsQuery.data?.zeroQueriesScope ?? 'all';
+  const insightsLoading = insightsQuery.isFetching;
+  const insightsError = insightsQuery.isError ? failureText(insightsQuery.error, 'Failed to load insights', 'insights') : null;
 
   const queryForm = useForm({
     initialValues: { query: '', topK: 5, minScore: 0, filter: '' },
@@ -463,165 +383,95 @@ export default function RagModuleDetailPage() {
 
   /* ── Data loading ────────────────────────────────────────────────────── */
 
+  // A missing module sends the user back to the list; a first read that fails otherwise is told (a poll that fails
+  // must not stack up toasts behind the user's back).
+  const moduleFailure = moduleQuery.data === undefined ? moduleQuery.error : null;
+  useEffect(() => {
+    if (!moduleFailure) return;
+    if (moduleFailure instanceof ApiError && moduleFailure.status === 404) {
+      router.push('/dashboard/rag');
+      return;
+    }
+    console.error(moduleFailure);
+    notifications.show({ color: 'red', title: 'Error', message: actionFailure(null, 'Failed to load Knowledge Engine module') });
+  }, [moduleFailure, router]);
+
+  /** 'refresh' drives the Refresh button and tells a failure; 'silent' (polling, after an action) drives nothing. */
+  const { refetch: refetchModule } = moduleQuery;
   const loadModule = useCallback(
-    async (indicator: LoadIndicator = 'initial') => {
-      if (!moduleKey) return;
+    async (indicator: 'refresh' | 'silent' = 'silent') => {
       if (indicator === 'refresh') setRefreshing(true);
-      else if (indicator === 'initial') setLoading(true);
       try {
-        const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}`, { cache: 'no-store' });
-        if (!res.ok) {
-          if (res.status === 404) { router.push('/dashboard/rag'); return; }
-          throw new Error('Failed to load Knowledge Engine module');
-        }
-        const data = await res.json();
-        setMod(data.module ?? null);
-      } catch (error) {
-        console.error(error);
-        // A poll that fails must not stack up toasts behind the user's back.
-        if (indicator !== 'silent') {
-          notifications.show({ color: 'red', title: 'Error', message: String(error) });
+        const result = await refetchModule();
+        if (indicator === 'refresh' && result.isError) {
+          if (result.error instanceof ApiError && result.error.status === 404) {
+            router.push('/dashboard/rag');
+          } else {
+            console.error(result.error);
+            notifications.show({ color: 'red', title: 'Error', message: actionFailure(null, 'Failed to load Knowledge Engine module') });
+          }
         }
       } finally {
-        if (indicator !== 'silent') {
-          setLoading(false);
-          setRefreshing(false);
-        }
+        if (indicator === 'refresh') setRefreshing(false);
       }
     },
-    [moduleKey, router],
+    [refetchModule, router],
   );
 
   // The list is the open folder's documents (`root` = the top level), or every folder's while a search is in force.
   const folderParam = folderParamOf(debouncedDocSearch !== '', openFolderId);
   const locationKey = folderParam ?? '*';
-  /** Which place the documents in state were read for: the list shows them only while that is still the place on screen. */
-  const [docsLocation, setDocsLocation] = useState(locationKey);
-  /** Requests issued, the one whose answer is on screen, and the query the person asks for now. */
-  const docsIssued = useRef(0);
-  const docsShown = useRef(0);
-  const docsWanted = useRef('');
+  const docsQuery = useRagDocuments(
+    moduleKey,
+    locationKey,
+    {
+      limit: docPageSize,
+      offset: (docPage - 1) * docPageSize,
+      search: debouncedDocSearch || undefined,
+      status: docStatus !== 'all' ? docStatus : undefined,
+      folderId: folderParam,
+    },
+    DOC_POLL_INTERVAL_MS,
+  );
+  // The rows shown are those of the place on screen only: another place's rows never stand in while it loads.
+  const documents = docsQuery.data?.documents ?? NO_DOCUMENTS;
+  const docTotal = docsQuery.data?.total ?? 0;
+  const [docsRefreshing, setDocsRefreshing] = useState(false);
+  const docsLoading = docsQuery.isPending || docsQuery.isPlaceholderData || docsRefreshing;
+  // A failed load must not be mistaken for "zero documents" -- the table below only renders its empty state when
+  // the error is also cleared.
+  const docsError = docsQuery.isError ? failureText(docsQuery.error, 'Failed to load documents', 'documents') : null;
 
-  const loadDocuments = useCallback(async (silent = false) => {
-    if (!moduleKey) return;
-    const params = new URLSearchParams({
-      limit: String(docPageSize),
-      offset: String((docPage - 1) * docPageSize),
-    });
-    if (debouncedDocSearch) params.set('search', debouncedDocSearch);
-    if (docStatus !== 'all') params.set('status', docStatus);
-    if (folderParam) params.set('folderId', folderParam);
-    const query = params.toString();
-    const request = ++docsIssued.current;
-    docsWanted.current = query;
-    // An answer is shown only while it is still what the person asks for (not a place, page or search they have left)
-    // and never after a newer answer for it. A slow answer with no newer one behind it still lands, so a server slower
-    // than the poll interval does not starve the list.
-    const isCurrent = () => query === docsWanted.current && request >= docsShown.current;
-    if (!silent) setDocsLoading(true);
-    try {
-      const res = await fetch(
-        `/api/rag/modules/${encodeURIComponent(moduleKey)}/documents?${query}`,
-        { cache: 'no-store' },
-      );
-      if (!res.ok) {
-        throw new Error(`Failed to load documents (HTTP ${res.status})`);
+  const { refetch: refetchDocuments } = docsQuery;
+  /** Rereads the page on screen; `silent` drives no busy indicator. */
+  const loadDocuments = useCallback(
+    async (silent = false) => {
+      if (!silent) setDocsRefreshing(true);
+      try {
+        await refetchDocuments();
+      } finally {
+        if (!silent) setDocsRefreshing(false);
       }
-      const data = await res.json();
-      if (!isCurrent()) return;
-      const total = typeof data.total === 'number' ? data.total : (data.documents ?? []).length;
-      // Deleting the last row of the last page leaves that page empty; step back
-      // instead of showing "no documents" over a module that still has some.
-      if ((data.documents ?? []).length === 0 && total > 0 && docPage > 1) {
-        setDocPage(Math.max(1, Math.ceil(total / docPageSize)));
-        return;
-      }
-      docsShown.current = request;
-      setDocuments(data.documents ?? []);
-      setDocTotal(total);
-      setDocsLocation(locationKey);
-      setDocsError(null);
-    } catch (e) {
-      if (!isCurrent()) return;
-      console.error('[rag docs]', e);
-      // A failed load must not be mistaken for "zero documents" -- the table
-      // below only renders its empty state when docsError is also cleared.
-      setDocsError(e instanceof Error ? e.message : 'Failed to load documents');
-    } finally {
-      if (query === docsWanted.current) setDocsLoading(false);
-    }
-  }, [moduleKey, docPage, docPageSize, debouncedDocSearch, docStatus, folderParam, locationKey]);
+    },
+    [refetchDocuments],
+  );
 
-  const loadUsage = useCallback(async () => {
-    if (!moduleKey) return;
-    setUsageLoading(true);
-    try {
-      const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}/usage?limit=50`, { cache: 'no-store' });
-      if (!res.ok) {
-        throw new Error(`Failed to load usage (HTTP ${res.status})`);
-      }
-      const data = await res.json();
-      setQueryLogs(data.logs ?? []);
-      setQueryLogScope(data.scope === 'own' ? 'own' : 'all');
-      setUsageTotals(
-        typeof data.total === 'number' && typeof data.avgLatencyMs === 'number'
-          ? {
-            total: data.total,
-            avgLatencyMs: data.avgLatencyMs,
-            zeroMatchCount: data.zeroMatchCount ?? 0,
-            minScoreFilteredCount: data.minScoreFilteredCount ?? 0,
-          }
-          : null,
-      );
-      setUsageError(null);
-    } catch (e) {
-      console.error('[rag usage]', e);
-      setUsageError(e instanceof Error ? e.message : 'Failed to load usage');
-    } finally {
-      setUsageLoading(false);
-    }
-  }, [moduleKey]);
-
-  const loadInsights = useCallback(async () => {
-    if (!moduleKey) return;
-    setInsightsLoading(true);
-    const base = `/api/rag/modules/${encodeURIComponent(moduleKey)}`;
-    try {
-      const [distributionRes, zeroRes] = await Promise.all([
-        fetch(`${base}/score-distribution`, { cache: 'no-store' }),
-        fetch(`${base}/queries?zeroOnly=true&limit=25`, { cache: 'no-store' }),
-      ]);
-      if (!distributionRes.ok || !zeroRes.ok) {
-        const failedStatus = !distributionRes.ok ? distributionRes.status : zeroRes.status;
-        throw new Error(`Failed to load insights (HTTP ${failedStatus})`);
-      }
-      const [distributionData, zeroData] = await Promise.all([distributionRes.json(), zeroRes.json()]);
-      setScoreBuckets(distributionData.buckets ?? []);
-      setZeroQueries(zeroData.logs ?? []);
-      setZeroQueriesScope(zeroData.scope === 'own' ? 'own' : 'all');
-      setInsightsError(null);
-    } catch (e) {
-      console.error('[rag insights]', e);
-      setInsightsError(e instanceof Error ? e.message : 'Failed to load insights');
-    } finally {
-      setInsightsLoading(false);
-    }
-  }, [moduleKey]);
-
+  // Deleting the last row of the last page leaves that page empty; step back instead of showing "no documents"
+  // over a module that still has some.
+  const docsPage = docsQuery.isPlaceholderData ? undefined : docsQuery.data;
   useEffect(() => {
-    void loadModule('initial');
-  }, [loadModule]);
+    if (docsPage && docsPage.documents.length === 0 && docsPage.total > 0 && docPage > 1) {
+      setDocPage(Math.max(1, Math.ceil(docsPage.total / docPageSize)));
+    }
+  }, [docsPage, docPage, docPageSize]);
 
-  // Paging and searching refetch only the document list; usage and insights
-  // describe the whole module and do not change with the page.
+  const docsLoadError = docsQuery.error;
   useEffect(() => {
-    void loadDocuments();
-  }, [loadDocuments]);
+    if (docsLoadError) console.error('[rag docs]', docsLoadError);
+  }, [docsLoadError]);
 
-  useEffect(() => {
-    void loadUsage();
-    void loadInsights();
-  }, [loadUsage, loadInsights]);
+  const loadUsage = () => usageQuery.refetch();
+  const loadInsights = () => insightsQuery.refetch();
 
   // A folder that is no longer in the list (deleted, or moved out of sight) cannot stay open.
   useEffect(() => {
@@ -640,20 +490,24 @@ export default function RagModuleDetailPage() {
 
   const reindex = useRagReindex(moduleKey, onReindexSettled);
 
-  // A document sits in `pending`/`processing` until the ingest job finishes with
-  // it. Without this the row stayed at its initial status until the user
-  // happened to press Refresh, which read as an ingest that had hung.
+  const deleteModule = useDeleteRagModule();
+  const ingestDocument = useIngestRagDocument(moduleKey ?? '');
+  const deleteDocument = useDeleteRagDocument(moduleKey ?? '');
+  const reingestDocument = useReingestRagDocument(moduleKey ?? '');
+  const importBatch = useImportRagBatch(moduleKey ?? '');
+  const queryModule = useQueryRagModule(moduleKey ?? '');
+  const queryLoading = queryModule.isPending;
+
+  // A document sits in `pending`/`processing` until the ingest job finishes with it; the list rereads itself every
+  // few seconds meanwhile (see `useRagDocuments`), and the module's counters follow it.
   const documentsSettling = documents.some(
     (doc) => doc.status === 'pending' || doc.status === 'processing' || Boolean(doc.extraction?.stage),
   );
+  const documentsReadAt = docsQuery.dataUpdatedAt;
   useEffect(() => {
-    if (!documentsSettling) return undefined;
-    const timer = setInterval(() => {
-      void loadDocuments(true);
-      void loadModule('silent');
-    }, DOC_POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [documentsSettling, loadDocuments, loadModule]);
+    if (documentsSettling) void loadModule('silent');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documentsReadAt]);
 
   /* ── Actions ──────────────────────────────────────────────────────────── */
 
@@ -666,8 +520,11 @@ export default function RagModuleDetailPage() {
       id: mod._id,
       extraWarning: tSafe('ragModuleExtra'),
       action: async () => {
-        const res = await fetch(`/api/rag/modules/${encodeURIComponent(mod.key)}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error('Failed to delete module');
+        try {
+          await deleteModule.mutateAsync(mod.key);
+        } catch {
+          throw new Error('Failed to delete module');
+        }
         notifications.show({ color: 'green', title: 'Deleted', message: `${mod.name} removed.` });
         router.push('/dashboard/rag');
       },
@@ -688,28 +545,18 @@ export default function RagModuleDetailPage() {
     }
     setIngesting(true);
     try {
-      const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey!)}/documents`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fileName: ingestFileName.trim(),
-          content: ingestContent,
-          chunkConfig: ingestChunkConfig(),
-          ...(ingestFolderId ? { folderId: ingestFolderId } : {}),
-        }),
+      await ingestDocument.mutateAsync({
+        fileName: ingestFileName.trim(),
+        content: ingestContent,
+        chunkConfig: ingestChunkConfig(),
+        ...(ingestFolderId ? { folderId: ingestFolderId } : {}),
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Failed to ingest document');
-      }
       notifications.show({ color: 'green', title: 'Document ingested', message: `${ingestFileName} is being processed.` });
       setIngestFileName('');
       setIngestContent('');
-      await loadDocuments();
-      await loadModule('refresh');
       void reloadFolders();
     } catch (error) {
-      notifications.show({ color: 'red', title: 'Ingest failed', message: String(error) });
+      notifications.show({ color: 'red', title: 'Ingest failed', message: actionFailure(error) });
     } finally {
       setIngesting(false);
     }
@@ -729,28 +576,18 @@ export default function RagModuleDetailPage() {
         reader.readAsDataURL(ingestFile);
       });
 
-      const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey!)}/documents`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fileName: ingestFile.name,
-          data: dataUrl,
-          contentType: ingestFile.type || undefined,
-          chunkConfig: ingestChunkConfig(),
-          ...(ingestFolderId ? { folderId: ingestFolderId } : {}),
-        }),
+      await ingestDocument.mutateAsync({
+        fileName: ingestFile.name,
+        data: dataUrl,
+        contentType: ingestFile.type || undefined,
+        chunkConfig: ingestChunkConfig(),
+        ...(ingestFolderId ? { folderId: ingestFolderId } : {}),
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Failed to ingest file');
-      }
       notifications.show({ color: 'green', title: 'File ingested', message: `${ingestFile.name} is being processed.` });
       setIngestFile(null);
-      await loadDocuments();
-      await loadModule('refresh');
       void reloadFolders();
     } catch (error) {
-      notifications.show({ color: 'red', title: 'Ingest failed', message: String(error) });
+      notifications.show({ color: 'red', title: 'Ingest failed', message: actionFailure(error) });
     } finally {
       setIngesting(false);
     }
@@ -762,14 +599,12 @@ export default function RagModuleDetailPage() {
       name: doc.fileName,
       extraWarning: tSafe('ragDocumentExtra'),
       action: async () => {
-        const res = await fetch(
-          `/api/rag/modules/${encodeURIComponent(moduleKey!)}/documents/${encodeURIComponent(doc._id)}`,
-          { method: 'DELETE' },
-        );
-        if (!res.ok) throw new Error('Failed to delete document');
+        try {
+          await deleteDocument.mutateAsync(doc._id);
+        } catch {
+          throw new Error('Failed to delete document');
+        }
         notifications.show({ color: 'green', title: 'Document deleted', message: `${doc.fileName} removed.` });
-        await loadDocuments();
-        await loadModule('refresh');
         void reloadFolders();
       },
     });
@@ -785,6 +620,7 @@ export default function RagModuleDetailPage() {
     if (!moduleKey) return;
     setExporting(true);
     try {
+      // Raw on purpose: the answer is a zip that is saved as a file (a blob download), not JSON.
       const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}/export`, { cache: 'no-store' });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -810,7 +646,6 @@ export default function RagModuleDetailPage() {
     // sort imports them in order whatever order the file picker returned.
     const files = [...selected].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
     setImporting(true);
-    const url = `/api/rag/modules/${encodeURIComponent(moduleKey)}/import`;
     let total = 0;
     let imported = 0;
     let failed = 0;
@@ -825,15 +660,14 @@ export default function RagModuleDetailPage() {
 
         for (let start = 0; start < lines.length; start += IMPORT_BATCH_SIZE) {
           const batch = lines.slice(start, start + IMPORT_BATCH_SIZE).join('\n');
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ data: batch }),
-          });
-          const body = await res.json().catch(() => ({}));
-          if (!res.ok) {
-            const batchError = body.error || `Import failed (${res.status}) at document ${start + 1}`;
-            throw new Error(`${file.name}: ${batchError}. ${imported} document(s) were queued before it.`);
+          let body: { imported: number; failed: number };
+          try {
+            body = await importBatch.mutateAsync(batch);
+          } catch (batchFailure) {
+            const detail = batchFailure instanceof ApiError && !batchFailure.message
+              ? `Import failed (${batchFailure.status}) at document ${start + 1}`
+              : errorMessage(batchFailure, `Import failed at document ${start + 1}`);
+            throw new Error(`${file.name}: ${detail}. ${imported} document(s) were queued before it.`);
           }
           imported += body.imported;
           failed += body.failed;
@@ -1039,19 +873,10 @@ export default function RagModuleDetailPage() {
     if (!ok) return;
     setReingestingDocId(doc._id);
     try {
-      const res = await fetch(
-        `/api/rag/modules/${encodeURIComponent(moduleKey!)}/documents/${encodeURIComponent(doc._id)}`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reextract: true }) },
-      );
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Re-extract failed');
-      }
+      await reingestDocument.mutateAsync({ documentId: doc._id, reextract: true });
       notifications.show({ color: 'green', title: 'Re-extract complete', message: `${doc.fileName} was read again.` });
-      await loadDocuments();
-      await loadModule('refresh');
     } catch (error) {
-      notifications.show({ color: 'red', title: 'Re-extract failed', message: String(error) });
+      notifications.show({ color: 'red', title: 'Re-extract failed', message: actionFailure(error) });
     } finally {
       setReingestingDocId(null);
     }
@@ -1067,19 +892,10 @@ export default function RagModuleDetailPage() {
     if (!ok) return;
     setReingestingDocId(doc._id);
     try {
-      const res = await fetch(
-        `/api/rag/modules/${encodeURIComponent(moduleKey!)}/documents/${encodeURIComponent(doc._id)}`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
-      );
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Re-ingest failed');
-      }
+      await reingestDocument.mutateAsync({ documentId: doc._id });
       notifications.show({ color: 'green', title: 'Re-ingest complete', message: `${doc.fileName} re-processed.` });
-      await loadDocuments();
-      await loadModule('refresh');
     } catch (error) {
-      notifications.show({ color: 'red', title: 'Re-ingest failed', message: String(error) });
+      notifications.show({ color: 'red', title: 'Re-ingest failed', message: actionFailure(error) });
     } finally {
       setReingestingDocId(null);
     }
@@ -1162,32 +978,18 @@ export default function RagModuleDetailPage() {
 
   const handleQuery = queryForm.onSubmit(async (values) => {
     if (!moduleKey) return;
-    setQueryLoading(true);
     setQueryResult(null);
     try {
-      const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}/query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      setQueryResult(
+        await queryModule.mutateAsync({
           query: values.query,
           topK: values.topK,
           minScore: values.minScore || undefined,
           filter: values.filter.trim() ? JSON.parse(values.filter) : undefined,
         }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Query failed');
-      }
-      const data = await res.json();
-      setQueryResult(data.result ?? null);
-      // refresh usage after query
-      void loadUsage();
-      void loadInsights();
+      );
     } catch (error) {
-      notifications.show({ color: 'red', title: 'Query failed', message: String(error) });
-    } finally {
-      setQueryLoading(false);
+      notifications.show({ color: 'red', title: 'Query failed', message: actionFailure(error) });
     }
   });
 
@@ -1313,7 +1115,7 @@ export default function RagModuleDetailPage() {
   /* ── Documents tab: the list is one place at a time ──────────────────── */
 
   // Documents read for another place (a folder just opened) are not shown under this one.
-  const docsHere = docsLocation === locationKey;
+  const docsHere = docsQuery.data !== undefined;
   const listedDocuments = docsHere ? documents : NO_DOCUMENTS;
   const listedTotal = docsHere ? docTotal : 0;
   /** The folder path and the line under it replace the module-wide count once there are folders. */
@@ -2170,8 +1972,8 @@ export default function RagModuleDetailPage() {
         opened={editModalOpen}
         onClose={() => setEditModalOpen(false)}
         module={mod}
-        onUpdated={(updated) => {
-          setMod(updated as unknown as RagModuleView);
+        onUpdated={() => {
+          // The save already put the updated module into the cache.
           setEditModalOpen(false);
           // Changing the chunking or the embedding model enqueues a run
           // server-side; pick it up so the progress banner appears at once.

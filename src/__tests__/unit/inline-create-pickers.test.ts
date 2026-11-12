@@ -15,13 +15,13 @@ import {
   click,
   installApiMock,
   installDomStubs,
-  mount,
   q,
   qa,
   settle,
   text,
   type Mounted,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 
 vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(),
@@ -76,7 +76,7 @@ function shell(writable: PermissionService[], child: ReactNode) {
 }
 
 async function render(node: ReactNode) {
-  mounted = await mount(node);
+  mounted = await renderWithQuery(node);
   await settle(50);
 }
 

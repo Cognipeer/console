@@ -343,7 +343,7 @@ export default function EditRagModuleModal({ opened, onClose, module, onUpdated 
         });
       }
 
-      onUpdated(updated);
+      onUpdated(updated as unknown as Record<string, unknown>);
       onClose();
     } catch (error) {
       console.error(error);

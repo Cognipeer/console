@@ -4,6 +4,8 @@ import { useState } from 'react';
 import { Checkbox, Group, NumberInput, Select, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { errorMessage } from '@/lib/api/client';
+import { useCreateOcrJob } from '@/lib/api/queries/ocrJobs';
 import { IconCheck, IconFileText } from '@tabler/icons-react';
 import FormShell, {
   Checklist,
@@ -15,7 +17,6 @@ import FormShell, {
 } from '@/components/common/ui/FormShell';
 import SchemaBuilder from './SchemaBuilder';
 import {
-  ocrJobsApi,
   type BucketOption,
   type CreateOcrJobBody,
   type ModelOption,
@@ -52,7 +53,8 @@ export default function CreateOcrJobModal({
   buckets,
   onCreated,
 }: CreateOcrJobModalProps) {
-  const [creating, setCreating] = useState(false);
+  const createJob = useCreateOcrJob();
+  const creating = createJob.isPending;
   const [schema, setSchema] = useState<Record<string, unknown> | undefined>(undefined);
 
   const form = useForm<CreateForm>({
@@ -97,17 +99,14 @@ export default function CreateOcrJobModal({
       callbackUrl: values.callbackUrl || undefined,
       callbackSecret: values.callbackSecret || undefined,
     };
-    setCreating(true);
     try {
-      const job = await ocrJobsApi.create(body);
+      const job = await createJob.mutateAsync(body);
       notifications.show({ message: 'OCR job created', color: 'green' });
       form.reset();
       setSchema(undefined);
       onCreated(job.id);
     } catch (err) {
-      notifications.show({ message: err instanceof Error ? err.message : 'Failed to create job', color: 'red' });
-    } finally {
-      setCreating(false);
+      notifications.show({ message: errorMessage(err, 'Failed to create job'), color: 'red' });
     }
   });
 

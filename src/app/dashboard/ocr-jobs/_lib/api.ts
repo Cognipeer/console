@@ -1,5 +1,6 @@
 /**
- * Dashboard API client for OCR Jobs (v2 container model).
+ * Types and display helpers of the OCR Jobs dashboard (v2 container model). The requests are the hooks in
+ * `src/lib/api/queries/ocrJobs.ts`.
  */
 
 export type OcrJobStatus = 'active' | 'paused' | 'archived';
@@ -71,52 +72,9 @@ export interface ItemSourceDraft {
 export interface ModelOption { value: string; label: string }
 export interface BucketOption { value: string; label: string }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    cache: 'no-store',
-    credentials: 'include',
-    headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
-    ...init,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(text || `Request failed: ${res.status}`);
-  }
-  return (await res.json()) as T;
-}
-
-export const ocrJobsApi = {
-  list: () => req<{ jobs: OcrJobView[] }>('/api/ocr-jobs').then((r) => r.jobs ?? []),
-  get: (id: string) => req<{ job: OcrJobView }>(`/api/ocr-jobs/${id}`).then((r) => r.job),
-  create: (body: CreateOcrJobBody) =>
-    req<{ job: OcrJobView }>('/api/ocr-jobs', { method: 'POST', body: JSON.stringify(body) }).then((r) => r.job),
-  update: (id: string, patch: Partial<CreateOcrJobBody> & { status?: OcrJobStatus }) =>
-    req<{ job: OcrJobView }>(`/api/ocr-jobs/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }).then((r) => r.job),
-  remove: (id: string) => req<{ ok: boolean }>(`/api/ocr-jobs/${id}`, { method: 'DELETE' }),
-  sendFiles: (id: string, items: ItemSourceDraft[], mode: 'sync' | 'async' = 'async') =>
-    req<{ items: OcrJobItemView[] }>(`/api/ocr-jobs/${id}/files`, {
-      method: 'POST',
-      body: JSON.stringify({ items, mode }),
-    }).then((r) => r.items ?? []),
-  pause: (id: string) => req<{ job: OcrJobView }>(`/api/ocr-jobs/${id}/pause`, { method: 'POST' }).then((r) => r.job),
-  resume: (id: string) => req<{ job: OcrJobView }>(`/api/ocr-jobs/${id}/resume`, { method: 'POST' }).then((r) => r.job),
-  items: (id: string) => req<{ items: OcrJobItemView[] }>(`/api/ocr-jobs/${id}/items`).then((r) => r.items ?? []),
-  exportUrl: (id: string, format: 'json' | 'jsonl' | 'csv') => `/api/ocr-jobs/${id}/export?format=${format}`,
-};
-
-export async function loadModelOptions(category: 'ocr' | 'llm'): Promise<ModelOption[]> {
-  const res = await fetch(`/api/models?category=${category}`, { cache: 'no-store' });
-  if (!res.ok) return [];
-  const data = (await res.json()) as { models?: Array<{ key: string; name: string }> };
-  return (data.models ?? []).map((m) => ({ value: m.key, label: m.name }));
-}
-
-export async function loadBuckets(): Promise<BucketOption[]> {
-  const res = await fetch('/api/files/buckets', { cache: 'no-store' });
-  if (!res.ok) return [];
-  const data = (await res.json()) as { buckets?: Array<{ key: string; name: string }> };
-  return (data.buckets ?? []).map((b) => ({ value: b.key, label: b.name }));
-}
+/** The address that downloads a job's results (opened in a new tab, so it is a link and not a request). */
+export const ocrJobExportUrl = (id: string, format: 'json' | 'jsonl' | 'csv') =>
+  `/api/ocr-jobs/${id}/export?format=${format}`;
 
 /** Read a File into base64 (no data: prefix). */
 export function fileToBase64(file: File): Promise<string> {

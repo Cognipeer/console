@@ -4,7 +4,7 @@
  */
 
 import { act } from 'react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getProjectScope } from '@/lib/api/queries/projectScope';
 import {
   memoryKeys,
@@ -58,6 +58,7 @@ describe('Memory hooks', () => {
       return undefined;
     });
     const client = newTestQueryClient();
+    const removed = vi.spyOn(client, 'removeQueries');
     const probe = await renderHook(client, () => ({
       stores: useMemoryStores(),
       page: useMemoryItems('s1', 1, 20, {}),
@@ -86,7 +87,8 @@ describe('Memory hooks', () => {
     await act(async () => {
       await probe.current.removeStore.mutateAsync();
     });
-    expect(client.getQueryData(memoryKeys.items(getProjectScope(), 's1', 1, 20, {}))).toBeUndefined();
+    // The screen is gone by then; a still-mounted observer would only fetch the removed key again.
+    expect(removed).toHaveBeenCalledWith({ queryKey: memoryKeys.store(getProjectScope(), 's1') });
   });
 
   it('the message of a failed request reaches the caller', async () => {

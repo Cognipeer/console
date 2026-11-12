@@ -4,7 +4,7 @@
  */
 
 import { act } from 'react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getProjectScope } from '@/lib/api/queries/projectScope';
 import {
   useCreateVectorIndex,
@@ -57,6 +57,7 @@ describe('Vector hooks', () => {
       return undefined;
     });
     const client = newTestQueryClient();
+    const removed = vi.spyOn(client, 'removeQueries');
     const probe = await renderHook(client, () => ({
       providers: useVectorProvidersWithIndexes(),
       index: useVectorIndex('p', 'i1'),
@@ -91,7 +92,8 @@ describe('Vector hooks', () => {
     await act(async () => {
       await probe.current.remove.mutateAsync({ indexKey: 'i1', providerKey: 'p' });
     });
-    expect(client.getQueryData(vectorKeys.index(getProjectScope(), 'p', 'i1'))).toBeUndefined();
+    // The screen is gone by then; a still-mounted observer would only fetch the removed key again.
+    expect(removed).toHaveBeenCalledWith({ queryKey: vectorKeys.index(getProjectScope(), 'p', 'i1') });
   });
 
   it('rereads the migrations while one is running and stops when none is; the error of a start reaches the caller', async () => {
