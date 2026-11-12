@@ -23,7 +23,7 @@ const ENVELOPE_WRITERS = [
   'lib/services/models/usageLogger.ts',
   'lib/services/guardrail/guardrailService.ts',
   'lib/services/webSearch/webSearchService.ts',
-  'lib/services/mcp/mcpService.ts',
+  'lib/services/mcp/requestLog.ts',
   'lib/services/tools/toolService.ts',
   'lib/services/rag/ragService.ts',
   'lib/services/reranker/rerankerService.ts',
