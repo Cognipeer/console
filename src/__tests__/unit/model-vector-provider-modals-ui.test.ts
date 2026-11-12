@@ -6,19 +6,12 @@
  */
 import { createElement } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  click,
-  installApiMock,
-  installDomStubs,
-  q,
-  qa,
-  setInput,
-  settle,
-  wait,
-  type ApiMock,
-  type Mounted,
-} from '../helpers/iamCenterUi';
+import { click, installApiMock, installDomStubs, q, qa, setInput, settle, wait, type ApiMock, type Mounted } from '../helpers/iamCenterUi';
+import type { ReactNode } from 'react';
 import { renderWithQuery } from '../helpers/renderWithQuery';
+
+/** `mount`, inside a query client (the screens read through React Query). */
+const mount = (element: ReactNode, locale = 'en') => renderWithQuery(element, { locale });
 import ModelProviderModal from '@/components/models/ModelProviderModal';
 import VectorProviderModal from '@/components/vector/VectorProviderModal';
 import type { ProviderDescriptor, ProviderFormSchema } from '@/lib/providers';
@@ -106,7 +99,7 @@ async function open(domain: 'models' | 'vector') {
     domain === 'models'
       ? createElement(ModelProviderModal, { opened: true, onClose: vi.fn(), onCreated: created })
       : createElement(VectorProviderModal, { opened: true, onClose: vi.fn(), onCreated: created });
-  mounted = await renderWithQuery(element);
+  mounted = await mount(element);
   await settle(120);
   return { created };
 }
