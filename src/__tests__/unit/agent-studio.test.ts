@@ -69,7 +69,7 @@ describe('resolveAgentRuntimeOptions', () => {
                 planning: { mode: 'planner_executor', replanPolicy: 'every_n_steps', everyNSteps: 3 },
                 limits: { maxToolCalls: 40, maxCostUsd: 2.5 },
                 contextPilot: { enabled: true, excludeTools: ['knowledge_search'] },
-                reasoning: { enabled: true, level: 'high', effort: 'medium', reflection: false },
+                reasoning: { reflection: false },
                 askUser: true,
             },
         });

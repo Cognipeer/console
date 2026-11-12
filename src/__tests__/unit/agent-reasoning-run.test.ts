@@ -215,14 +215,6 @@ describe('what a run hands the native model', () => {
     expect(mainModelCall().reasoning).toBeUndefined();
     expect(mainModelCall().requestReasoning).toEqual({ effort: 'low' });
   });
-
-  it('an old config (runtime.reasoning) runs with its migrated pick', async () => {
-    db.findAgentByKey.mockResolvedValue(agentWith({
-      runtime: { reasoning: { enabled: true, effort: 'medium', budgetTokens: 4096 } },
-    }));
-    await executeAgentChatLocal({ ...base });
-    expect(mainModelCall().reasoning).toEqual({ effort: 'medium', budgetTokens: 4096 });
-  });
 });
 
 describe('sub-agents', () => {

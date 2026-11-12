@@ -117,7 +117,7 @@ import {
 } from './agentHumanInTheLoop';
 import { createHitlCallLog } from './agentHitlExceptions';
 import { additionalModelKeys, applyAgentModelChoice, type AgentModelChoice } from './agentModelSelection';
-import { agentReasoningForModel, agentShowsReasoning, applyModelToConfig, migrateAgentReasoning } from './agentReasoning';
+import { agentReasoningForModel, agentShowsReasoning, applyModelToConfig } from './agentReasoning';
 import type { NormalizedReasoning } from '@/lib/services/models/reasoning';
 import {
     PAUSE_UNAVAILABLE_WARNING,
@@ -501,11 +501,9 @@ export async function buildLocalAgentRun(input: {
         : consoleIdentityCallerOf(runtimeContext, { agentKey, projectId, accountableUserId: input.accountableUserId });
     // Who the knowledge tools of this run, and of its sub-agents, read for.
     const kbCaller = knowledgeCallerOf({ identity: input.identity, runtimeContext });
-    // Old `runtime.reasoning` becomes the main model's own selection (a stored draft or a
-    // published snapshot may still carry it).
     // Bindings of a switched-off service (knowledge engine, MCP, tools, browser, web search, memory,
     // files, sandbox) are dropped here, so every builder below sees a config without them.
-    const config = await applyServiceAvailability(tenantId, migrateAgentReasoning(input.config), { agentKey });
+    const config = await applyServiceAvailability(tenantId, input.config, { agentKey });
     const hitl = resolveHitlConfig(config.humanInTheLoop);
     const hitlMode = resolveHitlRunMode(hitl, { unattended: input.unattended, canPause: input.canPause });
     // What the approval gates decide during the run, read back when the turn is stored.

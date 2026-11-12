@@ -70,7 +70,7 @@ const FULL_CONFIG: IAgentConfig = {
         planning: { mode: 'planner_executor', replanPolicy: 'every_n_steps', everyNSteps: 4 },
         limits: { maxToolCalls: 25, maxCostUsd: 1.5 },
         contextPilot: { enabled: true, excludeTools: ['knowledge_search'] },
-        reasoning: { enabled: true, level: 'high', effort: 'high' },
+        reasoning: { reflection: false },
         askUser: true,
     },
     structuredOutput: {
