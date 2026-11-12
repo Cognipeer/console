@@ -364,5 +364,24 @@ describeForEachProvider('Evaluation and red-team partial updates', (getDb) => {
       expect(updated).toMatchObject({ name: 'Dataset', description: 'Gold answers', source: 'manual', metadata: { owner: 'qa' }, itemCount: 1 });
       expect((await db.listEvaluationDatasetItems(id)).map((row) => row.id)).toEqual(['z1']);
     });
+
+    it('never returns an items field with a dataset header', async () => {
+      const db = getDb();
+      const id = String((await seed())._id);
+      // On MongoDB, put an `items` array on the stored document itself: a header is metadata only
+      // and must not carry it, whatever the document holds.
+      const mongo = db as unknown as {
+        constructor: { name: string };
+        getTenantDb?: () => { collection(name: string): { updateOne(filter: object, update: object): Promise<unknown> } };
+      };
+      if (mongo.constructor.name.includes('Mongo') && typeof mongo.getTenantDb === 'function') {
+        const { ObjectId } = await import('mongodb');
+        await mongo.getTenantDb().collection('evaluation_datasets').updateOne({ _id: new ObjectId(id) }, { $set: { items } });
+      }
+
+      expect(await db.findEvaluationDatasetById(id)).not.toHaveProperty('items');
+      const listed = await db.listEvaluationDatasets({ projectId: 'p1' });
+      expect(listed.find((row) => String(row._id) === id)).not.toHaveProperty('items');
+    });
   });
 });
