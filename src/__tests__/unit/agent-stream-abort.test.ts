@@ -42,7 +42,18 @@ const hoisted = vi.hoisted(() => ({
   invokeImpl: null as InvokeImpl | null,
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The fallback of the real `runWithTenantScope` for a database without `runWithTenant`.
+    runWithTenantScope: async (tenantDbName: string, fn: (db: unknown) => unknown) => {
+      const db = (await getDatabase()) as { switchToTenant: (name: string) => Promise<unknown> };
+      await db.switchToTenant(tenantDbName);
+      return fn(db);
+    },
+  };
+});
 
 vi.mock('@/lib/core/cluster', () => ({
   routeInstanceCall: hoisted.routeInstanceCall,

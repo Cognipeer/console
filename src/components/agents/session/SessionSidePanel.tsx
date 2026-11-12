@@ -5,7 +5,7 @@
  *
  * Everything here is derived from the turns the session already stores — no
  * extra fetch, no second source of truth. Tokens, cost and latency are
- * recorded per turn when the turn runs (`agentService.ts#persistSessionTurn`),
+ * recorded per turn when the turn runs (`agentPlaygroundRun.ts#persistSessionTurn`),
  * so a session reopened a week later shows the same numbers it showed live.
  * The one exception is the Activity tab, which reads the session's event log.
  */
