@@ -7,7 +7,6 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Db } from 'mongodb';
 import type {
   IWebhookDelivery,
   IWebhookEndpoint,
@@ -16,36 +15,18 @@ import type {
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { ensureTenantCollectionsIndexes } from './indexManifest';
 
 const newId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 24)}`;
 
 const toEndpoint = (doc: Record<string, unknown>): IWebhookEndpoint => ({ ...doc, _id: String(doc._id) }) as unknown as IWebhookEndpoint;
 const toDelivery = (doc: Record<string, unknown>): IWebhookDelivery => ({ ...doc, _id: String(doc._id) }) as unknown as IWebhookDelivery;
 
+/** Endpoints and deliveries are created by their first write; the manifest owns their indexes. */
+const WEBHOOK_COLLECTIONS = [COLLECTIONS.webhookEndpoints, COLLECTIONS.webhookDeliveries];
+
 export function WebhookMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class WebhookOps extends Base {
-    /** Per-process memo: the delivery indexes are ensured on the first write per tenant DB. */
-    private webhookIndexesReady = new Set<string>();
-
-    /**
-     * Ensured on the write path as well as in the boot manifest: the manifest
-     * is existence-guarded, so a collection created after the tenant's first
-     * bind would be swept by `(status, nextAttemptAt)` unindexed until a
-     * restart. Names/keys are IDENTICAL to the manifest's.
-     */
-    private async ensureWebhookIndexes(db: Db): Promise<void> {
-      const dbName = db.databaseName;
-      if (this.webhookIndexesReady.has(dbName)) return;
-      const coll = db.collection(COLLECTIONS.webhookDeliveries);
-      await Promise.all([
-        db.collection(COLLECTIONS.webhookEndpoints).createIndex({ tenantId: 1, projectId: 1 }, { name: 'idx_tenant_project' }),
-        coll.createIndex({ status: 1, nextAttemptAt: 1 }, { name: 'idx_status_nextAttemptAt' }),
-        coll.createIndex({ endpointId: 1, createdAt: -1 }, { name: 'idx_endpoint_createdAt' }),
-        coll.createIndex({ tenantId: 1, eventId: 1 }, { name: 'idx_tenant_eventId' }),
-        coll.createIndex({ status: 1, createdAt: 1 }, { name: 'idx_status_createdAt' }),
-      ]);
-      this.webhookIndexesReady.add(dbName);
-    }
 
     // ── Endpoints ────────────────────────────────────────────────
 
@@ -53,7 +34,7 @@ export function WebhookMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       endpoint: Omit<IWebhookEndpoint, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IWebhookEndpoint> {
       const db = this.getTenantDb();
-      await this.ensureWebhookIndexes(db).catch(() => undefined);
+      await ensureTenantCollectionsIndexes(db, WEBHOOK_COLLECTIONS);
       const now = new Date();
       const doc = { ...endpoint, projectId: endpoint.projectId ?? null, _id: newId('whk'), createdAt: now, updatedAt: now };
       await db.collection(COLLECTIONS.webhookEndpoints).insertOne(doc as never);
@@ -111,7 +92,7 @@ export function WebhookMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
     ): Promise<IWebhookDelivery[]> {
       if (deliveries.length === 0) return [];
       const db = this.getTenantDb();
-      await this.ensureWebhookIndexes(db).catch(() => undefined);
+      await ensureTenantCollectionsIndexes(db, WEBHOOK_COLLECTIONS);
       const docs = deliveries.map((delivery) => ({ ...delivery, projectId: delivery.projectId ?? null, _id: newId('whd') }));
       await db.collection(COLLECTIONS.webhookDeliveries).insertMany(docs as never[]);
       return docs as unknown as IWebhookDelivery[];
@@ -184,7 +165,7 @@ export function WebhookMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
 
     async cleanupWebhookDeliveryRetention(options: { olderThan: Date; batchSize?: number }): Promise<{ deletedCount: number }> {
       const db = this.getTenantDb();
-      await this.ensureWebhookIndexes(db).catch(() => undefined);
+      await ensureTenantCollectionsIndexes(db, WEBHOOK_COLLECTIONS);
       const coll = db.collection(COLLECTIONS.webhookDeliveries);
       // `$in` (not `$ne: 'pending'`) so the (status, createdAt) index serves it.
       const query = { status: { $in: ['delivered', 'failed'] }, createdAt: { $lt: options.olderThan } };

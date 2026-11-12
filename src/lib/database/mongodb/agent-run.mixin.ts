@@ -13,6 +13,7 @@ import type { AgentRunClass, IAgentRun } from '../provider.interface';
 import { AgentRunConflictError, AgentRunIdempotencyKeyTakenError } from '../provider/errors';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { ensureTenantCollectionsIndexes } from './indexManifest';
 import { toIdString, toObjectIdOrThrow } from './docIds';
 import { isDuplicateKeyError } from './errors';
 
@@ -79,66 +80,16 @@ const idempotencyLockId = (tenantId: string, projectId: string, key: string) => 
 export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class AgentRunOps extends Base {
     /**
-     * Per-process memoized index guarantee, mirroring `usage.mixin.ts`'s
-     * `ensureUsageDailyIndexes`: `indexManifest.ts`'s `TENANT_DB_INDEXES` is
-     * "existence-guarded" (only applies to collections that already exist,
-     * so a tenant that has never used a feature doesn't get an empty
-     * collection). That is fine for a plain performance index, but the
-     * `conversationId` partial unique index here is a correctness guarantee
-     * (§12.14) that must exist before the very first `createAgentRun` call
-     * for a brand-new tenant — which is exactly the call that would
-     * otherwise create the collection for the first time. Ensuring it here,
-     * on the write path itself, closes that gap regardless of manifest
-     * timing.
+     * The `conversationId` partial unique index is a correctness guarantee
+     * (§12.14) that must exist before the very first `createAgentRun` of a
+     * brand-new tenant, which is exactly the call that creates the collection;
+     * the boot pass is existence-guarded, so the write path ensures the
+     * manifest's indexes itself (memoised per tenant database).
      */
-    private agentRunsIndexReady = new Set<string>();
-
     private async ensureAgentRunsIndexes(): Promise<void> {
-      const db = this.getTenantDb();
-      const dbName = db.databaseName;
-      if (this.agentRunsIndexReady.has(dbName)) return;
-      const col = db.collection(COLLECTIONS.agentRuns);
-      // Each index on its own: one the backend rejects must not take the
-      // others down with it. The partial unique index is a belt on top of the
-      // lock documents below — Cosmos DB (Mongo API) rejects partial indexes,
-      // and the one-active-run guarantee must not depend on it.
-      const specs: Array<[Record<string, 1 | -1>, Record<string, unknown>, boolean]> = [
-        [{ conversationId: 1 }, {
-          name: 'idx_agent_runs_active_per_conversation',
-          unique: true,
-          partialFilterExpression: { status: { $in: ['queued', 'running'] } },
-        }, false],
-        [{ status: 1, heartbeatAt: 1 }, { name: 'idx_status_heartbeat' }, true],
-        [{ status: 1, createdAt: 1 }, { name: 'idx_status_createdAt' }, true],
-        [{ expiresAt: 1 }, { name: 'idx_expiresAt' }, true],
-        [{ tenantId: 1, projectId: 1, idempotencyKey: 1 }, { name: 'idx_tenant_project_idempotencyKey' }, true],
-        [{ tenantId: 1, projectId: 1, agentKey: 1, createdAt: -1 }, { name: 'idx_tenant_project_agent_createdAt' }, true],
-        // Per-class queue visibility, the deferred dispatcher and the expiry sweep.
-        [{ tenantId: 1, status: 1, runClass: 1, createdAt: 1 }, { name: 'idx_tenant_status_class_createdAt' }, true],
-        // The scheduled-run promotion sweep. Plain index: Cosmos rejects partial ones.
-        [{ status: 1, notBefore: 1 }, { name: 'idx_status_notBefore' }, true],
-        [{ tenantId: 1, triggerId: 1, createdAt: -1 }, { name: 'idx_tenant_trigger_createdAt' }, true],
-        // The reconciler's sweep for callbacks that never settled.
-        [{ callbackStatus: 1, updatedAt: 1 }, { name: 'idx_callbackStatus_updatedAt' }, true],
-      ];
-      let requiredOk = true;
-      for (const [keys, options, required] of specs) {
-        try {
-          await col.createIndex(keys, options);
-        } catch (error) {
-          if (required) requiredOk = false;
-          logger.warn('Could not create agent_runs index', { dbName, index: options.name, required, error });
-        }
-      }
-      try {
-        await db.collection(COLLECTIONS.agentRunLocks).createIndex({ expiresAt: 1 }, { name: 'idx_expiresAt' });
-      } catch (error) {
-        logger.warn('Could not create agent_run_locks index', { dbName, error });
-      }
-      // Only remembered once the indexes the queries rely on exist, so a
-      // transient failure is retried on the next write instead of never.
-      if (requiredOk) this.agentRunsIndexReady.add(dbName);
+      await ensureTenantCollectionsIndexes(this.getTenantDb(), [COLLECTIONS.agentRuns, COLLECTIONS.agentRunLocks]);
     }
+
 
     /**
      * Take a lock document keyed by `_id`. `_id` uniqueness is the one

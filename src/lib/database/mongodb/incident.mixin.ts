@@ -4,11 +4,12 @@
  * Incidents are created when alerts fire and track resolution lifecycle.
  */
 
-import { ObjectId, type Db } from 'mongodb';
+import { ObjectId } from 'mongodb';
 import type { IIncident, IIncidentStatRow, IncidentSort, IncidentStatus, IncidentSeverity, AlertModule } from '../provider.interface';
 import { foldedRegexSource } from '@/lib/shared/searchFold';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { ensureTenantCollectionIndexes } from './indexManifest';
 import { clampLimit, clampSkip } from '../provider/paging';
 
 const INCIDENT_STATUSES: IncidentStatus[] = ['open', 'acknowledged', 'investigating', 'resolved', 'closed'];
@@ -25,32 +26,12 @@ function idFilter(id: string, projectId?: string): Record<string, unknown> | nul
 
 export function IncidentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class IncidentOps extends Base {
-    /** Per-process memo: incident indexes are ensured on the first write per tenant DB. */
-    private incidentIndexesReady = new Set<string>();
-
-    /**
-     * Ensured on the write path as well as in the boot manifest (which is
-     * existence-guarded). Names/keys are IDENTICAL to the manifest's.
-     */
-    private async ensureIncidentIndexes(db: Db): Promise<void> {
-      const dbName = db.databaseName;
-      if (this.incidentIndexesReady.has(dbName)) return;
-      const coll = db.collection(COLLECTIONS.incidents);
-      await Promise.all([
-        coll.createIndex({ projectId: 1, status: 1, firedAt: -1 }, { name: 'idx_incidents_project_status_firedAt' }),
-        coll.createIndex({ ruleId: 1, entityKey: 1 }, { name: 'idx_incidents_rule_entity' }),
-        coll.createIndex({ projectId: 1, entityKey: 1, firedAt: -1 }, { name: 'idx_incidents_project_entity_firedAt' }),
-        coll.createIndex({ alertEventId: 1 }, { name: 'idx_incidents_alertEventId' }),
-        coll.createIndex({ tenantId: 1, projectId: 1, updatedAt: 1 }, { name: 'idx_incidents_tenant_project_updatedAt' }),
-      ]);
-      this.incidentIndexesReady.add(dbName);
-    }
 
     async createIncident(
       incident: Omit<IIncident, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IIncident> {
       const db = this.getTenantDb();
-      await this.ensureIncidentIndexes(db).catch(() => undefined);
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.incidents);
       const now = new Date();
       const doc = { ...incident, createdAt: now, updatedAt: now };
       const result = await db

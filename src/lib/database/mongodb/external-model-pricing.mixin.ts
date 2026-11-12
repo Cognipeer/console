@@ -9,7 +9,8 @@
 
 import type { IExternalModelPricing, IExternalPricingVersion, IModelPricing } from '../provider.interface';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { ensureTenantCollectionIndexes } from './indexManifest';
 
 interface ExternalModelPricingDoc {
   tenantId: string;
@@ -28,22 +29,6 @@ export function ExternalModelPricingMixin<TBase extends Constructor<MongoDBProvi
   Base: TBase,
 ) {
   return class ExternalModelPricingOps extends Base {
-    private externalPricingIndexReady = new Set<string>();
-
-    private async ensureExternalPricingIndexes(): Promise<void> {
-      const db = this.getTenantDb();
-      const dbName = db.databaseName;
-      if (this.externalPricingIndexReady.has(dbName)) return;
-      this.externalPricingIndexReady.add(dbName);
-      try {
-        await db.collection(COLLECTIONS.externalModelPricing).createIndex(
-          { tenantId: 1, projectId: 1, normalizedName: 1 },
-          { unique: true, name: 'uniq_external_model_pricing' },
-        );
-      } catch (error) {
-        logger.warn('Could not ensure external_model_pricing index', { dbName, error });
-      }
-    }
 
     async upsertExternalModelPricing(entry: {
       tenantId: string;
@@ -53,8 +38,8 @@ export function ExternalModelPricingMixin<TBase extends Constructor<MongoDBProvi
       versions?: IExternalPricingVersion[];
       updatedBy?: string;
     }): Promise<IExternalModelPricing> {
-      await this.ensureExternalPricingIndexes();
       const db = this.getTenantDb();
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.externalModelPricing);
       const col = db.collection<ExternalModelPricingDoc>(COLLECTIONS.externalModelPricing);
       const modelName = entry.modelName.trim();
       const filter = {

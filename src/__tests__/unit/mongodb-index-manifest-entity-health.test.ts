@@ -1,13 +1,10 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { TENANT_DB_INDEXES } from '@/lib/database/mongodb/indexManifest';
 
 const nameOf = (collection: string, name: string) =>
   (TENANT_DB_INDEXES[collection] ?? []).find((index) => index.options.name === name);
-
-const mixinSource = (file: string) =>
-  readFileSync(path.join(process.cwd(), 'src/lib/database/mongodb', file), 'utf8');
 
 describe('index manifest: entity health collections', () => {
   it('entity_metrics has the unique dimension index, the bucket indexes and the TTL', () => {
@@ -43,19 +40,14 @@ describe('index manifest: entity health collections', () => {
     expect(nameOf('alert_deliveries', 'idx_alert_deliveries_rule_attemptAt')?.key).toEqual({ tenantId: 1, ruleId: 1, attemptAt: -1 });
   });
 
-  it('the mixins that ensure these indexes on first write use the same names as the manifest', () => {
-    // The manifest is existence-guarded, so each mixin creates its own indexes on
-    // the write path; a name/key mismatch would throw when both run.
-    const sources: Record<string, string> = {
-      entity_metrics: mixinSource('entity-metrics.mixin.ts'),
-      alert_states: mixinSource('alert-state.mixin.ts'),
-      incidents: mixinSource('incident.mixin.ts'),
-      alert_deliveries: mixinSource('alert.mixin.ts'),
-    };
-    for (const [collection, source] of Object.entries(sources)) {
-      for (const index of TENANT_DB_INDEXES[collection]) {
-        expect(source, `${collection}.${index.options.name}`).toContain(`name: '${index.options.name}'`);
-      }
-    }
+  it('no MongoDB mixin defines an index of its own: the manifest is the only source', () => {
+    // A mixin whose collection is created by its first write calls
+    // ensureTenantCollectionIndexes(db, name) instead, so a name or key can
+    // never disagree between the boot pass and the write path.
+    const dir = path.join(process.cwd(), 'src/lib/database/mongodb');
+    const offenders = readdirSync(dir)
+      .filter((file) => file.endsWith('.ts') && file !== 'indexManifest.ts')
+      .filter((file) => /\.createIndex\(/.test(readFileSync(path.join(dir, file), 'utf8')));
+    expect(offenders).toEqual([]);
   });
 });

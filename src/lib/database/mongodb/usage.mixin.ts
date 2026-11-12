@@ -10,6 +10,7 @@ import { ObjectId, type Filter } from 'mongodb';
 import type { IUsageDaily, IUsageDailyIncrement } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { ensureTenantCollectionIndexes } from './indexManifest';
 
 const COUNTER_FIELDS = [
   'requests',
@@ -45,33 +46,8 @@ export function UsageRollupMixin<TBase extends Constructor<MongoDBProviderBase>>
         // attribution tags) — drop v2, which would otherwise reject rows
         // differing only in metadataKey.
         await col.dropIndex('uniq_usage_daily_dims_v2').catch(() => undefined);
-        await col.createIndex(
-          {
-            tenantId: 1,
-            projectId: 1,
-            userId: 1,
-            apiTokenId: 1,
-            source: 1,
-            service: 1,
-            refKey: 1,
-            agentKey: 1,
-            metadataKey: 1,
-            day: 1,
-          },
-          { unique: true, name: 'uniq_usage_daily_dims_v3' },
-        );
-        await col.createIndex(
-          { tenantId: 1, day: -1 },
-          { name: 'idx_usage_daily_day' },
-        );
-        await col.createIndex(
-          { tenantId: 1, userId: 1, day: -1 },
-          { name: 'idx_usage_daily_user_day' },
-        );
-        await col.createIndex(
-          { tenantId: 1, agentKey: 1, day: -1 },
-          { name: 'idx_usage_daily_agent_day' },
-        );
+        // The v3 unique key and the report indexes come from the manifest.
+        await ensureTenantCollectionIndexes(db, COLLECTIONS.usageDaily);
       } catch (error) {
         logger.warn('Could not ensure usage_daily indexes', { dbName, error });
       }

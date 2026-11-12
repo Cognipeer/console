@@ -13,13 +13,21 @@ import type {
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { ensureTenantCollectionsIndexes } from './indexManifest';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 
 export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class TracingOps extends Base {
-    private readonly tracingIndexInit = new Map<string, Promise<void>>();
-    private readonly tracingIndexesReady = new Set<string>();
     private readonly threadBackfillTasks = new Map<string, Promise<void>>();
+
+    /** Sessions, events and threads are created by their first write; the manifest owns their indexes. */
+    private async ensureTracingIndexes(): Promise<void> {
+      await ensureTenantCollectionsIndexes(this.getTenantDb(), [
+        COLLECTIONS.agentTracingSessions,
+        COLLECTIONS.agentTracingEvents,
+        COLLECTIONS.agentTracingThreads,
+      ]);
+    }
 
     private buildAgentTracingDashboardMatch(
       filters?: { from?: string; to?: string },
@@ -84,99 +92,6 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
           daily: [],
         },
       };
-    }
-
-    private async ensureTracingIndexes(): Promise<void> {
-      const db = this.getTenantDb();
-      const dbName = db.databaseName;
-
-      if (this.tracingIndexesReady.has(dbName)) {
-        return;
-      }
-
-      const existingPromise = this.tracingIndexInit.get(dbName);
-      if (existingPromise) {
-        await existingPromise;
-        return;
-      }
-
-      // Upserting on (projectId, sessionId) only collapses concurrent inserts if
-      // the key is unique — without this two simultaneous /start requests can
-      // still both create a document, and every aggregation counts the session
-      // twice. Best-effort: a tenant that already accumulated duplicates cannot
-      // build it, and that must not take the rest of the tracing indexes (or the
-      // request) down. Such a tenant keeps the old double-count until its
-      // duplicates are merged.
-      const uniqueSessionIndexPromise = db
-        .collection(COLLECTIONS.agentTracingSessions)
-        .createIndex({ projectId: 1, sessionId: 1 }, { name: 'uniq_project_sessionId', unique: true })
-        .catch((error) => {
-          logger.warn('Could not create unique tracing session index; duplicates present?', {
-            dbName,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        });
-
-      const setupPromise = Promise.all([
-        uniqueSessionIndexPromise,
-        db
-          .collection(COLLECTIONS.agentTracingSessions)
-          .createIndex({ sessionId: 1 }, { name: 'idx_sessionId' }),
-        db
-          .collection(COLLECTIONS.agentTracingSessions)
-          .createIndex({ projectId: 1, sessionId: 1 }, { name: 'idx_project_sessionId' }),
-        db
-          .collection(COLLECTIONS.agentTracingSessions)
-          .createIndex({ projectId: 1, startedAt: -1 }, { name: 'idx_project_startedAt' }),
-        db
-          .collection(COLLECTIONS.agentTracingSessions)
-          .createIndex({ projectId: 1, threadId: 1, startedAt: -1 }, { name: 'idx_project_thread_startedAt' }),
-        db
-          .collection(COLLECTIONS.agentTracingSessions)
-          .createIndex({ projectId: 1, status: 1, startedAt: -1 }, { name: 'idx_project_status_startedAt' }),
-        db
-          .collection(COLLECTIONS.agentTracingSessions)
-          .createIndex({ projectId: 1, agentName: 1, startedAt: -1 }, { name: 'idx_project_agent_startedAt' }),
-        // Stale-session finalizer: status 'in_progress' and updatedAt older than a
-        // cutoff, tenant-wide (the project-first indexes above cannot serve it).
-        db
-          .collection(COLLECTIONS.agentTracingSessions)
-          .createIndex({ status: 1, updatedAt: 1 }, { name: 'idx_status_updatedAt' }),
-        db
-          .collection(COLLECTIONS.agentTracingEvents)
-          .createIndex({ sessionId: 1, sequence: 1, timestamp: 1 }, { name: 'idx_session_sequence_timestamp' }),
-        db
-          .collection(COLLECTIONS.agentTracingEvents)
-          .createIndex({ projectId: 1, sessionId: 1, sequence: 1, timestamp: 1 }, { name: 'idx_project_session_sequence_timestamp' }),
-        db
-          .collection(COLLECTIONS.agentTracingEvents)
-          .createIndex({ projectId: 1, sessionId: 1, id: 1 }, { name: 'idx_project_session_eventId' }),
-        db
-          .collection(COLLECTIONS.agentTracingThreads)
-          .createIndex({ threadId: 1 }, { name: 'idx_threadId' }),
-        db
-          .collection(COLLECTIONS.agentTracingThreads)
-          .createIndex({ projectId: 1, threadId: 1 }, { name: 'idx_project_threadId' }),
-        db
-          .collection(COLLECTIONS.agentTracingThreads)
-          .createIndex({ projectId: 1, startedAt: -1 }, { name: 'idx_project_startedAt' }),
-        db
-          .collection(COLLECTIONS.agentTracingThreads)
-          .createIndex({ projectId: 1, latestStatus: 1, startedAt: -1 }, { name: 'idx_project_latestStatus_startedAt' }),
-      ])
-        .then(() => {
-          this.tracingIndexesReady.add(dbName);
-        })
-        .catch((error) => {
-          logger.warn('Failed to ensure agent tracing indexes', { dbName, error });
-          throw error;
-        })
-        .finally(() => {
-          this.tracingIndexInit.delete(dbName);
-        });
-
-      this.tracingIndexInit.set(dbName, setupPromise);
-      await setupPromise;
     }
 
     private triggerAgentTracingThreadBackfill(projectId?: string): void {

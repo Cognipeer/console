@@ -24,6 +24,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { ensureTenantCollectionIndexes } from './indexManifest';
 
 type TriggerDoc = Omit<IAgentTriggerBase, '_id'> & AgentTriggerTypeSettings & { _id: ObjectId };
 type DeliveryDoc = Omit<IAgentTriggerDelivery, '_id'> & { _id: ObjectId };
@@ -53,51 +54,6 @@ function objectIdOrNull(id: string): ObjectId | null {
 
 export function AgentTriggerMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class AgentTriggerOps extends Base {
-    private agentTriggersIndexReady = new Set<string>();
-
-    private async ensureAgentTriggersIndexes(): Promise<void> {
-      const db = this.getTenantDb();
-      const dbName = db.databaseName;
-      if (this.agentTriggersIndexReady.has(dbName)) return;
-      const col = db.collection(COLLECTIONS.agentTriggers);
-      let ok = true;
-      for (const [keys, name] of [
-        [{ tenantId: 1, projectId: 1, agentKey: 1 }, 'idx_tenant_project_agent'],
-        [{ enabled: 1, nextFireAt: 1 }, 'idx_enabled_nextFireAt'],
-        [{ 'webhook.hookId': 1 }, 'idx_webhook_hookId'],
-        [{ 'connector.subscriptionId': 1 }, 'idx_connector_subscription'],
-      ] as Array<[Record<string, 1>, string]>) {
-        try {
-          await col.createIndex(keys, { name });
-        } catch (error) {
-          ok = false;
-          logger.warn('Could not create agent_triggers index', { dbName, index: name, error });
-        }
-      }
-      if (ok) this.agentTriggersIndexReady.add(dbName);
-    }
-
-    private agentTriggerDeliveriesIndexReady = new Set<string>();
-
-    private async ensureAgentTriggerDeliveriesIndexes(): Promise<void> {
-      const db = this.getTenantDb();
-      const dbName = db.databaseName;
-      if (this.agentTriggerDeliveriesIndexReady.has(dbName)) return;
-      const col = db.collection(COLLECTIONS.agentTriggerDeliveries);
-      let ok = true;
-      for (const [keys, name] of [
-        [{ tenantId: 1, triggerId: 1, receivedAt: -1 }, 'idx_tenant_trigger_receivedAt'],
-        [{ expiresAt: 1 }, 'idx_expiresAt'],
-      ] as Array<[Record<string, 1 | -1>, string]>) {
-        try {
-          await col.createIndex(keys, { name });
-        } catch (error) {
-          ok = false;
-          logger.warn('Could not create agent_trigger_deliveries index', { dbName, index: name, error });
-        }
-      }
-      if (ok) this.agentTriggerDeliveriesIndexReady.add(dbName);
-    }
 
     private agentTriggerDeliveries() {
       return this.getTenantDb().collection<DeliveryDoc>(COLLECTIONS.agentTriggerDeliveries);
@@ -108,7 +64,7 @@ export function AgentTriggerMixin<TBase extends Constructor<MongoDBProviderBase>
     }
 
     async createAgentTrigger(record: NewAgentTrigger): Promise<IAgentTrigger> {
-      await this.ensureAgentTriggersIndexes();
+      await ensureTenantCollectionIndexes(this.getTenantDb(), COLLECTIONS.agentTriggers);
       const now = new Date();
       const doc: TriggerDoc = { ...withDefinedConnector(record), _id: new ObjectId(), createdAt: now, updatedAt: now };
       await this.agentTriggers().insertOne(doc);
@@ -132,7 +88,7 @@ export function AgentTriggerMixin<TBase extends Constructor<MongoDBProviderBase>
     async updateAgentTrigger(id: string, tenantId: string, projectId: string, patch: AgentTriggerPatch): Promise<IAgentTrigger | null> {
       const _id = objectIdOrNull(id);
       if (!_id) return null;
-      await this.ensureAgentTriggersIndexes();
+      await ensureTenantCollectionIndexes(this.getTenantDb(), COLLECTIONS.agentTriggers);
       const set: Record<string, unknown> = { updatedAt: new Date() };
       for (const [key, value] of Object.entries(withDefinedConnector(patch))) {
         if (value !== undefined) set[key] = value;
@@ -213,7 +169,7 @@ export function AgentTriggerMixin<TBase extends Constructor<MongoDBProviderBase>
     }
 
     async listAgentTriggersBySubscription(subscriptionId: string): Promise<IAgentTrigger[]> {
-      await this.ensureAgentTriggersIndexes();
+      await ensureTenantCollectionIndexes(this.getTenantDb(), COLLECTIONS.agentTriggers);
       const docs = await this.agentTriggers()
         .find({ 'connector.subscriptionId': subscriptionId } as Filter<TriggerDoc>)
         .sort({ createdAt: 1, _id: 1 })
@@ -222,7 +178,7 @@ export function AgentTriggerMixin<TBase extends Constructor<MongoDBProviderBase>
     }
 
     async countAgentTriggersBySubscription(subscriptionId: string, opts?: { enabledOnly?: boolean }): Promise<number> {
-      await this.ensureAgentTriggersIndexes();
+      await ensureTenantCollectionIndexes(this.getTenantDb(), COLLECTIONS.agentTriggers);
       return this.agentTriggers().countDocuments({
         'connector.subscriptionId': subscriptionId,
         ...(opts?.enabledOnly ? { enabled: true } : {}),
@@ -232,7 +188,7 @@ export function AgentTriggerMixin<TBase extends Constructor<MongoDBProviderBase>
     // ── Webhook deliveries ────────────────────────────────────────
 
     async recordAgentTriggerDelivery(record: Omit<IAgentTriggerDelivery, '_id'>): Promise<IAgentTriggerDelivery> {
-      await this.ensureAgentTriggerDeliveriesIndexes();
+      await ensureTenantCollectionIndexes(this.getTenantDb(), COLLECTIONS.agentTriggerDeliveries);
       const doc: DeliveryDoc = { ...record, _id: new ObjectId() };
       await this.agentTriggerDeliveries().insertOne(doc);
       return { ...doc, _id: doc._id.toString() };
@@ -264,7 +220,7 @@ export function AgentTriggerMixin<TBase extends Constructor<MongoDBProviderBase>
     }
 
     async cleanupAgentTriggerDeliveryRetention(options: { olderThan: Date; batchSize: number }): Promise<{ deletedCount: number }> {
-      await this.ensureAgentTriggerDeliveriesIndexes();
+      await ensureTenantCollectionIndexes(this.getTenantDb(), COLLECTIONS.agentTriggerDeliveries);
       const col = this.agentTriggerDeliveries();
       const ids = await col.find({ expiresAt: { $lt: options.olderThan } }).project({ _id: 1 }).limit(Math.max(1, options.batchSize)).toArray();
       if (ids.length === 0) return { deletedCount: 0 };

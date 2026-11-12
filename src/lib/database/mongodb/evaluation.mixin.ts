@@ -32,6 +32,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, escapeRegex } from './base';
+import { ensureTenantCollectionIndexes } from './indexManifest';
 import { definedFields } from './definedFields';
 import { mongoLabelCandidates } from '../provider/labelMatch';
 import { isDuplicateKeyError } from './errors';
@@ -272,40 +273,6 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
 
     // ── Dataset items (separate collection) ─────────────────────────
 
-    /** Per-tenant-DB memo so index creation runs once per process. */
-    private evalItemIndexesReady = new Set<string>();
-    private evalItemIndexInit = new Map<string, Promise<void>>();
-
-    /**
-     * Indexes are ensured on the WRITE path (not only the boot manifest)
-     * because the boot-time tenant index pass is existence-guarded — a
-     * collection created after the tenant's first bind would stay unindexed
-     * until the next process restart, and the unique (datasetId, id) guard
-     * must hold from the very first insert.
-     */
-    private async ensureDatasetItemIndexes(db: Db): Promise<void> {
-      const dbName = db.databaseName;
-      if (this.evalItemIndexesReady.has(dbName)) return;
-      const existing = this.evalItemIndexInit.get(dbName);
-      if (existing) {
-        await existing;
-        return;
-      }
-      const coll = db.collection(COLLECTIONS.evaluationDatasetItems);
-      const setup = Promise.all([
-        coll.createIndex({ datasetId: 1, position: 1 }, { name: 'idx_dataset_position' }),
-        coll.createIndex({ datasetId: 1, id: 1 }, { name: 'uniq_dataset_itemId', unique: true }),
-      ])
-        .then(() => {
-          this.evalItemIndexesReady.add(dbName);
-        })
-        .finally(() => {
-          this.evalItemIndexInit.delete(dbName);
-        });
-      this.evalItemIndexInit.set(dbName, setup);
-      await setup;
-    }
-
     /** Dataset header (tenant/project) or throw — item writes need both. */
     private async requireDatasetHeader(
       db: Db,
@@ -340,7 +307,7 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       opts?: { ignoreDuplicates?: boolean },
     ): Promise<void> {
       if (items.length === 0) return;
-      await this.ensureDatasetItemIndexes(db);
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.evaluationDatasetItems);
       const now = new Date();
       const docs = items.map((item, i) => {
         // System fields LAST so a hostile/extra field on the item can never
@@ -445,7 +412,7 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
     ): Promise<void> {
       assertUniqueItemIds(items);
       const datasetId = String(dataset._id);
-      await this.ensureDatasetItemIndexes(db);
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.evaluationDatasetItems);
       await db.collection(COLLECTIONS.evaluationDatasetItems).deleteMany({ datasetId });
       await this.insertDatasetItems(db, datasetId, dataset.tenantId, dataset.projectId, items, 0);
       // Clear any legacy embedded array and stamp the count from the actual

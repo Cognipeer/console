@@ -16,7 +16,8 @@ import type {
   ModelProviderType,
 } from '../provider.interface';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { ensureTenantCollectionIndexes } from './indexManifest';
 
 const PRICING_NUMBER_KEYS = [
   'inputTokenPer1M',
@@ -50,37 +51,14 @@ function sanitizePricing(pricing: IModelPricing): IModelPricing {
 
 export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class ModelOps extends Base {
-    private modelIndexesReady = new Set<string>();
 
     // ── Model CRUD ───────────────────────────────────────────────────
-
-    /**
-     * Best-effort: create the unique `key` index so duplicate model keys fail
-     * at the DB layer (matching the SQLite schema's `idx_models_key`). Never
-     * throws — pre-existing duplicates are logged and the index is skipped.
-     */
-    private async ensureModelIndexes(): Promise<void> {
-      const db = this.getTenantDb();
-      const dbName = db.databaseName;
-      if (this.modelIndexesReady.has(dbName)) return;
-      this.modelIndexesReady.add(dbName);
-      try {
-        await db
-          .collection(COLLECTIONS.models)
-          .createIndex({ key: 1 }, { unique: true, name: 'uniq_model_key' });
-      } catch (error) {
-        logger.warn('Could not ensure unique model key index (pre-existing duplicates?)', {
-          dbName,
-          error,
-        });
-      }
-    }
 
     async createModel(
       model: Omit<IModel, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IModel> {
-      await this.ensureModelIndexes();
       const db = this.getTenantDb();
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.models);
       const now = new Date();
       const pricing = sanitizePricing(model.pricing);
 
