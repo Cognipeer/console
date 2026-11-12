@@ -83,18 +83,7 @@ describe('declaredGuardrailHooks', () => {
     createdBy: 'u1',
   } as GuardrailView;
 
-  const legacyPolicy = {
-    pii: { enabled: true, action: 'block', categories: { email: true } },
-  };
-
-  it('lifts a legacy row to input.pre + output.pre', () => {
-    // What the row was bindable to before the hook plane. Reporting "nothing"
-    // would disable every checkbox on the guardrails most consumers are on.
-    const legacy = { ...base, policy: legacyPolicy } as GuardrailView;
-    expect(declaredGuardrailHooks(legacy)).toEqual(['input.pre', 'output.pre']);
-  });
-
-  it('declares nothing for a legacy row whose policy enables no policy', () => {
+  it('declares nothing for a row with no hooks', () => {
     // Honest, not a bug: such a guardrail evaluates nothing wherever it is
     // bound, and the UI greys out every hook rather than promising protection.
     expect(declaredGuardrailHooks(base)).toEqual([]);
@@ -103,7 +92,6 @@ describe('declaredGuardrailHooks', () => {
   it('needs BOTH an enabled binding and an enabled policy naming the hook', () => {
     const authored: GuardrailView = {
       ...base,
-      hooksVersion: 1,
       hooks: {
         contractVersion: 2,
         policies: [
@@ -136,11 +124,10 @@ describe('declaredGuardrailHooks', () => {
     expect(declaredGuardrailHooks(authored)).toEqual(['input.pre']);
   });
 
-  it('treats a version marker with no usable policies as a legacy row', () => {
-    // The same fail-safe `ensureHooks` applies: a write that dropped one column
-    // must not turn into a guardrail that declares nothing.
-    const broken = { ...base, policy: legacyPolicy, hooksVersion: 3 } as GuardrailView;
-    expect(declaredGuardrailHooks(broken)).toEqual(['input.pre', 'output.pre']);
+  it('declares nothing when the config has no usable policies', () => {
+    // A config with no `policies` array enforces nothing, so it declares nothing.
+    const broken = { ...base, hooks: { contractVersion: 2, bindings: {} } } as unknown as GuardrailView;
+    expect(declaredGuardrailHooks(broken)).toEqual([]);
   });
 });
 

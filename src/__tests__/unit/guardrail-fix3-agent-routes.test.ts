@@ -103,7 +103,6 @@ vi.mock('@/lib/services/agents/agentService', () => ({
 
 vi.mock('@/server/api/plugins/guardrails', () => ({
   guardrailByKeyInScope: hoisted.guardrailByKeyInScope,
-  toGuardrailRecord: (view: unknown) => view,
 }));
 
 import { getDatabase } from '@/lib/database';

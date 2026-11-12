@@ -22629,28 +22629,18 @@ components:
       type: object
       required:
         - name
-        - type
-      description: Create a guardrail definition.
+      description: Create a guardrail definition. What it enforces is described by `hooks`; a create without `hooks` stores an empty configuration that enforces nothing until policies are added. The retired `policy`, `customPrompt` and `type` (other than `preset`) fields are refused with `400`.
       properties:
         name:
           type: string
           description: Guardrail name.
-        type:
-          type: string
-          enum:
-            - preset
-            - custom
-          description: Guardrail type.
         action:
           type: string
           enum:
             - block
             - warn
             - flag
-          description: Action on violation. Defaults to `block`.
-        customPrompt:
-          type: string
-          description: LLM rule text. Required for `custom` guardrails.
+          description: Action on violation for a policy that states none of its own. Defaults to `block`.
         description:
           type: string
         enabled:
@@ -22661,14 +22651,21 @@ components:
           enum:
             - open
             - closed
-          description: Behaviour when the check errors.
+          description: Behaviour when the check errors. Defaults to `closed` when `hooks` runs a PII or prompt-shield policy, otherwise `open`.
         modelKey:
           type: string
-          description: Model used to evaluate the rule. Required for `custom` guardrails and for LLM-backed policy checks.
-        policy:
+          description: Default model for LLM-backed policies that name none of their own.
+        mode:
+          type: string
+          enum:
+            - enforce
+            - monitor
+            - disabled
+          description: "`enforce` blocks, `monitor` records what would have happened, `disabled` runs nothing. Defaults to `enforce`."
+        hooks:
           type: object
           additionalProperties: true
-          description: Preset policy config (moderation, promptShield, wordFilter, etc.).
+          description: The hook configuration (`policies`, `bindings`, `stream`, `blockedMessage`, `visibility`, `shortCircuit`).
     GuardEvaluateRequest:
       type: object
       required:
@@ -22767,9 +22764,16 @@ components:
             - closed
         modelKey:
           type: string
+        mode:
+          type: string
+          enum:
+            - enforce
+            - monitor
+            - disabled
         policy:
           type: object
           additionalProperties: true
+          description: Read-only summary derived from `hooks` (which policy families are enabled). Not stored and not accepted on create or update; describe what the guardrail enforces in `hooks.policies`.
         createdAt:
           type: string
           format: date-time
@@ -22778,7 +22782,7 @@ components:
           format: date-time
     GuardUpdateInput:
       type: object
-      description: Partial update of a guardrail definition.
+      description: Partial update of a guardrail definition. The retired `policy`, `customPrompt` and `type` (other than `preset`) fields are refused with `400`.
       properties:
         name:
           type: string
@@ -22788,8 +22792,6 @@ components:
             - block
             - warn
             - flag
-        customPrompt:
-          type: string
         description:
           type: string
         enabled:
@@ -22801,9 +22803,16 @@ components:
             - closed
         modelKey:
           type: string
-        policy:
+        mode:
+          type: string
+          enum:
+            - enforce
+            - monitor
+            - disabled
+        hooks:
           type: object
           additionalProperties: true
+          description: The hook configuration. Replaces the stored one.
     GuardrailHookEvaluateRequest:
       type: object
       required:
@@ -22957,9 +22966,6 @@ components:
               properties:
                 contractVersion:
                   type: integer
-                authored:
-                  type: boolean
-                  description: "`false` when the hook config was derived from legacy columns on read."
                 servable:
                   type: array
                   description: The hooks `POST /guardrails/hooks/evaluate` will actually evaluate against this guardrail.

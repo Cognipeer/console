@@ -1,5 +1,5 @@
 /**
- * The guardrail service — CRUD, plus the LEGACY DOOR into the hook plane.
+ * The guardrail service — CRUD, plus the text-in, result-out DOOR into the hook plane.
  *
  * `evaluateGuardrail` no longer evaluates anything. It resolves the record,
  * builds a `HookCall` and hands it to `runHook`; detection, ordering, fail
@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
-import type { IGuardrail, GuardrailType } from '@/lib/database';
+import type { IGuardrail, IGuardrailPresetPolicy, GuardrailType } from '@/lib/database';
 import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
 import { generateUniqueSlugKey } from './keyGeneration';
 import type {
@@ -31,12 +31,8 @@ import type {
   GuardrailEvaluationResult,
 } from './types';
 import {
-  PII_CATEGORIES,
-  MODERATION_CATEGORIES,
-  WORD_FILTER_BUILTIN_LISTS,
-} from './types';
-import {
   GUARDRAIL_CONTRACT_VERSION,
+  emptyHooksConfig,
   normalizeHooksConfig,
   textSubject,
 } from './hooks/contract';
@@ -52,20 +48,54 @@ import { invalidateGuardrailCache } from './hooks/recordCache';
 
 // ── Serialization ─────────────────────────────────────────────────────────
 
+/**
+ * A read-only, legacy-shaped summary of which policy families a hook config
+ * enables. Nothing stored and nothing the engine reads: it exists for consumers
+ * that decide from `view.policy.<family>.enabled` (the AI App Gateway's
+ * guardrail picker). Flags only; the PII categories live on the referenced PII
+ * policy, so `pii.categories` is empty except for the `apiKey` a secrets
+ * policy stands for.
+ */
+function summarizePolicyFamilies(
+  hooks: GuardrailHooksConfig | undefined,
+  action: IGuardrail['action'],
+): IGuardrailPresetPolicy | undefined {
+  if (!hooks) return undefined;
+  const enabled = (family: PolicyFamily): boolean =>
+    (hooks.policies ?? []).some((policy) => policy.enabled && policy.family === family);
+  return {
+    pii: {
+      enabled: enabled('pii') || enabled('secrets'),
+      action,
+      categories: enabled('secrets') ? { apiKey: true } : {},
+    },
+    wordFilter: { enabled: enabled('word_filter') },
+    moderation: { enabled: enabled('moderation'), categories: {} },
+    promptShield: { enabled: enabled('prompt_shield'), sensitivity: 'balanced' },
+  };
+}
+
 export function serializeGuardrail(record: IGuardrail): GuardrailView {
+  // `policy` and `customPrompt` are columns of the pre-hook model. A row that
+  // still carries them (an older database) must not hand them to the API.
   const { _id, ...rest } = record;
   const view = {
     ...rest,
     id: typeof _id === 'string' ? _id : (_id?.toString() ?? ''),
   } as GuardrailView;
-  // The other read chokepoint for the `check` -> `policy` rename (the engine's
-  // is `ensureHooks`). Every view the dashboard and both API surfaces return
-  // comes through here, and the guardrail list counts `hooks.policies` off the
-  // raw view — so without this a guardrail authored before the rename renders
-  // as "0 policies" and its edit screen would save that back. Assigned in place
-  // rather than spread so an absent config stays absent instead of becoming an
-  // explicit `hooks: undefined`.
-  if (view.hooks !== undefined) view.hooks = normalizeHooksConfig(view.hooks);
+  delete view.policy;
+  delete (view as { customPrompt?: unknown }).customPrompt;
+  // The read chokepoint for the `check` -> `policy` rename. Every view the
+  // dashboard and both API surfaces return comes through here, and the
+  // guardrail list counts `hooks.policies` off the raw view — so without this
+  // a guardrail authored before the rename renders as "0 policies" and its edit
+  // screen would save that back. Assigned in place rather than spread so an
+  // absent config stays absent instead of becoming an explicit
+  // `hooks: undefined`.
+  if (view.hooks !== undefined) {
+    view.hooks = normalizeHooksConfig(view.hooks);
+    view.policy = summarizePolicyFamilies(view.hooks, view.action);
+  }
   return view;
 }
 
@@ -96,70 +126,17 @@ async function generateUniqueKey(
   });
 }
 
-// ── Default policy builder ────────────────────────────────────────────────
-
-export function buildDefaultPresetPolicy(): IGuardrail['policy'] {
-  const piiCategories: Record<string, boolean> = {};
-  for (const cat of PII_CATEGORIES) {
-    piiCategories[cat.id] = cat.defaultEnabled;
-  }
-
-  const moderationCategories: Record<string, boolean> = {};
-  for (const cat of MODERATION_CATEGORIES) {
-    moderationCategories[cat.id] = cat.defaultEnabled;
-  }
-
-  const builtinLists: Record<string, boolean> = {};
-  for (const list of WORD_FILTER_BUILTIN_LISTS) {
-    builtinLists[list.id] = list.defaultEnabled;
-  }
-
-  return {
-    pii: {
-      enabled: true,
-      action: 'block',
-      categories: piiCategories,
-    },
-    wordFilter: {
-      enabled: false,
-      action: 'block',
-      builtinLists,
-      words: [],
-      regexes: [],
-    },
-    moderation: {
-      enabled: false,
-      categories: moderationCategories,
-    },
-    promptShield: {
-      enabled: false,
-      sensitivity: 'balanced',
-    },
-  };
-}
-
 // ── Hook config on the write path ─────────────────────────────────────────
 
 /**
- * Normalises an AUTHORED hook config on its way into the store.
+ * Normalises a hook config on its way into the store.
  *
- * Two things are stamped here rather than left to the caller, because getting
- * either wrong is silent:
- *
- * 1. `hooksVersion`. `ensureHooks` re-derives the whole config from the legacy
- *    policy columns whenever the stored version is 0 — so a config saved with
- *    `hooks` but no `hooksVersion` would be written to the row, read back, and
- *    then thrown away on every evaluation while the edit screen kept showing
- *    it. There is no error anywhere in that loop.
- *
- * 2. `stream.enabled`. `DEFAULT_STREAM_SETTINGS.enabled` is FALSE — the right
- *    default for a LIFTED legacy row, which is what that constant exists for
- *    (a fleet of existing guardrails must not silently start holding back
- *    streamed tokens on upgrade). A newly AUTHORED guardrail is the opposite
- *    case: someone chose these policies now, and real-time blocking is the
- *    behaviour they expect. Only `create` applies it — re-defaulting on update
- *    would turn streaming back on for an operator who deliberately switched it
- *    off, which is the more expensive mistake of the two.
+ * `contractVersion` is stamped here rather than left to the caller, and so is
+ * `stream.enabled` on create: `DEFAULT_STREAM_SETTINGS.enabled` is FALSE, which
+ * is not what someone who just chose these policies expects — real-time
+ * blocking is. Only `create` applies it: re-defaulting on update would turn
+ * streaming back on for an operator who deliberately switched it off, which is
+ * the more expensive mistake of the two.
  */
 function normalizeAuthoredHooks(
   hooks: GuardrailHooksConfig,
@@ -178,13 +155,12 @@ const logger = createLogger('guardrail-service');
 let warnedLegacyFailMode = false;
 
 /**
- * Fail mode for a guardrail created without one. Presets that run PII or
- * prompt-shield checks default to `closed`; `GUARDRAIL_DEFAULT_FAIL_MODE=open`
+ * Fail mode for a guardrail created without one. Configs that run PII or
+ * prompt-shield policies default to `closed`; `GUARDRAIL_DEFAULT_FAIL_MODE=open`
  * restores `open` for everything.
  */
 export function resolveDefaultFailMode(
-  type: GuardrailType,
-  policy: IGuardrail['policy'],
+  hooks: GuardrailHooksConfig | undefined,
 ): 'open' | 'closed' {
   if (getConfig().guardrail.defaultFailMode === 'open') {
     if (!warnedLegacyFailMode) {
@@ -193,10 +169,10 @@ export function resolveDefaultFailMode(
     }
     return 'open';
   }
-  if (type === 'preset' && (policy?.pii?.enabled || policy?.promptShield?.enabled)) {
-    return 'closed';
-  }
-  return 'open';
+  const runsPiiOrShield = (hooks?.policies ?? []).some(
+    (policy) => policy.enabled && (policy.family === 'pii' || policy.family === 'prompt_shield'),
+  );
+  return runsPiiOrShield ? 'closed' : 'open';
 }
 
 // ── CRUD operations ───────────────────────────────────────────────────────
@@ -212,18 +188,11 @@ export async function createGuardrail(
 
   const key = await generateUniqueKey(tenantDbName, input.projectId, input.name);
 
-  let policy = input.policy;
-  if (input.type === 'preset' && !policy) {
-    policy = buildDefaultPresetPolicy();
-  }
-
-  // A create with no `hooks` stays legacy-shaped on disk and is lifted on first
-  // read. That is not a transitional wart: the legacy policy columns are still
-  // what the preset editor writes, and a row that carries both would need the
-  // two kept in sync by every future writer.
-  const hooks = input.hooks
-    ? normalizeAuthoredHooks(input.hooks, { defaultStreamEnabled: true })
-    : undefined;
+  // A create with no `hooks` is a guardrail with nothing configured yet: an
+  // empty config, which enforces nothing until policies are added.
+  const hooks = normalizeAuthoredHooks(input.hooks ?? emptyHooksConfig(), {
+    defaultStreamEnabled: true,
+  });
 
   const guardrail = await db.createGuardrail({
     tenantId,
@@ -231,16 +200,16 @@ export async function createGuardrail(
     key,
     name: input.name,
     description: input.description,
-    type: input.type,
-    target: input.target ?? 'input',
+    // Stored labels with one value each: nothing reads them to decide what to
+    // enforce. The columns stay for the list screen and the evaluation log.
+    type: 'preset',
+    target: 'input',
     action: input.action,
     enabled: input.enabled ?? true,
-    failMode: input.failMode ?? resolveDefaultFailMode(input.type, policy),
+    failMode: input.failMode ?? resolveDefaultFailMode(hooks),
     modelKey: input.modelKey,
-    policy: input.type === 'preset' ? policy : undefined,
-    customPrompt: input.type === 'custom' ? input.customPrompt : undefined,
     hooks,
-    hooksVersion: hooks ? (input.hooksVersion ?? GUARDRAIL_CONTRACT_VERSION) : undefined,
+    hooksVersion: GUARDRAIL_CONTRACT_VERSION,
     mode: input.mode,
     createdBy,
   });
@@ -264,18 +233,14 @@ export async function updateGuardrail(
   await db.switchToTenant(tenantDbName);
 
   // `hooks` is spread through verbatim when absent, so an update that only
-  // renames a guardrail cannot clear its hook config. When it IS present the
-  // version marker is stamped alongside it — writing the config without the
-  // marker is the same silent discard described on `normalizeAuthoredHooks`.
+  // renames a guardrail cannot clear its hook config.
   const hooks = input.hooks
     ? normalizeAuthoredHooks(input.hooks, { defaultStreamEnabled: false })
     : undefined;
 
   const updated = await db.updateGuardrail(id, {
     ...input,
-    ...(hooks
-      ? { hooks, hooksVersion: input.hooksVersion ?? GUARDRAIL_CONTRACT_VERSION }
-      : {}),
+    ...(hooks ? { hooks, hooksVersion: GUARDRAIL_CONTRACT_VERSION } : {}),
     updatedBy,
   });
 
@@ -532,4 +497,3 @@ export async function evaluateGuardrail(params: {
 // ── Re-exports ────────────────────────────────────────────────────────────
 
 export { PII_CATEGORIES, MODERATION_CATEGORIES, PROMPT_SHIELD_ISSUES, WORD_FILTER_BUILTIN_LISTS } from './types';
-export { buildDefaultPresetPolicy as buildDefaultPolicy };

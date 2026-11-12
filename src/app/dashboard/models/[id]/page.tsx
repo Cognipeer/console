@@ -95,7 +95,7 @@ import {
 // Safe from a client component: `hooks/binding` is pure and its only import is
 // a `import type` of the narrow domain-types path, so nothing of the database
 // barrel survives into the bundle. That is what separates it from
-// `hooks/legacy` and `hooks/engine`, which `GuardrailBindingList` may not touch.
+// `hooks/engine`, which `GuardrailBindingList` may not touch.
 import { resolveBindings } from '@/lib/services/guardrail/hooks/binding';
 import { HOOK_IDS } from '@/lib/services/guardrail/hooks/contract';
 import type { HookId } from '@/lib/services/guardrail/hooks/contract';

@@ -10,37 +10,10 @@
  * question asked at the worst possible moment: nobody knows yet what this
  * guardrail will contain, so nobody can answer it well.
  *
- * WHAT IS NO LONGER ASKED, AND WHAT IS SENT INSTEAD:
+ * WHAT IS NOT ASKED, AND WHAT IS SENT INSTEAD:
  *
- *   · TYPE (`type`) → always `'preset'`. The API requires the field, so it is
- *     still sent; it is no longer a decision. The model-judged rule that used
- *     to live behind this fork is now the `custom` policy in the Add-policy
- *     catalog — configured on a screen that can show it next to everything
- *     else the guardrail does, and with a per-policy model instead of the one
- *     record-level `modelKey` the fork gave it.
- *
- *     WHAT THAT COSTS, STATED PLAINLY, because a comment that overclaims here
- *     is worse than the fork was. `projectHooksToLegacy` DOES compute
- *     `type: 'custom'` for a config whose only enabled policy is a custom one,
- *     and `POST /api/guardrails` writes it (`type: legacy?.type ?? body.type`)
- *     — but `PATCH` does not: `UpdateGuardrailInput` (services/guardrail/
- *     types.ts) has no `type` slot, so the projected value is dropped on every
- *     save. A guardrail created here is therefore `type: 'preset'` for life.
- *     `type: 'custom'` remains a legal stored value and is still reachable —
- *     `POST /api/client/v1/guardrails` accepts it, and the partner SDK wire is
- *     unchanged — it is the CONSOLE that no longer authors one. Nothing in the
- *     hook plane reads the column (the engine runs `hooks.policies`); the two
- *     readers that do are `moderationApi`'s discovery scan, for which
- *     `'preset'` is the permissive value, and the EE gateway's `llmBacked`
- *     hint, which will under-report a preset row whose LLM policy is a custom
- *     one. Restoring the fork means restoring one `FormSection` and the two
- *     fields it gated; making the projection stick instead means adding `type`
- *     to `UpdateGuardrailInput` and both provider mixins, which is a storage
- *     change and not one this pass is entitled to make.
  *   · DEFAULT ACTION (`action`) → not sent. The route defaults the column to
- *     'block', and the first save from the detail page recomputes it from the
- *     policies. There is no guardrail-level default action to author any more;
- *     each policy states its own.
+ *     'block'; each policy states its own action.
  *   · ROLLOUT (`mode`) → always `'monitor'`, stated in one line below rather
  *     than offered. A brand-new guardrail has no policies at all, so there is
  *     nothing for Enforce to enforce, and the asymmetry is total: an over-eager
@@ -48,8 +21,8 @@
  *     refuses work people are trying to do. One control on the detail page
  *     flips it once the evaluation log looks right.
  *   · STREAMING → always on, which is what `emptyHooksConfig()` gives a newly
- *     authored configuration anyway. It costs nothing until a policy is bound
- *     to the streaming hook, and the Hooks tab is where that binding — and this
+ *     created guardrail. It costs nothing until a policy is bound to the
+ *     streaming hook, and the Hooks tab is where that binding — and this
  *     switch — actually live.
  *   · MODEL / CUSTOM PROMPT → not asked. They belong to the policy that needs
  *     them, where the drawer can say which model evaluates which rule.
@@ -83,16 +56,12 @@ interface CreateGuardrailModalProps {
   onClose: () => void;
   /**
    * `options.streamingEnabled` is carried to the detail page rather than sent
-   * to the API: a create call has no hook configuration to attach it to, and
-   * posting one with an empty `policies` array would mark the guardrail AUTHORED
-   * and stop its freshly built preset policy from ever being lifted — a
-   * guardrail that exists, looks configured and evaluates nothing.
+   * to the API: the server creates the guardrail with an empty configuration
+   * that already has streaming on.
    *
-   * It is now always `true` — the default a newly authored configuration gets
-   * — and the parameter stays in the signature because the caller encodes it
-   * into the `?stream=` hand-off either way, and because turning the default
-   * back into a question would only mean editing this file rather than the
-   * caller.
+   * It is always `true` — the default a new configuration gets — and the
+   * parameter stays in the signature because the caller encodes it into the
+   * `?stream=` hand-off either way.
    */
   onCreated: (guardrail: GuardrailView, options: { streamingEnabled: boolean }) => void;
 }
@@ -146,9 +115,6 @@ export default function CreateGuardrailModal({
         body: JSON.stringify({
           name: values.name,
           description: values.description || undefined,
-          // Required by the route (`VALID_TYPES` is checked before anything
-          // else), and no longer a question — see the note at the top.
-          type: 'preset',
           // `{ mode: 'monitor', enabled: true }` — never one without the other.
           ...writeGuardrailMode(INITIAL_MODE),
         }),

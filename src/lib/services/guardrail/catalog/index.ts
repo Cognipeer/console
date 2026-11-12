@@ -24,7 +24,7 @@
  * ── WHERE IT MAY BE IMPORTED ────────────────────────────────────────────────
  * Anywhere. It reaches `hooks/contract`, `hooks/messages` and
  * `services/guardrail/constants` and nothing else — no `@/lib/database`, no
- * `hooks/legacy`, no `hooks/engine`, no React. Server, client bundle and a
+ * `hooks/engine`, no React. Server, client bundle and a
  * plain unit test all import the same module, which is the only way the picker
  * and the save-time validator can be talking about the same thing.
  *

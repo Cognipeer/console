@@ -8,7 +8,6 @@ import type {
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import {
-  buildDefaultPresetPolicy,
   deleteGuardrail,
   evaluateGuardrail,
   getGuardrail,
@@ -30,8 +29,8 @@ import {
 } from '@/lib/services/guardrail';
 import type { GuardrailView, WordListView } from '@/lib/services/guardrail';
 // The service barrel deliberately re-exports only the hook plane's ENTRY
-// POINTS (`runHook` and friends); the contract's constants, the legacy
-// projection and the red-team battery are reached at their own paths. See the
+// POINTS (`runHook` and friends); the contract's constants and the red-team
+// battery are reached at their own paths. See the
 // "Deliberately NOT re-exported" note in services/guardrail/index.ts — this
 // plugin is a configuration surface, not a second evaluation path, so it is on
 // the allowed side of that line.
@@ -42,6 +41,7 @@ import {
   HOOK_IDS,
   HOOK_SUBJECT_KIND,
   isPlainRecord,
+  readHooks,
   textSubject,
   toolCallSubject,
   toolResultSubject,
@@ -58,9 +58,6 @@ import type {
   HookVerdict,
   VerdictVisibility,
 } from '@/lib/services/guardrail/hooks/contract';
-import {
-  ensureHooks,
-} from '@/lib/services/guardrail/hooks/legacy';
 import { runGuardrailRedTeam } from '@/lib/services/guardrail/hooks/redteam';
 import { capabilities as sdkGuardrailCapabilities } from '@/lib/services/guardrail/sdkAdapter';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
@@ -78,7 +75,6 @@ import {
   guardrailWriteErrorBody,
   parseGuardrailCreateBody,
   parseGuardrailPatchBody,
-  toGuardrailRecord,
   updateGuardrailFromRequest,
 } from './guardrail-write';
 
@@ -86,11 +82,8 @@ import {
 // importable from here for the other plugins and the tests that use them.
 export {
   findLlmModelConfigError,
-  projectLegacyColumns,
   readHooksField,
-  readHooksVersionField,
   readModeField,
-  toGuardrailRecord,
 } from './guardrail-write';
 
 const logger = createLogger('api:guardrails');
@@ -635,7 +628,6 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
 
       if (query.includeTemplates === 'true') {
         payload.templates = {
-          defaultPresetPolicy: buildDefaultPresetPolicy(),
           moderationCategories: MODERATION_CATEGORIES,
           piiCategories: PII_CATEGORIES,
           promptShieldIssues: PROMPT_SHIELD_ISSUES,
@@ -950,7 +942,7 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
           options: optionsField.options,
         }),
         guardrailKeys: [guardrail.key],
-        visibility: resolveVerdictVisibility(ensureHooks(toGuardrailRecord(guardrail)).hooks),
+        visibility: resolveVerdictVisibility(readHooks(guardrail)),
         options: optionsField.options,
       });
     } catch (error) {
@@ -971,11 +963,8 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
    * gets a 304 while nothing has changed and a fresh body the moment an
    * operator edits a schedule, an action or the mode.
    *
-   * A LEGACY row compiles too. `ensureHooks` lifts it exactly as the engine
-   * does, so what comes back is what would actually be enforced rather than an
-   * empty config — and, deliberately, nothing is written: a GET must not
-   * provision the lifted PII policy, which the engine does for itself on the
-   * evaluate path.
+   * A guardrail with no stored config compiles to an empty one, which is what
+   * the engine would enforce for it.
    */
   app.get('/guardrails/:key/compiled', withApiRequestContext(async (request, reply) => {
     try {
@@ -995,8 +984,6 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Guardrail not found' });
       }
 
-      const record = toGuardrailRecord(guardrail);
-      const resolved = ensureHooks(record);
       const payload = {
         target,
         contractVersion: GUARDRAIL_CONTRACT_VERSION,
@@ -1013,13 +1000,8 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
           action: guardrail.action,
           failMode: guardrail.failMode ?? null,
           modelKey: guardrail.modelKey ?? null,
-          // 0 (or absent) means the config below was DERIVED from the legacy
-          // columns and will be re-derived on every read, so a later fix to the
-          // projection reaches this guardrail without an edit.
-          hooksVersion: resolved.hooksVersion,
-          authored: resolved.hooksVersion >= 1,
         },
-        hooks: resolved.hooks,
+        hooks: readHooks(guardrail),
         // Which hooks the installed agent SDK can actually serve. Synchronous
         // and SDK-free, so this stays a cheap GET.
         capabilities: sdkGuardrailCapabilities(),

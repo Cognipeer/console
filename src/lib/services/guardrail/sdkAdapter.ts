@@ -90,6 +90,7 @@ import {
   HOOK_IDS,
   HOOK_SUBJECT_KIND,
   joinSegments,
+  readHooks,
   textSubject,
   toolCallSubject,
   toolResultSubject,
@@ -107,7 +108,6 @@ import type {
   SubjectSegment,
 } from './hooks/contract';
 import { resolveGuardrail, runHook } from './hooks/engine';
-import { ensureHooks } from './hooks/legacy';
 
 // TYPE-ONLY. Erased by the compiler, so this line links nothing at runtime —
 // the values (`createGuardrail`, `customCallbackRule`, the `GuardrailPhase`
@@ -1467,11 +1467,7 @@ async function resolveForCompile(
     throw new Error(`Guardrail with key "${guardrailKey}" not found`);
   }
 
-  // `ensureHooks` derives the v2 config for a legacy row. The generated PII
-  // policy key is deliberately NOT resolved here: the lift emits the pii policy
-  // pointing at its deterministic key whether or not provisioning has happened,
-  // and `runHook` does the provisioning on the evaluate path.
-  const hooks = ensureHooks(record).hooks;
+  const hooks = readHooks(record);
 
   const requested = ctx.hooks ?? [...servable];
   const unservable = requested.filter((hook) => !servable.has(hook));

@@ -3,7 +3,7 @@
  * it ASKS, at the driver boundary.
  *
  * `createGuardrail` used to spread the input straight into `insertOne`. The
- * BSON serializer turns an EXPLICIT `undefined` into null, so a legacy-shaped
+ * BSON serializer turns an EXPLICIT `undefined` into null, so a sparse
  * or tenant-wide create (`hooks: undefined, hooksVersion: undefined, mode:
  * undefined, projectId: undefined` — exactly what the service layer passes)
  * persisted `hooks: null`, `hooksVersion: null`, `mode: null`, `projectId:
@@ -52,13 +52,13 @@ class RecordingGuardrailProvider extends GuardrailMixin(MongoDBProviderBase) {
   }
 }
 
-function legacyShapedCreate(
+function sparseCreate(
   overrides: Partial<Omit<IGuardrail, '_id' | 'createdAt' | 'updatedAt'>> = {},
 ): Omit<IGuardrail, '_id' | 'createdAt' | 'updatedAt'> {
   return {
     tenantId: 'tenant-a',
     // Exactly what guardrailService.createGuardrail passes for a tenant-wide,
-    // legacy-shaped preset: every optional field present and undefined.
+    // preset: every optional field present and undefined.
     projectId: undefined,
     key: 'pii-basic',
     name: 'PII basic',
@@ -69,10 +69,8 @@ function legacyShapedCreate(
     enabled: true,
     failMode: 'open',
     modelKey: undefined,
-    policy: { pii: { enabled: true, action: 'block', categories: { email: true } } },
-    customPrompt: undefined,
-    hooks: undefined,
-    hooksVersion: undefined,
+    hooks: { contractVersion: 2, policies: [], bindings: {} },
+    hooksVersion: 2,
     mode: undefined,
     createdBy: 'user-1',
     ...overrides,
@@ -83,34 +81,34 @@ describe('MongoDB createGuardrail', () => {
   it('inserts no null- or undefined-valued key for an absent field', async () => {
     const provider = new RecordingGuardrailProvider();
 
-    await provider.createGuardrail(legacyShapedCreate());
+    await provider.createGuardrail(sparseCreate());
 
     const inserted = provider.inserted ?? {};
     for (const [key, value] of Object.entries(inserted)) {
       expect(value, `inserted.${key}`).not.toBeNull();
       expect(value, `inserted.${key}`).not.toBeUndefined();
     }
-    for (const absent of ['projectId', 'description', 'modelKey', 'customPrompt', 'hooks', 'hooksVersion']) {
+    for (const absent of ['projectId', 'description', 'modelKey', 'customPrompt', 'policy']) {
       expect(absent in inserted, `inserted has no "${absent}"`).toBe(false);
     }
     // What was given is still there.
     expect(inserted.key).toBe('pii-basic');
-    expect(inserted.policy).toEqual({ pii: { enabled: true, action: 'block', categories: { email: true } } });
+    expect(inserted.hooks).toEqual({ contractVersion: 2, policies: [], bindings: {} });
     expect(inserted.createdAt).toBeInstanceOf(Date);
   });
 
   it('derives mode from enabled exactly as the SQLite INSERT does', async () => {
     const enabled = new RecordingGuardrailProvider();
-    const created = await enabled.createGuardrail(legacyShapedCreate({ enabled: true }));
+    const created = await enabled.createGuardrail(sparseCreate({ enabled: true }));
     expect(enabled.inserted?.mode).toBe('enforce');
     expect(created.mode).toBe('enforce');
 
     const disabled = new RecordingGuardrailProvider();
-    await disabled.createGuardrail(legacyShapedCreate({ enabled: false }));
+    await disabled.createGuardrail(sparseCreate({ enabled: false }));
     expect(disabled.inserted?.mode).toBe('disabled');
 
     const explicit = new RecordingGuardrailProvider();
-    await explicit.createGuardrail(legacyShapedCreate({ enabled: true, mode: 'monitor' }));
+    await explicit.createGuardrail(sparseCreate({ enabled: true, mode: 'monitor' }));
     expect(explicit.inserted?.mode).toBe('monitor');
   });
 
@@ -118,7 +116,7 @@ describe('MongoDB createGuardrail', () => {
     const provider = new RecordingGuardrailProvider();
     const hooks = { contractVersion: 2, policies: [], bindings: {} } as unknown as IGuardrail['hooks'];
 
-    await provider.createGuardrail(legacyShapedCreate({ hooks, hooksVersion: 2, projectId: 'proj-a' }));
+    await provider.createGuardrail(sparseCreate({ hooks, hooksVersion: 2, projectId: 'proj-a' }));
 
     expect(provider.inserted?.hooks).toEqual(hooks);
     expect(provider.inserted?.hooksVersion).toBe(2);

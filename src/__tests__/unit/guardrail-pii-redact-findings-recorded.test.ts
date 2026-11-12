@@ -1,9 +1,8 @@
 /**
  * REGRESSION: a PII-redact guardrail looked like it detected nothing.
  *
- * Observed on a demo tenant: the preset "Customer PII Redaction" (legacy
- * `policy.pii`, action redact, mode enforce, hooksVersion 0 — so the engine
- * lifts it into a `pii-migrated-<key>` PII policy) showed 6 evaluations, 100%
+ * Observed on a demo tenant: the preset "Customer PII Redaction" (a PII
+ * hook policy, action redact, mode enforce) showed 6 evaluations, 100%
  * passed and "No findings recorded", although a user turn carried an email and
  * an international phone number.
  *
@@ -30,6 +29,8 @@ const hoisted = vi.hoisted(() => ({
 }));
 
 const fakeDb = {
+  switchToTenant: vi.fn(async () => undefined),
+  listTenants: vi.fn(async () => []),
   findGuardrailByKey: hoisted.findGuardrailByKey,
   findPiiPolicyByKey: hoisted.findPiiPolicyByKey,
   createPiiPolicy: hoisted.createPiiPolicy,
@@ -52,7 +53,6 @@ vi.mock('@/lib/services/usage/usageEvents', () => ({
 
 import type { HookScope } from '@/lib/services/guardrail/hooks/contract';
 import { runHook } from '@/lib/services/guardrail/hooks/engine';
-import { invalidateLiftedPiiPolicyCache } from '@/lib/services/guardrail/hooks/legacy';
 import { resetRecordCaches } from '@/lib/services/guardrail/hooks/recordCache';
 
 const EMAIL = 'jane.doe@acme-retail.example';
@@ -68,7 +68,7 @@ const scope: HookScope = {
   traceId: 'trace-pii-redact',
 };
 
-/** The demo row exactly as persisted (preset, legacy blob, never authored). */
+/** The demo row exactly as persisted (preset, one PII hook policy). */
 function customerPiiRedaction(): IGuardrail {
   return {
     _id: '6c34bcf2-1c73-4fe8-99ef-13c7dba046bb',
@@ -82,29 +82,40 @@ function customerPiiRedaction(): IGuardrail {
     mode: 'enforce',
     failMode: 'open',
     modelKey: null,
-    customPrompt: null,
     metadata: {},
-    hooksVersion: 0,
     createdBy: 'user-1',
-    policy: {
-      pii: {
-        enabled: true,
-        action: 'redact',
-        categories: { email: true, phone: true, creditCard: true, iban: true },
-      },
+    hooks: {
+      contractVersion: 2,
+      policies: [
+        {
+          id: 'pii-customer',
+          family: 'pii',
+          enabled: true,
+          hooks: ['input.pre'],
+          schedule: { timing: 'sync', onFail: 'block' },
+          action: 'redact',
+          piiPolicyKey: 'customer-pii',
+        },
+      ],
+      bindings: { 'input.pre': { enabled: true } },
     },
   } as unknown as IGuardrail;
 }
 
 beforeEach(() => {
   resetRecordCaches();
-  invalidateLiftedPiiPolicyCache();
   vi.clearAllMocks();
   hoisted.findGuardrailByKey.mockResolvedValue(customerPiiRedaction());
-  hoisted.findPiiPolicyByKey.mockResolvedValue(null);
-  hoisted.createPiiPolicy.mockImplementation(
-    async (input: Partial<IPiiPolicy>) => ({ ...input, _id: 'pii-migrated' }) as IPiiPolicy,
-  );
+  hoisted.findPiiPolicyByKey.mockResolvedValue({
+    _id: 'pii-customer-policy',
+    tenantId: 'tenant-demo',
+    key: 'customer-pii',
+    name: 'Customer PII',
+    defaultAction: 'redact',
+    categories: { email: true, phone: true, creditCard: true, iban: true },
+    enabled: true,
+    createdBy: 'user-1',
+  } as unknown as IPiiPolicy);
   hoisted.createGuardrailEvaluationLog.mockResolvedValue(undefined);
 });
 

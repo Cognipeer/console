@@ -5,17 +5,17 @@
  * just in the source: the policy array (`hooks.checks`), the tool-gate family
  * (`tool_policy`) and the PII policy reference (`policyKey`). Every guardrail a
  * tenant authored before it still carries those, and the failure mode is
- * SILENT and total — `ensureHooks` sees no `hooks.policies`, decides the config
- * was never authored, and lifts the legacy preset columns over the top of it.
- * The guardrail keeps evaluating; it just stops evaluating what the operator
- * configured, and the dashboard reports "0 policies" while doing so.
+ * SILENT and total — `readHooks` sees no `hooks.policies` and resolves the
+ * config to an empty one. The guardrail keeps running; it just stops evaluating
+ * what the operator configured, and the dashboard reports "0 policies" while
+ * doing so.
  *
  * So the rule is: the READ path accepts both spellings and normalises to the
  * new one, the WRITE path emits only the new one, and nothing rewrites a stored
  * row. The fixtures below are deliberately in the OLD spelling — a fixture
  * written in the new one proves nothing about the rows that exist today.
  *
- * `normalizeHooksConfig` is the single implementation; `ensureHooks`,
+ * `normalizeHooksConfig` is the single implementation; `readHooks`,
  * `serializeGuardrail` and `readHooksField` are the three doors that call it,
  * and each is covered here because each is the ONLY door for one caller (the
  * engine, the dashboard, the two write APIs respectively).
@@ -24,7 +24,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 // Sync factory only: an async `vi.mock` factory does not intercept in this
-// repo. `hooks/legacy` and `guardrailService` reach the barrel, which
+// repo. `guardrailService` reaches the barrel, which
 // constructs providers and registers shutdown handlers the moment it loads.
 vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(),
@@ -35,12 +35,12 @@ vi.mock('@/lib/database', () => ({
 import {
   LEGACY_POLICY_FAMILY,
   normalizeHooksConfig,
+  readHooks,
   readPolicyFamily,
   readPolicyId,
   readPolicyList,
 } from '@/lib/services/guardrail/hooks/contract';
 import type { GuardrailHooksConfig } from '@/lib/services/guardrail/hooks/contract';
-import { ensureHooks } from '@/lib/services/guardrail/hooks/legacy';
 import { serializeGuardrail } from '@/lib/services/guardrail/guardrailService';
 import { readHooksField } from '@/server/api/plugins/guardrails';
 import type { IGuardrail } from '@/lib/database/provider/types.domain';
@@ -176,25 +176,25 @@ describe('readPolicyList', () => {
   });
 });
 
-describe('ensureHooks: the engine read path', () => {
-  it('keeps an old-spelling AUTHORED config authored, re-spelled', () => {
-    const resolved = ensureHooks(legacyRecord(storedInOldSpelling()));
-    // hooksVersion 2, not 0: dropping to 0 is the silent disaster — it means
-    // the lift replaced the operator's configuration with the preset columns.
-    expect(resolved.hooksVersion).toBe(2);
-    expect(resolved.hooks.policies.map((p) => p.id)).toEqual(['chk-pii', 'chk-tools']);
-    expect(resolved.hooks.policies[1].family).toBe('tool_access');
-    const pii = resolved.hooks.policies[0];
+describe('readHooks: the engine read path', () => {
+  it('keeps an old-spelling config, re-spelled', () => {
+    const hooks = readHooks(legacyRecord(storedInOldSpelling()));
+    // Empty here is the silent disaster: the operator's policies stop running.
+    expect(hooks.policies.map((p) => p.id)).toEqual(['chk-pii', 'chk-tools']);
+    expect(hooks.policies[1].family).toBe('tool_access');
+    const pii = hooks.policies[0];
     expect(pii.family === 'pii' ? pii.piiPolicyKey : undefined).toBe('customer-pii');
   });
 
-  it('still lifts a genuinely unauthored row', () => {
+  it('resolves a row with no config to an empty one, with nothing derived from other columns', () => {
+    const hooks = readHooks(legacyRecord(undefined));
+    expect(hooks.policies).toEqual([]);
+    expect(hooks.bindings).toEqual({});
+  });
+
+  it('gives every call its own empty config', () => {
     const record = legacyRecord(undefined);
-    record.hooksVersion = 0;
-    record.policy = { pii: { enabled: true, action: 'block', categories: { email: true } } };
-    const resolved = ensureHooks(record);
-    expect(resolved.hooksVersion).toBe(0);
-    expect(resolved.hooks.policies.some((p) => p.id === 'legacy:pii')).toBe(true);
+    expect(readHooks(record)).not.toBe(readHooks(record));
   });
 });
 
@@ -328,11 +328,7 @@ describe('a guardrail authored before the rename, as its screens render it', () 
     return policies;
   }
 
-  it('arrives with BOTH policies, re-spelled, and nothing lifted over them', () => {
-    const view = serializeGuardrail(legacyRecord(storedInOldSpelling()));
-    // hooksVersion 2 must survive: dropping to 0 is the silent disaster, and
-    // it is what the card grid reads to decide a policy is "migrated".
-    expect(view.hooksVersion).toBe(2);
+  it('arrives with BOTH policies, re-spelled', () => {
     const policies = policiesAsRendered();
     expect(policies.map((policy) => policy.id)).toEqual(['chk-pii', 'chk-tools']);
     expect(policies.map((policy) => policy.family)).toEqual(['pii', 'tool_access']);

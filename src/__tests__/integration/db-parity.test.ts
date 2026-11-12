@@ -386,9 +386,20 @@ describeForEachProvider('Guardrail CRUD + evaluation logs', (getDb) => {
       action: 'block',
       enabled: true,
       failMode: 'closed',
-      policy: {
-        pii: { enabled: true, action: 'redact', categories: { email: true } },
-        wordFilter: { enabled: true, action: 'block', words: ['forbidden'] },
+      hooks: {
+        contractVersion: 2,
+        policies: [
+          {
+            id: 'wf',
+            family: 'word_filter',
+            enabled: true,
+            hooks: ['input.pre'],
+            schedule: { timing: 'sync', onFail: 'block' },
+            action: 'block',
+            words: ['forbidden'],
+          },
+        ],
+        bindings: { 'input.pre': { enabled: true, schedule: { timing: 'sync', onFail: 'block' } } },
       },
       createdBy: 'user-1',
     });
@@ -399,8 +410,8 @@ describeForEachProvider('Guardrail CRUD + evaluation logs', (getDb) => {
     expect(found?.name).toBe('Parity Guardrail');
     expect(found?.target).toBe('input');
     expect(found?.failMode).toBe('closed');
-    expect(found?.policy?.pii?.action).toBe('redact');
-    expect(found?.policy?.wordFilter?.words).toEqual(['forbidden']);
+    const wf = found?.hooks?.policies[0];
+    expect(wf?.family === 'word_filter' ? wf.words : undefined).toEqual(['forbidden']);
   });
 
   it('updates failMode and action', async () => {
@@ -566,7 +577,6 @@ describeForEachProvider('Guardrail hook plane persistence', (getDb) => {
         actionOverride: 'redact',
         locale: 'tr',
         detectObfuscated: true,
-        legacyCategories: { email: true, tc_kimlik: true, phone: false },
       },
       {
         id: 'chk-secrets',
@@ -702,11 +712,7 @@ describeForEachProvider('Guardrail hook plane persistence', (getDb) => {
     // Spot-check the deepest nesting explicitly, so a failure names the level
     // that broke rather than dumping the whole config diff.
     const pii = found?.hooks?.policies.find((c) => c.id === 'chk-pii');
-    expect(pii?.family === 'pii' ? pii.legacyCategories : undefined).toEqual({
-      email: true,
-      tc_kimlik: true,
-      phone: false,
-    });
+    expect(pii?.family === 'pii' ? pii.piiPolicyKey : undefined).toBe('pii-default');
     const tools = found?.hooks?.policies.find((c) => c.id === 'chk-tools');
     expect(tools?.family === 'tool_access' ? tools.argumentSchemas?.search : undefined).toEqual({
       type: 'object',
@@ -765,9 +771,8 @@ describeForEachProvider('Guardrail hook plane persistence', (getDb) => {
     // `check` -> `policy` rename wrote, and what is on disk in every tenant
     // that authored a guardrail before it. The SQLite mapper decides whether a
     // stored blob is a config AT ALL by looking for that array, so if it only
-    // knows the new name the row comes back `undefined`, `ensureHooks` calls it
-    // unauthored, and the operator's whole configuration is silently replaced
-    // by the legacy preset lift. Mongo stores the document verbatim, so this
+    // knows the new name the row comes back `undefined` and the operator's whole
+    // configuration silently stops running. Mongo stores the document verbatim, so this
     // case is the one place the two providers could disagree.
     const created = await db.createGuardrail({
       tenantId,
@@ -819,10 +824,8 @@ describeForEachProvider('Guardrail hook plane persistence', (getDb) => {
     });
 
     const found = await db.findGuardrailById(String(created._id));
-    // ensureHooks() distinguishes "absent" from "authored": an empty object
-    // reads as an authored config with zero policies, i.e. a guardrail that
-    // enforces NOTHING. SQLite defaults the column to '{}', so the mapper has
-    // to collapse it back to undefined for the two providers to agree here.
+    // SQLite defaults the column to '{}', so the mapper has to collapse it back
+    // to undefined for the two providers to agree here.
     expect(found?.hooks).toBeUndefined();
     expect(found?.hooksVersion ?? 0).toBe(0);
   });

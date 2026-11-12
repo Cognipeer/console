@@ -3,7 +3,7 @@
  * driven through the RUNTIME rather than through a helper.
  *
  * `guardrail-policy-rename-compat.test.ts` pins the pure re-speller
- * (`normalizeHooksConfig`, `readPolicyList`, `ensureHooks`, `serializeGuardrail`,
+ * (`normalizeHooksConfig`, `readPolicyList`, `readHooks`, `serializeGuardrail`,
  * `readHooksField`). This file exists because passing all of that is not the
  * same as working: the engine had TWO of its own reads of
  * `record.hooks.policies` that never went near the re-speller, and both did
@@ -28,17 +28,12 @@
  *     down to `monitor` started blocking tool calls on upgrade, while logging a
  *     persistence bug that had not happened.
  *
- *  2. A PHANTOM PII POLICY WAS WRITTEN INTO THE TENANT. `evaluateGuardrailHook`
- *     decided `authored` the same raw way. A pre-rename authored row read as
- *     unauthored, so the engine ran `ensureLiftedPiiPolicy`, which CREATES a
- *     `pii-migrated-<key>` PII policy from the legacy `policy.pii` blob that the
- *     downward projection keeps populated on every authored save. `ensureHooks`
- *     then correctly took its authored branch and threw the lifted key away —
- *     so the only trace was a row the customer never asked for appearing in
- *     their PII policy list, plus a database round trip on the hook path.
+ *  2. A PHANTOM PII POLICY WAS WRITTEN INTO THE TENANT. A pre-rename row read
+ *     as unconfigured, so the engine provisioned a `pii-migrated-<key>` PII
+ *     policy the customer never asked for. Evaluation no longer writes
+ *     anything; the pin below keeps it that way.
  *
- * Both now ask the question through `readPolicyList`, which is the same
- * question `ensureHooks` asks after normalising.
+ * The default-guardrail check asks the question through `readPolicyList`.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -82,14 +77,13 @@ vi.mock('@/lib/services/usage/usageEvents', () => ({
   resolveUsageAttribution: vi.fn(async () => ({})),
 }));
 
-import { toolCallSubject } from '@/lib/services/guardrail/hooks/contract';
+import { readHooks, toolCallSubject } from '@/lib/services/guardrail/hooks/contract';
 import type { HookScope } from '@/lib/services/guardrail/hooks/contract';
 import {
   DEFAULT_TOOL_GUARDRAIL_KEY,
   ensureDefaultToolGuardrail,
   runHook,
 } from '@/lib/services/guardrail/hooks/engine';
-import { ensureHooks, invalidateLiftedPiiPolicyCache } from '@/lib/services/guardrail/hooks/legacy';
 import { resetRecordCaches } from '@/lib/services/guardrail/hooks/recordCache';
 import { serializeGuardrail } from '@/lib/services/guardrail/guardrailService';
 
@@ -109,12 +103,8 @@ const scope: HookScope = {
  *
  * Three old spellings at once, because that is how one arrives: the array is
  * `checks`, the tool family is `tool_policy`, and the PII policy reference is
- * `policyKey`. `hooksVersion: 1` is what makes it authored — an operator sat
- * down and configured this. The legacy `policy` blob is populated too, which is
- * not decoration: `projectHooksToLegacy` writes those columns on every authored
- * save, so a real pre-rename row with a PII policy has BOTH. That combination
- * is precisely what armed the phantom-write bug, so leaving it out would make
- * this fixture unrepresentative in the one way that matters.
+ * `policyKey`. The pre-hook `policy` blob is populated too, as it is on a real
+ * pre-rename row; nothing reads it any more, and it must stay inert.
  *
  * Typed through `as unknown as IGuardrail` because the old spelling is, by
  * design, no longer expressible in the current types — which is the whole
@@ -168,13 +158,6 @@ function legacyRecord(overrides: Partial<IGuardrail> = {}): IGuardrail {
 
 beforeEach(() => {
   resetRecordCaches();
-  // NOT optional bookkeeping. `ensureLiftedPiiPolicy` memoises per
-  // (tenantDbName, guardrailKey) in a module-level map that `resetRecordCaches`
-  // does not own, so a lift performed by an EARLIER test in this file leaves
-  // the phantom-write assertion below satisfied by a cache hit rather than by
-  // the fix. Verified: without this line that test passes even with the defect
-  // reintroduced.
-  invalidateLiftedPiiPolicyCache();
   vi.clearAllMocks();
   hoisted.findPiiPolicyByKey.mockResolvedValue(null);
   hoisted.createPiiPolicy.mockImplementation(
@@ -190,14 +173,13 @@ afterEach(() => {
 // ── 1. It loads, with ALL of its policies ──────────────────────────────────
 
 describe('a pre-rename guardrail still loads', () => {
-  it('keeps BOTH policies, re-spelled, and stays authored', () => {
-    const { hooks, hooksVersion } = ensureHooks(legacyRecord());
+  it('keeps BOTH policies, re-spelled', () => {
+    const hooks = readHooks(legacyRecord());
 
     // The headline: nothing was dropped. A count of 1 (or 0) here is the
-    // customer-visible disaster — the legacy preset lift replacing an
-    // operator's configuration while every screen keeps saying it saved.
+    // customer-visible disaster — an operator's configuration reading back
+    // empty while every screen keeps saying it saved.
     expect(hooks.policies).toHaveLength(2);
-    expect(hooksVersion).toBe(1);
 
     const tool = hooks.policies.find((policy) => policy.id === 'chk-tools');
     const pii = hooks.policies.find((policy) => policy.id === 'chk-pii');
@@ -215,7 +197,7 @@ describe('a pre-rename guardrail still loads', () => {
     const record = Object.freeze(legacyRecord());
     const before = JSON.stringify(record.hooks);
 
-    expect(() => ensureHooks(record)).not.toThrow();
+    expect(() => readHooks(record)).not.toThrow();
     expect(JSON.stringify(record.hooks)).toBe(before);
   });
 
@@ -228,10 +210,9 @@ describe('a pre-rename guardrail still loads', () => {
 
     expect(policies).toHaveLength(2);
     expect(policies.map((policy) => policy.family).sort()).toEqual(['pii', 'tool_access']);
-    // The list page counts `hooks.policies` off exactly this view and calls a
-    // row with no usable array "derived", so an un-normalised view would render
-    // an authored guardrail as a legacy one.
-    expect((view.hooksVersion ?? 0) >= 1 && Array.isArray(view.hooks?.policies)).toBe(true);
+    // The list page counts `hooks.policies` off exactly this view, so an
+    // un-normalised view would render the guardrail as having none.
+    expect(Array.isArray(view.hooks?.policies)).toBe(true);
   });
 });
 
@@ -265,10 +246,9 @@ describe('a pre-rename guardrail still enforces', () => {
   });
 
   it('does NOT write a phantom PII policy into the tenant', async () => {
-    // THE REGRESSION PIN for bug 2. The record is authored, so the legacy PII
-    // lift must never run — reading `authored` off the raw `hooks.policies`
-    // made this record look unauthored and provisioned a
-    // `pii-migrated-legacy-guard` policy the operator never asked for.
+    // THE REGRESSION PIN for bug 2: evaluating a stored guardrail never
+    // provisions a `pii-migrated-legacy-guard` policy the operator never asked
+    // for.
     hoisted.findGuardrailByKey.mockResolvedValue(legacyRecord());
 
     await runHook({
@@ -286,19 +266,9 @@ describe('a pre-rename guardrail still enforces', () => {
     expect(hoisted.createPiiPolicy).not.toHaveBeenCalled();
   });
 
-  it('still lifts for a genuinely unauthored row, so the guard is not simply off', () => {
-    // The negative control. If `authored` were hardwired true the assertion
-    // above would pass for the wrong reason, and every real legacy row would
-    // lose its PII categories. `hooksVersion: 0` with no hooks at all is what
-    // an actual pre-hook-plane row looks like.
-    const preHookPlane = legacyRecord({ hooksVersion: 0, hooks: undefined });
-    const { hooks, hooksVersion } = ensureHooks(preHookPlane, 'pii-migrated-legacy-guard');
-
-    expect(hooksVersion).toBe(0);
-    const pii = hooks.policies.find((policy) => policy.family === 'pii');
-    expect(pii && 'piiPolicyKey' in pii ? pii.piiPolicyKey : undefined).toBe(
-      'pii-migrated-legacy-guard',
-    );
+  it('resolves a row with no hook config to an empty one, so it enforces nothing', () => {
+    const { hooks } = { hooks: readHooks(legacyRecord({ hooks: undefined })) };
+    expect(hooks.policies).toEqual([]);
   });
 });
 
@@ -479,7 +449,7 @@ describe('the pre-rename DEFAULT tool guardrail', () => {
 
     // And the operator's own policy survived rather than being overwritten by
     // `defaultToolGuardrailHooks()`.
-    const { hooks } = ensureHooks(record);
+    const hooks = readHooks(record);
     expect(hooks.policies).toHaveLength(1);
     expect(hooks.policies[0]?.id).toBe('tool-policy');
     expect(hooks.policies[0]?.family).toBe('tool_access');
@@ -504,9 +474,9 @@ describe('the pre-rename DEFAULT tool guardrail', () => {
 
     const record = await ensureDefaultToolGuardrail('t_tenant_a', 'tenant-a');
 
-    expect(record.hooksVersion).toBe(1);
+    expect(record.hooksVersion).toBeGreaterThanOrEqual(1);
     expect(record.mode).toBe('enforce');
-    const { hooks } = ensureHooks(record);
+    const hooks = readHooks(record);
 
     // The BUILT-IN set, not the operator's narrowed one — the tool gate plus
     // the DLP policies that make this guardrail worth having. Asserting the
@@ -530,7 +500,7 @@ describe('the pre-rename DEFAULT tool guardrail', () => {
 
     const record = await ensureDefaultToolGuardrail('t_tenant_a', 'tenant-a');
 
-    const { hooks } = ensureHooks(record);
+    const hooks = readHooks(record);
     expect(hooks.policies.length).toBeGreaterThan(0);
   });
 });

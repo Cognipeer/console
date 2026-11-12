@@ -26,9 +26,9 @@
  * finding from a SYNC policy stops the remaining work — no further
  * deterministic policy, no missing-model pre-pass, no model call. An ASYNC
  * policy never short-circuits, because it has by definition already let the
- * flow continue and so cannot be what stops it. Every legacy-lifted row and the
- * default tool guardrail set `shortCircuit: false` instead, to keep their whole
- * findings array for the audit trail and for the /v1/moderations category map.
+ * flow continue and so cannot be what stops it. The default tool guardrail sets
+ * `shortCircuit: false` instead, to keep its whole findings array for the audit
+ * trail and for the /v1/moderations category map.
  *
  * THE ORDER OF `findings` IS A USER-VISIBLE CONTRACT, not an implementation
  * detail: `logEvaluation` persists `findings[0]?.message` and both
@@ -110,6 +110,7 @@ import {
   allowVerdict,
   foldActions,
   mergeVerdicts,
+  readHooks,
   readPolicyList,
   toGuardrailMode,
   toLegacyAction,
@@ -134,7 +135,6 @@ import type {
   SideEffect,
   ToolAccessPolicyConfig,
 } from './contract';
-import { ensureHooks, ensureLiftedPiiPolicy } from './legacy';
 import { BLOCK_REASON_FOR_FAMILY, resolveBlockMessage } from './messages';
 import { applyMutations } from './mutations';
 import { getCachedGuardrail, invalidateGuardrailCache } from './recordCache';
@@ -291,10 +291,9 @@ const SYNC_BLOCK = { timing: 'sync', onFail: 'block' } as const;
 /**
  * A policy's timing, falling back to the hook's binding and then to sync.
  *
- * `GuardrailPolicyBase.schedule` is typed as REQUIRED, and every policy the
- * legacy lift produces has one — but the write path never enforced it, so an
- * authored `hooks` config posted to the API without a per-policy `schedule`
- * persists happily and then reaches here as `undefined`. Reading `.timing` off
+ * `GuardrailPolicyBase.schedule` is typed as REQUIRED, but the write path never
+ * enforced it, so an authored `hooks` config posted to the API without a
+ * per-policy `schedule` persists happily and then reaches here as `undefined`. Reading `.timing` off
  * it threw, which surfaced as a 500 on every evaluation of that guardrail:
  * a caller treating 5xx as retryable then fails closed, so an authored
  * tool-hook config blocked every tool call and blamed the transport.
@@ -476,10 +475,7 @@ export async function ensureDefaultToolGuardrail(
         // policies that actually enforce this guardrail cannot fail that way.
         failMode: 'open',
         mode: 'enforce',
-        // 1, not 0: this config is AUTHORED. A 0 would make `ensureHooks`
-        // re-derive it from the (absent) legacy `policy` on every read, and the
-        // guardrail would evaluate nothing.
-        hooksVersion: 1,
+        hooksVersion: GUARDRAIL_CONTRACT_VERSION,
         hooks: defaultToolGuardrailHooks(),
         metadata: { managed: 'guardrail-hook-plane', purpose: 'tool-safety-default' },
         createdBy: 'system',
@@ -521,14 +517,18 @@ function withDefaultHooks(record: IGuardrailV2): IGuardrailV2 {
   // someone had turned down to `monitor` silently started blocking tool calls
   // on upgrade, while logging a persistence bug that had not happened.
   const policies = readPolicyList(record.hooks);
-  if ((record.hooksVersion ?? 0) >= 1 && policies?.length) return record;
+  if (policies?.length) return record;
   logger.error('Default tool guardrail persisted without its hook config', {
     guardrailKey: record.key,
-    hooksVersion: record.hooksVersion ?? 0,
     policyCount: policies?.length ?? 0,
     hint: 'the guardrail INSERT/UPDATE column whitelist is missing hooks/hooksVersion',
   });
-  return { ...record, hooks: defaultToolGuardrailHooks(), hooksVersion: 1, mode: 'enforce' };
+  return {
+    ...record,
+    hooks: defaultToolGuardrailHooks(),
+    hooksVersion: GUARDRAIL_CONTRACT_VERSION,
+    mode: 'enforce',
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -688,36 +688,12 @@ async function evaluateGuardrailHook<S extends HookSubject>(
 
   if (mode === 'disabled') return vacuousVerdict<S>(base);
 
-  // The lifted `pii` policy points at the deterministic key
-  // `pii-migrated-<guardrailKey>` whether or not provisioning has succeeded, so
-  // this has to run BEFORE `ensureHooks` for that policy to reference a PII
-  // policy that exists. It is memoised (60s success / 5s failure) and returns
-  // immediately when the record has no legacy PII policy, so the steady state
-  // is free — and it is skipped entirely for an AUTHORED config, which has no
-  // legacy columns to lift.
-  // `readPolicyList`, so this gate asks the same question `ensureHooks` asks two
-  // lines below (which normalises first). Reading only `hooks.policies` off the
-  // raw record made every PRE-RENAME authored row — `hooks.checks` on disk —
-  // look unauthored, and the false branch is a tenant WRITE: `ensureLiftedPiiPolicy`
-  // creates a `pii-migrated-<key>` PII policy from the legacy `policy.pii` blob
-  // that the downward projection keeps populated on every authored save. The
-  // lifted key is then discarded (`ensureHooks` correctly takes its authored
-  // branch), so the only trace was a phantom PII policy appearing in the
-  // customer's list, plus a DB round trip on the hook path.
-  const authored = (record.hooksVersion ?? 0) >= 1 && readPolicyList(record.hooks) !== undefined;
-  const piiPolicyKey = authored
-    ? undefined
-    : ((await ensureLiftedPiiPolicy(scope.tenantDbName, record.tenantId, record).catch(
-        () => null,
-      )) ?? undefined);
-
-  const { hooks } = ensureHooks(record, piiPolicyKey);
+  const hooks = readHooks(record);
 
   // A hook runs IFF its binding is enabled AND an enabled policy names it. The
-  // downward projection derives the legacy `target` column from that same rule
-  // and the save-time validator rejects an enabled policy whose hook has no
-  // enabled binding, so treating a MISSING binding as "run" here would make the
-  // three disagree.
+  // save-time validator rejects an enabled policy whose hook has no enabled
+  // binding, so treating a MISSING binding as "run" here would make the two
+  // disagree.
   const binding = hooks.bindings?.[hook];
   if (!binding?.enabled) return vacuousVerdict<S>(base);
 
@@ -761,9 +737,9 @@ async function evaluateGuardrailHook<S extends HookSubject>(
     }
   };
 
-  // Default TRUE. `false` is what every legacy-lifted row and the default tool
-  // guardrail carry, so that their whole findings array survives for the audit
-  // trail and for the /v1/moderations category map.
+  // Default TRUE. `false` is what the default tool guardrail carries, so that
+  // its whole findings array survives for the audit trail and for the
+  // /v1/moderations category map.
   const shortCircuit = hooks.shortCircuit !== false;
   let stopped = false;
 

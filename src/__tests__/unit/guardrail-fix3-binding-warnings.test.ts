@@ -23,7 +23,6 @@ const hoisted = vi.hoisted(() => ({
 // what is under test, so the plugin's DB reach is stubbed.
 vi.mock('@/server/api/plugins/guardrails', () => ({
   guardrailByKeyInScope: hoisted.guardrailByKeyInScope,
-  toGuardrailRecord: (view: unknown) => view,
 }));
 
 import {

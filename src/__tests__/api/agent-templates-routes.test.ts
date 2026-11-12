@@ -150,7 +150,7 @@ const addWebSearch = (overrides: Json = {}) => db.createProvider({
   tenantId, projectId: PROJECT_ID, key: 'brave', type: 'websearch', driver: 'brave-search', label: 'Brave', status: 'active',
   credentialsEnc: 'sealed', settings: {}, createdBy: 'user-1', ...overrides,
 } as never);
-const addGuardrail = (name: string, projectId?: string) => createGuardrail(DB_NAME, tenantId, 'user-1', { name, type: 'preset', action: 'block', ...(projectId ? { projectId } : {}) });
+const addGuardrail = (name: string, projectId?: string) => createGuardrail(DB_NAME, tenantId, 'user-1', { name, action: 'block', ...(projectId ? { projectId } : {}) });
 const addAgent = (key: string, projectId = PROJECT_ID) => db.createAgent({
   tenantId, projectId, key, name: key, status: 'active', createdBy: 'user-1', config: { modelKey: MODEL },
 });

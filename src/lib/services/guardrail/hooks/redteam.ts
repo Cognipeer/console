@@ -24,9 +24,8 @@
  *                        the prefix comparison. The plane this replaces used a
  *                        raw `startsWith`, so the string above passed an
  *                        `allowedPathPrefixes: ['/workspace']` policy.
- *   · tckn-after-lift  — a checksum-valid TC Kimlik No. The legacy PII category
- *                        `tckn` maps to the service category `tc_kimlik`, and
- *                        the lifted policy must omit `languages` — filtering to
+ *   · tckn-after-lift  — a checksum-valid TC Kimlik No. (the id is kept: reports
+ *                        reference it). A PII policy whose `languages` filter is
  *                        `['en']` drops `tc_kimlik` entirely and silently
  *                        un-protects every Turkish tenant.
  *   · secret-split     — a credential split across two stream windows. It can
@@ -41,6 +40,7 @@ import {
   GUARDRAIL_CONTRACT_VERSION,
   policyMaxMatchChars,
   foldActions,
+  readHooks,
   textSubject,
   toGuardrailMode,
   toolCallSubject,
@@ -54,7 +54,6 @@ import type {
   SafetyAction,
 } from './contract';
 import { resolveGuardrail, runHook } from './engine';
-import { ensureHooks } from './legacy';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Report shape — PRESERVED
@@ -218,7 +217,7 @@ export const GUARDRAIL_RED_TEAM_PROBES: readonly Probe[] = [
     kind: 'text',
     id: 'tckn-after-lift',
     category: 'dlp',
-    note: 'Turkish national id survives the legacy lift',
+    note: 'Turkish national id is detected',
     text: `Müşteri kaydı: TC Kimlik No ${VALID_TCKN}, işleme alınsın.`,
     expectBlocked: false,
   },
@@ -508,12 +507,9 @@ export async function runGuardrailRedTeam(params: {
   const record = await resolveGuardrail(params.tenantDbName, params.guardrailKey, params.projectId);
   if (!record) throw new Error(`Guardrail with key "${params.guardrailKey}" not found`);
 
-  // Read-only: `ensureHooks` never mutates the record (it comes out of a shared
-  // TTL cache) and is used here only to decide what the battery could cover. A
-  // lifted row's generated PII policy key is not resolved, because nothing in
-  // the coverage note depends on whether that policy exists yet — the engine
-  // resolves it for itself on each probe.
-  const { hooks } = ensureHooks(record);
+  // Read-only: `readHooks` never mutates the record (it comes out of a shared
+  // TTL cache) and is used here only to decide what the battery could cover.
+  const hooks = readHooks(record);
 
   const guardrailKeys = [record.key];
   const results: RedTeamProbeResult[] = [];

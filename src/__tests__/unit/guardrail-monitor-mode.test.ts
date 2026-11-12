@@ -47,7 +47,29 @@ import type { IGuardrail } from '@/lib/database/provider.interface';
 const TENANT_DB = 'tenant_acme';
 const TENANT_ID = 'tenant-1';
 
-/** A guardrail whose PII policy blocks on email — the simplest live blocker. */
+/** A word-filter policy that blocks (or redacts) the leaked address. It needs
+ *  no database, so the only thing under test is the mode seam. */
+function leakPolicy(action: 'block' | 'redact') {
+  return {
+    contractVersion: 2,
+    policies: [
+      {
+        id: 'wf:leak',
+        family: 'word_filter',
+        enabled: true,
+        hooks: ['input.pre'],
+        schedule: { timing: 'sync', onFail: 'block' },
+        action,
+        builtinLists: { 'profanity-en': false, 'profanity-tr': false },
+        words: ['leak@corp.com'],
+      },
+    ],
+    bindings: { 'input.pre': { enabled: true, schedule: { timing: 'sync', onFail: 'block' } } },
+  };
+}
+
+/** A guardrail whose word-filter policy blocks on the leaked address — the
+ *  simplest live blocker. */
 function blockingGuardrail(overrides: Partial<IGuardrail> = {}): IGuardrail {
   return {
     _id: 'grail-monitor',
@@ -60,9 +82,7 @@ function blockingGuardrail(overrides: Partial<IGuardrail> = {}): IGuardrail {
     action: 'block',
     enabled: true,
     createdBy: 'user-1',
-    policy: {
-      pii: { enabled: true, action: 'block', categories: { email: true } },
-    },
+    hooks: leakPolicy('block'),
     ...overrides,
   } as IGuardrail;
 }
@@ -119,8 +139,8 @@ describe('monitor mode: findings still fire, nothing is enforced', () => {
     const result = await evaluate(
       blockingGuardrail({
         mode: 'monitor',
-        policy: { pii: { enabled: true, action: 'redact', categories: { email: true } } },
-      } as Partial<IGuardrail>),
+        hooks: leakPolicy('redact'),
+      } as unknown as Partial<IGuardrail>),
     );
 
     // A monitor-mode guardrail that silently masked the text would be enforcing

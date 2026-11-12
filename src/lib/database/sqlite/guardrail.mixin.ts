@@ -29,10 +29,10 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       db.prepare(`
         INSERT INTO ${TABLES.guardrails}
         (id, tenantId, projectId, key, name, description, type, action, enabled, failMode,
-          target, modelKey, policy, customPrompt, metadata, hooks, hooksVersion, mode,
+          target, modelKey, metadata, hooks, hooksVersion, mode,
           createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @type, @action, @enabled, @failMode,
-          @target, @modelKey, @policy, @customPrompt, @metadata, @hooks, @hooksVersion, @mode,
+          @target, @modelKey, @metadata, @hooks, @hooksVersion, @mode,
           @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -47,11 +47,9 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         failMode: guardrail.failMode ?? 'open',
         target: guardrail.target,
         modelKey: guardrail.modelKey ?? null,
-        policy: this.toJson(guardrail.policy ?? {}),
-        customPrompt: guardrail.customPrompt ?? null,
         metadata: this.toJson(guardrail.metadata ?? {}),
         // '{}' rather than NULL keeps the column shape identical to the CREATE
-        // TABLE default; both read back as "not authored" (see mapGuardrailRow).
+        // TABLE default; both read back as "no config" (see mapGuardrailRow).
         hooks: this.toJson(guardrail.hooks ?? {}),
         hooksVersion: guardrail.hooksVersion ?? 0,
         // Absent `mode` derives from `enabled`, exactly as the row mapper does,
@@ -83,8 +81,6 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (data.enabled !== undefined) { sets.push('enabled = @enabled'); params.enabled = this.toBoolInt(data.enabled); }
       if (data.failMode !== undefined) { sets.push('failMode = @failMode'); params.failMode = data.failMode; }
       if (data.modelKey !== undefined) { sets.push('modelKey = @modelKey'); params.modelKey = data.modelKey; }
-      if (data.policy !== undefined) { sets.push('policy = @policy'); params.policy = this.toJson(data.policy); }
-      if (data.customPrompt !== undefined) { sets.push('customPrompt = @customPrompt'); params.customPrompt = data.customPrompt; }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.hooks !== undefined) { sets.push('hooks = @hooks'); params.hooks = this.toJson(data.hooks); }
       if (data.hooksVersion !== undefined) { sets.push('hooksVersion = @hooksVersion'); params.hooksVersion = data.hooksVersion; }
@@ -410,12 +406,10 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         enabled: this.fromBoolInt(r.enabled),
         failMode: (r.failMode as IGuardrail['failMode']) ?? 'open',
         modelKey: r.modelKey as string | undefined,
-        policy: this.parseJson(r.policy, undefined),
-        customPrompt: r.customPrompt as string | undefined,
         metadata: this.parseJson(r.metadata, {}),
         // An absent column (pre-migration row) or the '{}' default MUST come
-        // back as undefined, not {}: ensureHooks() distinguishes the two, and
-        // an authored-but-empty config is a guardrail that runs NOTHING.
+        // back as undefined, not {}: the two are different states, and an
+        // authored-but-empty config is a guardrail that runs NOTHING.
         // The policy array being an array is the only structural marker of a
         // real one — under EITHER spelling, because a row written before the
         // `check` -> `policy` rename stores it as `checks`, and calling that

@@ -17,8 +17,8 @@
  *
  * ── WHAT THIS COMPONENT MAY NOT IMPORT ────────────────────────────────────
  * `hooks/contract` only — the leaf of the hook plane (types plus pure
- * constants). `hooks/legacy` and `hooks/engine` both pull in the
- * `@/lib/database` barrel, which constructs providers on load. `declaredHooks`
+ * constants). `hooks/engine` pulls in the `@/lib/database` barrel, which
+ * constructs providers on load. `declaredHooks`
  * below therefore RE-DERIVES what the server computes in
  * `declaredGuardrailHooks` (`server/api/plugins/guardrail-bindings.ts`); the
  * server stays authoritative and its 400 is what an operator sees if the two
@@ -77,16 +77,6 @@ const HOOK_HINT: Readonly<Record<HookId, string>> = {
   'tool.post': 'A tool result, before the model sees it.',
 };
 
-/**
- * What a guardrail written before the hook plane covers.
- *
- * Mirrors `liftLegacyBindings()` exactly: a legacy row was bindable to the two
- * direction slots and nothing else, so those are the two hooks it declares once
- * lifted. Rendering such a guardrail as covering NOTHING would disable every
- * checkbox on the one guardrail most consumers are actually bound to.
- */
-const LEGACY_DECLARED_HOOKS: readonly HookId[] = ['input.pre', 'output.pre'];
-
 const TOOL_HOOKS: readonly HookId[] = ['tool.pre', 'tool.post'];
 
 // ── data in ───────────────────────────────────────────────────────────────
@@ -99,7 +89,6 @@ export interface GuardrailBindingOption {
   action?: string;
   enabled?: boolean;
   hooks?: GuardrailHooksConfig;
-  hooksVersion?: number;
 }
 
 /**
@@ -140,12 +129,8 @@ export interface GuardrailBindingListProps {
  *
  * A consumer still on `inputGuardrailKey` / `outputGuardrailKey` used to get
  * these rows read-only plus a "Migrate to list" button, so converting was an
- * explicit act. The protection it was built for does not exist: `resolveBindings`
- * projects the legacy output slot onto `output.pre` AND `output.stream.delta`
- * (binding.ts:48-55) while the seed writes only `output.pre` — but a
- * pre-hook-plane guardrail is lifted with `stream: { enabled: false }` and no
- * policy on the stream hook (legacy.ts:537), so that extra projection resolves
- * to a key with nothing to run. Converting loses no enforcement.
+ * explicit act. The protection it was built for does not exist: converting
+ * loses no enforcement.
  *
  * So the ceremony only ever cost the operator a step and left two different
  * ways to bind one guardrail on screen at once. Seed from the slots, let them
@@ -163,11 +148,8 @@ export interface GuardrailBindingListProps {
  */
 export function declaredHooks(option: GuardrailBindingOption): HookId[] {
   const config = option.hooks;
-  // Same fail-safe the engine's `ensureHooks` applies: a version marker with no
-  // usable `policies` array is treated as absent rather than trusted.
-  if ((option.hooksVersion ?? 0) < 1 || !config || !Array.isArray(config.policies)) {
-    return [...LEGACY_DECLARED_HOOKS];
-  }
+  // A config with no usable `policies` array declares nothing, as in the engine.
+  if (!config || !Array.isArray(config.policies)) return [];
   const policies = config.policies;
   return HOOK_IDS.filter(
     (hook) =>
@@ -262,7 +244,6 @@ export function bindingOptionFromView(guardrail: GuardrailView): GuardrailBindin
     action: guardrail.action,
     enabled: guardrail.enabled,
     hooks: guardrail.hooks as GuardrailHooksConfig | undefined,
-    hooksVersion: guardrail.hooksVersion,
   };
 }
 

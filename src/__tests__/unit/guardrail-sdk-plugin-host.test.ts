@@ -24,7 +24,7 @@
  * assertion here is one a mock cannot make.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   createPluginHost,
   CONSOLE_HOOK_MAP as SDK_CONSOLE_HOOK_MAP,
@@ -105,15 +105,13 @@ async function compile(
       enabled: true,
     })),
   }));
-  vi.doMock('@/lib/services/guardrail/hooks/legacy', () => ({
-    ensureHooks: vi.fn(() => ({
-      hooksVersion: 1,
-      hooks: {
+  vi.doMock('@/lib/services/guardrail/hooks/contract', async (orig) => ({
+    ...(await orig<Record<string, unknown>>()),
+    readHooks: vi.fn(() => ({
         contractVersion: 2,
         policies,
         bindings,
-      },
-    })),
+      })),
   }));
 
   const adapter = await import('@/lib/services/guardrail/sdkAdapter');
@@ -124,7 +122,7 @@ async function compile(
 
 afterEach(() => {
   vi.doUnmock('@/lib/services/guardrail/hooks/engine');
-  vi.doUnmock('@/lib/services/guardrail/hooks/legacy');
+  vi.doUnmock('@/lib/services/guardrail/hooks/contract');
 });
 
 describe('compiled plugin vs. the real @cognipeer/agent-sdk host', () => {

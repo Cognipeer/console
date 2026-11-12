@@ -35,17 +35,6 @@ vi.mock('@/lib/services/guardrail/hooks/engine', () => ({
   assertContractVersion: vi.fn(),
 }));
 
-vi.mock('@/lib/services/guardrail/hooks/legacy', () => ({
-  ensureHooks: () => ({
-    hooksVersion: 1,
-    hooks: {
-      contractVersion: 2,
-      policies: [],
-      bindings: {},
-    },
-  }),
-}));
-
 /** The SDK at the boundary; each test scripts what `invoke()` reports. */
 vi.mock('@cognipeer/agent-sdk', () => {
   const hookNames = [

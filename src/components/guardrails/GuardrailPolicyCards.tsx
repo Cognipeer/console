@@ -59,16 +59,14 @@
  * `secretValues`.
  *
  * ── WHAT THIS COMPONENT MAY NOT IMPORT ──────────────────────────────────────
- * `catalog/*`, `hooks/contract` and `./policyFamilyMeta`. `hooks/legacy` (which
- * owns the authoritative `validateGuardrailHooks`) and `hooks/engine` both
- * import the `@/lib/database` barrel and construct providers on load; either one
- * in a client bundle is a build failure.
+ * `catalog/*`, `hooks/contract` and `./policyFamilyMeta`. `hooks/engine`
+ * imports the `@/lib/database` barrel and constructs providers on load; in a
+ * client bundle that is a build failure.
  */
 
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActionIcon,
-  Alert,
   Badge,
   Box,
   Button,
@@ -90,7 +88,6 @@ import {
   IconDots,
   IconEye,
   IconEyeOff,
-  IconInfoCircle,
   IconLayoutGrid,
   IconPencil,
   IconPlus,
@@ -325,10 +322,6 @@ export function nextPolicyId(base: string, takenIds: Iterable<string>): string {
  * two policies of one family bound to different hooks — and this is how an
  * operator gets the second one without rebuilding a pattern list by hand.
  *
- * The `legacy:` prefix is dropped because a copy is an authored policy: it was
- * not lifted from anything, and carrying the prefix would tell the next reader
- * the migration produced it.
- *
  * JSON round-trip rather than a spread: rules, category maps, role maps and
  * argument schemas are all nested, and a shallow copy leaves the two policies
  * editing the same arrays — the classic "I changed one and both moved". The
@@ -339,7 +332,7 @@ export function duplicatePolicy(
   takenIds: Iterable<string>,
 ): GuardrailPolicy {
   const clone: GuardrailPolicy = JSON.parse(JSON.stringify(policy)) as GuardrailPolicy;
-  const base = `${policy.id.replace(/^legacy:/, '') || policy.family}-copy`;
+  const base = `${policy.id || policy.family}-copy`;
   const label = policy.label?.trim();
   return Object.assign(clone, {
     id: nextPolicyId(base, takenIds),
@@ -410,8 +403,6 @@ export interface PolicyCardView {
   /** `spec.summarise(policy)` — what this policy is configured to DO. */
   summary: string;
   enabled: boolean;
-  /** Lifted from the legacy columns by the migration rather than authored. */
-  migrated: boolean;
   action: SafetyAction;
   /** False when the policy sets its own `action`; true when it takes the
    *  guardrail's. Two different facts, and an operator changing one needs to
@@ -499,7 +490,6 @@ export function describePolicyCard(
     icon: spec?.icon ?? '',
     summary: summarisePolicy(policy),
     enabled: policy.enabled !== false,
-    migrated: policy.id.startsWith('legacy:'),
     action: policy.action ?? options?.guardrailAction ?? 'block',
     actionInherited: policy.action === undefined,
     enforcement: describeEnforcement(policy, options?.bindings),
@@ -572,9 +562,6 @@ export interface GuardrailPolicyCardsProps extends PolicyDrawerPassThrough {
   guardrailFailMode?: GuardrailFailMode;
   /** The guardrail's mode, for the drawer's fail-mode note. */
   guardrailMode?: GuardrailMode;
-  /** True when `hooksVersion === 0`: these policies were LIFTED from the legacy
-   *  columns rather than authored, and saving promotes them. */
-  derived?: boolean;
   /**
    * Any value that CHANGES when the guardrail is successfully saved — a
    * timestamp, a revision, the response's `updatedAt`.
@@ -602,7 +589,6 @@ export default function GuardrailPolicyCards({
   blockedMessage,
   templates,
   locale,
-  derived,
   savedSignal,
   onChange,
   readOnly,
@@ -738,16 +724,6 @@ export default function GuardrailPolicyCards({
         )}
       </Card>
 
-      {derived && (
-        <Alert color="blue" variant="light" icon={<IconInfoCircle size={15} />} p="xs">
-          <Text size="xs">
-            These policies were derived from this guardrail&apos;s legacy fields, not authored. They
-            run exactly as they do today; editing one and saving promotes the whole configuration to
-            an authored one, and from then on these cards decide what runs.
-          </Text>
-        </Alert>
-      )}
-
       {policies.length === 0 ? (
         <Card withBorder radius="md" p="xl" style={{ borderStyle: 'dashed' }}>
           <Stack gap={6} align="center">
@@ -843,7 +819,6 @@ export default function GuardrailPolicyCards({
           blockedMessage={blockedMessage}
           templates={templates}
           locale={locale}
-          derived={derived}
           isNew={unsavedIds.includes(editing.id)}
           readOnly={readOnly}
           onApply={(next) => replace(editing.id, next)}
@@ -920,18 +895,6 @@ function PolicyCard({
                     <Badge size="xs" variant="default">
                       disabled
                     </Badge>
-                  )}
-                  {view.migrated && (
-                    <Tooltip
-                      label="Derived from this guardrail's legacy fields by the migration, not authored here."
-                      withArrow
-                      multiline
-                      w={260}
-                    >
-                      <Badge size="xs" variant="outline" color="gray">
-                        migrated
-                      </Badge>
-                    </Tooltip>
                   )}
                 </Group>
               </div>

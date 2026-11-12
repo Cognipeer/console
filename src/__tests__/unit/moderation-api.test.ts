@@ -54,12 +54,26 @@ describe('resolveModerationGuardrailKey', () => {
   });
 
   it('falls back to the first enabled guardrail with moderation active', async () => {
+    const moderation = (enabled: boolean) => ({
+      contractVersion: 2,
+      bindings: {},
+      policies: [
+        { id: 'm', family: 'moderation', enabled, hooks: ['input.pre'], schedule: { timing: 'sync', onFail: 'block' } },
+      ],
+    });
     db.listGuardrails.mockResolvedValue([
-      { key: 'pii-only', type: 'preset', policy: { moderation: { enabled: false } } },
-      { key: 'custom', type: 'custom' },
-      { key: 'mod-default', type: 'preset', policy: { moderation: { enabled: true } } },
+      { key: 'pii-only', hooks: moderation(false) },
+      { key: 'no-hooks' },
+      { key: 'mod-default', hooks: moderation(true) },
     ]);
     await expect(resolveModerationGuardrailKey(ctx)).resolves.toBe('mod-default');
+  });
+
+  it('reads the moderation policy from `hooks` only, never from a retired `policy` column', async () => {
+    db.listGuardrails.mockResolvedValue([
+      { key: 'old-row', type: 'preset', policy: { moderation: { enabled: true } } },
+    ]);
+    await expect(resolveModerationGuardrailKey(ctx)).rejects.toThrowError(/No moderation guardrail/);
   });
 
   it('throws a setup hint when no moderation guardrail exists', async () => {

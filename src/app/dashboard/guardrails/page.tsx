@@ -71,28 +71,10 @@ function effectiveMode(g: GuardrailView): GuardrailMode {
   return readGuardrailMode({ mode: g.mode, enabled: g.enabled });
 }
 
-/**
- * What this list can HONESTLY say about a row's policies.
- *
- * A guardrail written before the hook plane stores no `hooks` at all: the
- * engine lifts one from its legacy policy columns on every read
- * (`ensureHooks`), and that lift lives behind the database barrel, so it cannot
- * run in a browser. Re-implementing it here to produce a number would be a
- * second copy of the migration, drifting from the first the day either changes.
- *
- * So a count is reported only for a config someone AUTHORED (`hooksVersion >=
- * 1`), and a derived row says `derived` instead of a figure this page guessed.
- * `ensureHooks` applies the same fail-safe — a version marker with no usable
- * `policies` array is treated as absent rather than trusted.
- */
-function policySummary(g: GuardrailView): {
-  authored: boolean;
-  enabled: number;
-  total: number;
-} {
+/** How many of a row's policies are on, out of how many it has. */
+function policySummary(g: GuardrailView): { enabled: number; total: number } {
   const policies = Array.isArray(g.hooks?.policies) ? g.hooks.policies : [];
   return {
-    authored: (g.hooksVersion ?? 0) >= 1 && Array.isArray(g.hooks?.policies),
     enabled: policies.filter((c) => c.enabled).length,
     total: policies.length,
   };
@@ -336,24 +318,13 @@ export default function GuardrailsPage() {
       render: (g) => {
         const s = policySummary(g);
 
-        if (!s.authored) {
-          return (
-            <span
-              className="ds-badge"
-              title="Configured before the hook plane. Its policies are derived from the legacy policy columns every time it runs, so there is no stored list to count — open the guardrail to see what it evaluates."
-            >
-              derived
-            </span>
-          );
-        }
-
         if (s.enabled === 0) {
           return (
             <span
               className="ds-badge ds-badge-warn"
               title={
                 s.total === 0
-                  ? 'This guardrail has an authored configuration with no policies in it. It evaluates nothing.'
+                  ? 'This guardrail has no policies in its configuration. It evaluates nothing.'
                   : `All ${s.total} policies are switched off. This guardrail evaluates nothing.`
               }
             >

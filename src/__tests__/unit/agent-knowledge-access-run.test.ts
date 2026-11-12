@@ -46,13 +46,6 @@ vi.mock('@/lib/services/guardrail/hooks/engine', () => ({
   assertContractVersion: vi.fn(),
 }));
 
-vi.mock('@/lib/services/guardrail/hooks/legacy', () => ({
-  ensureHooks: () => ({
-    hooksVersion: 1,
-    hooks: { contractVersion: 2, policies: [], bindings: {} },
-  }),
-}));
-
 vi.mock('@/lib/services/rag/ragService', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   queryRag: hoisted.queryRag,

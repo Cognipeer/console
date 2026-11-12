@@ -54,10 +54,8 @@ mistake here, so decide before you build.
 | Typical use | Guard a customer-facing chat endpoint | Scrub an ingestion pipeline, an ETL job, or a prompt before it leaves your process |
 
 ::: danger There is no guardrail of type "pii"
-`GuardrailType` is `preset` or `custom` — nothing else. PII detection is a *check inside* a preset
-guardrail, configured on the **PII Detection** card. It uses the guardrail's own regex engine and its own
-category ids, which do **not** match the PII service's ids. A policy that enables `tc_kimlik` on the PII
-service and a guardrail that enables `tckn` are two unrelated configurations that happen to look alike.
+PII detection is a *policy inside* a guardrail's `hooks`: a `pii` policy that points at a PII service
+policy by `piiPolicyKey`, which owns the categories. There is no guardrail of its own for it.
 :::
 
 ## Before you start
@@ -327,47 +325,50 @@ curl -X POST https://your-host/api/client/v1/guardrails \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Support intake",
-    "type": "preset",
-    "action": "block",
     "failMode": "closed",
     "modelKey": "gpt-4o-mini",
-    "policy": {
-      "pii":        { "enabled": true,  "action": "redact",
-                      "categories": { "email": true, "phone": true, "creditCard": true } },
-      "wordFilter": { "enabled": true,  "action": "block", "words": ["competitor-name"] },
-      "moderation": { "enabled": true,  "categories": { "hate": true, "violence": true } },
-      "promptShield": { "enabled": true, "sensitivity": "balanced" }
+    "hooks": {
+      "contractVersion": 2,
+      "policies": [
+        { "id": "pii", "family": "pii", "enabled": true, "hooks": ["input.pre"],
+          "schedule": { "timing": "sync", "onFail": "block" },
+          "action": "redact", "piiPolicyKey": "support-pii" },
+        { "id": "words", "family": "word_filter", "enabled": true, "hooks": ["input.pre"],
+          "schedule": { "timing": "sync", "onFail": "block" },
+          "action": "block", "words": ["competitor-name"] }
+      ],
+      "bindings": { "input.pre": { "enabled": true,
+                                   "schedule": { "timing": "sync", "onFail": "block" } } }
     }
   }'
 ```
 
-Returns `201` with `{ "guardrail": { … } }`. Omit `policy` on a preset and you get the default policy:
-PII on and blocking, everything else off.
+Returns `201` with `{ "guardrail": { … } }`. What a guardrail enforces is its `hooks` configuration and
+nothing else: omit `hooks` and you get an empty configuration that enforces nothing until policies are
+added.
 
 | Field | Accepted values | Default |
 |---|---|---|
 | `name` | non-empty string, required | — |
-| `type` | `preset` \| `custom` — required | — |
+| `hooks` | the hook configuration: `policies`, `bindings`, `stream`, `blockedMessage`, `visibility`, `shortCircuit` | empty configuration |
 | `action` | `block` \| `warn` \| `flag` | `block` |
-| `failMode` | `open` \| `closed` | `open` |
+| `failMode` | `open` \| `closed` | `closed` when `hooks` runs a PII or prompt-shield policy, otherwise `open` |
 | `modelKey` | a model key from the Model Hub | none |
-| `customPrompt` | required when `type` is `custom` | — |
+| `mode` | `enforce` \| `monitor` \| `disabled` | `enforce` |
 | `enabled` | boolean | `true` |
 
-::: danger `action: "redact"` is rejected at the top level
+::: danger The old `policy` and `customPrompt` fields are refused
 ```json
-{ "error": "action must be \"block\", \"warn\", or \"flag\"" }
+{ "error": "policy is no longer supported: describe what the guardrail enforces in hooks.policies" }
 ```
-HTTP 400. Redaction is a per-check setting, not a guardrail-level one — it is only valid on
-`policy.pii.action` and `policy.wordFilter.action`, where `redact` joins `block`, `warn` and `flag` as a
-fourth value. The same rule applies to `PATCH`.
+HTTP 400, on `POST` and on `PATCH`. So is `type: "custom"`: a rule judged by an LLM is a `custom` policy
+inside `hooks.policies`. Responses still carry a read-only `policy` summary of which families are
+enabled; it is derived from `hooks`, never stored, and not accepted back.
 :::
 
-The API refuses a configuration whose LLM checks cannot run:
-
-- `type: "custom"` with no `modelKey` → `modelKey is required for custom guardrails (the rule is evaluated by an LLM)`
-- `policy.moderation.enabled` with neither `policy.moderation.modelKey` nor `modelKey` → `Content moderation is enabled but no model is configured (…)`
-- the same for `policy.promptShield`
+The API refuses a configuration whose LLM policies cannot run: an enabled `moderation`, `prompt_shield`
+or `custom` policy with neither its own `modelKey` nor the guardrail's `modelKey` is a `400`
+(`Policy "…" (moderation) is enabled but no model is configured (…)`).
 
 Update and delete address the guardrail by **key**, not by id:
 
@@ -376,9 +377,8 @@ curl -X PATCH  https://your-host/api/client/v1/guardrails/support-intake -H "Aut
 curl -X DELETE https://your-host/api/client/v1/guardrails/support-intake -H "Authorization: Bearer $TOKEN"
 ```
 
-`PATCH` writes `policy` as a whole object. Sending only `{"policy":{"pii":{…}}}` erases the word filter,
-moderation and prompt-shield configuration. Read the current policy from the dashboard, change what you
-need, and send it back complete.
+`PATCH` writes `hooks` as a whole object. Sending a `hooks` with only one policy erases the others. Read
+the current configuration from the dashboard, change what you need, and send it back complete.
 
 ### Evaluate text
 

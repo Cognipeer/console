@@ -5,7 +5,6 @@ import {
   evaluateCurl,
   hookCurl,
   hookRequestBody,
-  isLegacyConfig,
   parseSdkCapabilities,
   resolveVisibility,
   streamingEnforced,
@@ -47,21 +46,17 @@ function config(input: {
 }
 
 describe('declaredHooks', () => {
-  it('lifts a legacy record onto the two direction hooks rather than showing nothing', () => {
-    expect(declaredHooks(undefined)).toEqual(['input.pre', 'output.pre']);
-    expect(isLegacyConfig(undefined)).toBe(true);
+  it('declares nothing for a record with no hooks', () => {
+    expect(declaredHooks(undefined)).toEqual([]);
   });
 
-  it('treats a config with no usable policies array as legacy, exactly as ensureHooks does', () => {
-    // The fail-safe: a version marker with no policies is not trusted.
+  it('declares nothing for a config with no usable policies array', () => {
     const broken = { contractVersion: 2, bindings: {} } as unknown as GuardrailHooksConfig;
-    expect(isLegacyConfig(broken)).toBe(true);
-    expect(declaredHooks(broken)).toEqual(['input.pre', 'output.pre']);
+    expect(declaredHooks(broken)).toEqual([]);
   });
 
-  it('an authored config with nothing enabled declares nothing', () => {
+  it('a config with nothing enabled declares nothing', () => {
     const hooks = config({ policies: [] });
-    expect(isLegacyConfig(hooks)).toBe(false);
     expect(declaredHooks(hooks)).toEqual([]);
   });
 

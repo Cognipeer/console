@@ -56,9 +56,9 @@ export function GuardrailMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       // A spread copies EXPLICIT undefined keys, and $set turns those into BSON
       // null. Harmless while every field was required; with optional `hooks` /
       // `mode` a caller passing `{ hooks: undefined }` would persist null,
-      // which is not "absent" — ensureHooks() would re-derive on SQLite and
-      // read a null on Mongo, i.e. provider drift on the one field the hook
-      // plane is built on. SQLite already skips undefined keys by construction
+      // which is not "absent" — SQLite would read it back as undefined and
+      // Mongo as null, i.e. provider drift on the one field the hook plane is
+      // built on. SQLite already skips undefined keys by construction
       // (its UPDATE is a per-field `!== undefined` chain), so this is what
       // makes the two backends agree.
       for (const key of Object.keys(updateData)) {

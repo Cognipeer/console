@@ -20,10 +20,9 @@
  *
  * ── WHAT THIS COMPONENT MAY NOT IMPORT ────────────────────────────────────
  * `hooks/contract` only. It is the leaf of the hook plane: type-only imports
- * plus pure constants, no database, no agent SDK. `hooks/legacy` (which owns
- * the authoritative `validateGuardrailHooks`) and `hooks/engine` both import
+ * plus pure constants, no database, no agent SDK. `hooks/engine` imports
  * the `@/lib/database` barrel, which constructs providers on load — pulling
- * either into a client bundle would be a build failure at best. The local
+ * it into a client bundle would be a build failure at best. The local
  * `describeIssues()` below therefore duplicates a SUBSET of the server's
  * validation on purpose; the server stays authoritative and its message is
  * what an operator sees if the two ever disagree.
@@ -227,35 +226,7 @@ const MODE_DATA: ReadonlyArray<{ value: GuardrailMode; label: string }> =
 const MODE_DATA_COMPACT: ReadonlyArray<{ value: GuardrailMode; label: string }> =
   MODE_VOCABULARY.map(({ value, short }) => ({ value, label: short }));
 
-/**
- * `ensureHooks()` gives a lifted policy this prefix (`legacy:pii`,
- * `legacy:word_filter`, …). A lifted column is real and must be shown — a
- * legacy guardrail that rendered an empty grid would read as "nothing runs",
- * which is the opposite of the truth — but its payload was derived rather than
- * authored, so the column is labelled and its per-policy settings stay on the
- * Policies tab.
- */
-const LEGACY_POLICY_ID_PREFIX = 'legacy:';
-
 // ── pure helpers over the config ──────────────────────────────────────────
-
-export function emptyHooksConfig(): GuardrailHooksConfig {
-  return {
-    contractVersion: GUARDRAIL_CONTRACT_VERSION,
-    policies: [],
-    bindings: {},
-    // Newly authored configs opt INTO real-time streaming enforcement; only
-    // rows lifted from the legacy columns get `false`, so no existing tenant's
-    // streaming behaviour moves on upgrade.
-    stream: { enabled: true },
-    shortCircuit: true,
-  };
-}
-
-/** True when this policy came from `ensureHooks()`'s legacy lift. */
-export function isLiftedPolicy(policy: GuardrailPolicy): boolean {
-  return policy.id.startsWith(LEGACY_POLICY_ID_PREFIX);
-}
 
 /**
  * `Object.assign` rather than an object literal spread: `GuardrailPolicy` is a
@@ -305,8 +276,6 @@ export interface MatrixColumn {
   family: PolicyFamily;
   familyLabel: string;
   enabled: boolean;
-  /** Derived by the legacy lift rather than authored here. */
-  lifted: boolean;
   /** The hooks this policy could take given its family AND its own current
    *  configuration — not merely `POLICY_VALID_HOOKS[family]`. */
   validHooks: HookId[];
@@ -333,7 +302,6 @@ export function matrixColumns(
       family: policy.family,
       familyLabel: familyLabel(policy.family),
       enabled: policy.enabled,
-      lifted: isLiftedPolicy(policy),
       validHooks: HOOK_IDS.filter((hook) => canPolicyBind(policy, hook)),
     });
   }
@@ -389,8 +357,7 @@ export function cellBlockedReason(
 }
 
 /**
- * Family-level read, kept because a preset and the legacy screens still ask
- * "does anything from this family run here?".
+ * Family-level read: "does anything from this family run here?".
  */
 export function isCellOn(hooks: GuardrailHooksConfig, family: PolicyFamily, hook: HookId): boolean {
   return (hooks.policies ?? []).some(
@@ -505,9 +472,8 @@ function defaultPolicyFor(
         family,
         modelKey,
         prompt: '',
-        // Authored policies get the honest behaviour: a custom rule with no
-        // model raises an evaluation error rather than passing silently, which
-        // is what lifted legacy policies ('skip') still do.
+        // A custom rule with no model raises an evaluation error rather than
+        // passing silently.
         onMissingModel: 'error_finding',
       };
     case 'tool_access':
@@ -1161,9 +1127,6 @@ export interface GuardrailHooksMatrixProps {
    *  the persisted shape — see the note under the table. */
   mode: GuardrailMode;
   onModeChange: (mode: GuardrailMode) => void;
-  /** True when this config was DERIVED from the legacy columns rather than
-   *  authored (hooksVersion 0). Saving it promotes it to authored. */
-  derived?: boolean;
   /** Only used to seed a preset's LLM policies with a model. */
   models?: Array<{ value: string; label: string }>;
   readOnly?: boolean;
@@ -1183,7 +1146,6 @@ export default function GuardrailHooksMatrix({
   onChange,
   mode,
   onModeChange,
-  derived = false,
   models = [],
   readOnly,
   onOpenPolicy,
@@ -1340,24 +1302,6 @@ export default function GuardrailHooksMatrix({
         <Alert color="gray" icon={<IconInfoCircle size={16} />} variant="light">
           This guardrail&apos;s mode is <strong>Off</strong>, so nothing below runs — the grid is
           showing what <em>would</em> run. Set it back to Enforce or Monitor above.
-        </Alert>
-      )}
-
-      {derived && (
-        <Alert
-          color="blue"
-          icon={<IconInfoCircle size={16} />}
-          variant="light"
-          title="Derived from the legacy policy"
-        >
-          These policies were read off the legacy columns rather than authored, and they are
-          re-derived on every evaluation — which is why they carry a{' '}
-          <Text span ff="monospace" size="xs">
-            legacy:
-          </Text>{' '}
-          id and no name of their own. They are real and they run. The moment you save from this tab
-          the configuration becomes the source of truth and the legacy fields stop driving what
-          happens.
         </Alert>
       )}
 
@@ -1716,9 +1660,6 @@ function ColumnHeader({
       </Text>
       <Text size="xs">{familyMeta(column.family)?.description}</Text>
       {!column.enabled && <Text size="xs">Disabled — it runs nowhere until it is switched on.</Text>}
-      {column.lifted && (
-        <Text size="xs">Derived from the legacy policy; saving promotes it to an authored policy.</Text>
-      )}
       {onOpenPolicy && <Text size="xs">Click to open this policy.</Text>}
     </Stack>
   );
@@ -2009,7 +1950,7 @@ function HookDetailPanel({
           size="xs"
           w={230}
           label="Time limit (ms)"
-          description="Published to API clients as this hook's budget. 0 means no limit, which is what every legacy guardrail has. A policy's own time limit is what this console enforces."
+          description="Published to API clients as this hook's budget. 0 means no limit. A policy's own time limit is what this console enforces."
           min={0}
           max={120_000}
           step={100}

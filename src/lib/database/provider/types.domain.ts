@@ -230,9 +230,7 @@ export interface GuardrailPolicyBase<F extends GuardrailPolicyFamily> {
    * policy has already flagged something; `'onSideEffect'` only for a
    * destructive or external tool call (and for an UNCLASSIFIED one, because an
    * unknown tool is itself the risk signal). Absent — and any unrecognised
-   * stored value — means `'always'`, which is what every lifted legacy policy
-   * needs, since `evaluateGuardrail` has always run its LLM policies
-   * unconditionally.
+   * stored value — means `'always'`: the policy runs its model call unconditionally.
    *
    * Only the three LLM families read it (`resolveRunIf`,
    * services/guardrail/families/llm.ts): the deterministic families cost a pass
@@ -284,8 +282,7 @@ export interface GuardrailPolicyBase<F extends GuardrailPolicyFamily> {
  * `piiPolicyKey` is required once the policy is enabled, and there is deliberately
  * no inline category list: the PII service owns categories, languages, custom
  * patterns, checksum validators, per-category mask strategies and the tokenize
- * vault. Duplicating any of that here is how the two engines drift. Legacy
- * rows are lifted onto a generated policy instead of keeping their inline map.
+ * vault. Duplicating any of that here is how the two engines drift.
  */
 export interface GuardrailPiiPolicyConfig extends GuardrailPolicyBase<'pii'> {
   /**
@@ -299,30 +296,12 @@ export interface GuardrailPiiPolicyConfig extends GuardrailPolicyBase<'pii'> {
   actionOverride?: PiiAction;
   locale?: PiiLanguage;
   /**
-   * Runs the legacy NFKC + zero-width-strip + de-obfuscated-email second pass
-   * on top of the policy scan. The PII service performs no normalisation of
-   * its own, so without this the migration silently loses obfuscation
-   * resistance. Findings from that pass are span-less. Default true.
+   * Runs the NFKC + zero-width-strip + de-obfuscated-email second pass on top
+   * of the policy scan. The PII service performs no normalisation of its own,
+   * so without this obfuscated values go undetected. Findings from that pass
+   * are span-less. Default true.
    */
   detectObfuscated?: boolean;
-  /**
-   * Set ONLY by the legacy lift, never by an authored config: the guardrail's
-   * inline `policy.pii.categories`, already mapped onto the PII service's
-   * catalog ids (`tckn` -> `tc_kimlik` and friends).
-   *
-   * It exists because provisioning the lifted policy is a DATABASE WRITE on a
-   * row that has enforced PII for months without one. If that write fails —
-   * a throttled tenant, a read-only replica, a permissions gap — the policy
-   * would degrade to `evaluation_error`, i.e. fail OPEN on the single most
-   * sensitive detector, on rows the operator never touched. With this list the
-   * scan falls back to the stateless `detectPii` API, which needs no policy row
-   * and no tenant scope, and reproduces exactly the categories the legacy
-   * detector ran.
-   *
-   * An AUTHORED config has no legacy columns to lift and therefore no fallback:
-   * enabling `pii` there requires a real `piiPolicyKey`, which is the point.
-   */
-  legacyCategories?: Record<string, boolean>;
 }
 
 /**
@@ -654,8 +633,8 @@ export interface GuardrailHooksConfig {
    * first, then the model-backed ones and `webhook`) is fixed. This says only
    * whether the work after a blocking finding is still worth doing.
    *
-   * Every legacy-lifted row and the default tool guardrail carry `false`, to
-   * keep their whole findings array for the audit trail and for the
+   * The default tool guardrail carries `false`, to
+   * keep its whole findings array for the audit trail and for the
    * /v1/moderations category map.
    */
   shortCircuit?: boolean;
@@ -703,36 +682,14 @@ export interface IGuardrail {
   failMode?: GuardrailFailMode;
   modelKey?: string;
   /**
-   * The legacy preset blob, and a real COLUMN on both backends.
-   *
-   * NOT a policy in the `hooks.policies` sense, despite the name — this is the
-   * pre-hook-plane pii/wordFilter/moderation/promptShield bundle that
-   * `liftLegacyHooks` derives a policy list FROM and `projectHooksToLegacy`
-   * writes back TO. The two are told apart by number: singular `policy` is the
-   * legacy blob, plural `policies` is the hook plane's list. It is kept and
-   * kept current because an older console binary on the same tenant database
-   * still reads it.
-   *
-   * @deprecated Author `hooks.policies` instead. Still WRITTEN on every save
-   * (see `projectHooksToLegacy`) and still READ by `moderationApi` and by
-   * older binaries, so it cannot be dropped.
-   */
-  policy?: IGuardrailPresetPolicy;
-  // For custom prompt guardrails
-  customPrompt?: string;
-  /**
-   * v2 hook plane. Absent on every row written before it shipped, so it is
-   * OPTIONAL and the legacy columns above stay permanently populated: they are
-   * what an older console binary on the same tenant database, and the
-   * finding-shape consumers that scan `policy`, still read.
+   * The guardrail's configuration, and the only stored description of what it
+   * enforces. Absent or without a `policies` array means nothing is configured
+   * and nothing is enforced.
    */
   hooks?: GuardrailHooksConfig;
   /**
-   * 0 / absent means `hooks` was DERIVED from the legacy columns and must be
-   * re-derived on every read, so a later fix to the projection reaches every
-   * un-edited record. >= 1 means an operator authored it and it is used
-   * verbatim. Deriving-and-persisting on the evaluate path instead would be a
-   * write per evaluation and would freeze the derivation.
+   * The contract version `hooks` was written under. Informational: nothing
+   * branches on it, the engine uses `hooks` as stored.
    */
   hooksVersion?: number;
   /** Absent = derived from `enabled` ('enforce' when on, 'disabled' when off). */

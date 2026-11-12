@@ -1,5 +1,5 @@
 /**
- * Regression guards for the two places a moderation policy is REBUILT field by
+ * Regression guards for the places a moderation policy is REBUILT field by
  * field on its way to the evaluator. Both dropped `detector` when it was added,
  * which sent a classifier policy down the LLM-judge path and failed the run with
  * "not an LLM model" — a silent misroute that no type error catches, because
@@ -13,14 +13,6 @@ const read = (relative: string) =>
   readFileSync(path.join(process.cwd(), relative), 'utf8');
 
 describe('the moderation policy keeps its detector across every rebuild', () => {
-  it('the legacy record converter carries it', () => {
-    const source = read('src/lib/services/guardrail/hooks/legacy.ts');
-    const block = source.slice(source.indexOf("family: 'moderation'"));
-    const end = block.indexOf('satisfies ModerationPolicyConfig');
-    expect(end).toBeGreaterThan(-1);
-    expect(block.slice(0, end)).toContain('detector');
-  });
-
   it('the family dispatcher carries it', () => {
     const source = read('src/lib/services/guardrail/families/llm.ts');
     const block = source.slice(source.indexOf("case 'moderation':"));

@@ -575,11 +575,6 @@ describe('the card', () => {
     expect(view.name).toBe('Banned wording');
   });
 
-  it('marks a policy the migration lifted rather than one somebody authored', () => {
-    expect(describePolicyCard(CUSTOMER_PII).migrated).toBe(true);
-    expect(describePolicyCard(SQLI).migrated).toBe(false);
-  });
-
   it('warns about a policy bound to no hook', () => {
     const orphan = { ...SQLI, hooks: [] as HookId[] };
     const view = describePolicyCard(orphan);
@@ -658,10 +653,10 @@ describe('duplicate', () => {
     expect(duplicatePolicy({ ...SQLI, label: undefined }, ids(ALL)).label).toBeUndefined();
   });
 
-  it('drops the migration prefix, because a copy was authored', () => {
+  it('gives the copy a fresh id that is not already taken', () => {
     const copy = duplicatePolicy(CUSTOMER_PII, ids(ALL));
-    expect(copy.id.startsWith('legacy:')).toBe(false);
-    expect(describePolicyCard(copy).migrated).toBe(false);
+    expect(copy.id).not.toBe(CUSTOMER_PII.id);
+    expect(ids(ALL)).not.toContain(copy.id);
   });
 });
 

@@ -49,9 +49,9 @@
  * because that is what it is to its caller.
  *
  * ── WHAT THIS COMPONENT MAY NOT IMPORT ──────────────────────────────────────
- * `catalog/*` and `hooks/contract` only. `hooks/legacy` and `hooks/engine` both
- * import the `@/lib/database` barrel, which constructs providers on load; either
- * one in a client bundle is a build failure.
+ * `catalog/*` and `hooks/contract` only. `hooks/engine` imports the
+ * `@/lib/database` barrel, which constructs providers on load; in a client
+ * bundle that is a build failure.
  */
 
 import { useMemo, useState } from 'react';

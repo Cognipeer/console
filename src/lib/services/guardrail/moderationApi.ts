@@ -10,9 +10,11 @@
 
 import { randomUUID } from 'node:crypto';
 import { getDatabase } from '@/lib/database';
+import type { IGuardrail } from '@/lib/database';
 import { evaluateGuardrail } from './guardrailService';
 import { handleModerationRequest } from '@/lib/services/models/inferenceService';
 import type { ModerationClassification } from '@/lib/providers';
+import { readHooks } from './hooks/contract';
 import { MODERATION_CATEGORIES } from './types';
 import type { GuardrailFinding } from './types';
 
@@ -81,6 +83,14 @@ export type ModerationTarget =
   | { kind: 'guardrail'; key: string }
   | { kind: 'model'; key: string };
 
+/** True when the guardrail has an enabled moderation policy: the /v1/moderations
+ *  fallback picks the first enabled guardrail that does. */
+function runsModeration(record: IGuardrail): boolean {
+  return readHooks(record).policies.some(
+    (policy) => policy.enabled && policy.family === 'moderation',
+  );
+}
+
 /**
  * Decide what `model` names.
  *
@@ -116,9 +126,7 @@ export async function resolveModerationTarget(
   }
 
   const guardrails = await db.listGuardrails({ projectId: ctx.projectId, enabled: true });
-  const guardrail = guardrails.find(
-    (record) => record.type === 'preset' && record.policy?.moderation?.enabled,
-  );
+  const guardrail = guardrails.find(runsModeration);
   if (guardrail) return { kind: 'guardrail', key: guardrail.key };
 
   const models = await db.listModels(ctx.projectId ? { projectId: ctx.projectId } : {});
@@ -152,9 +160,7 @@ export async function resolveModerationGuardrailKey(
   }
 
   const guardrails = await db.listGuardrails({ projectId: ctx.projectId, enabled: true });
-  const fallback = guardrails.find(
-    (record) => record.type === 'preset' && record.policy?.moderation?.enabled,
-  );
+  const fallback = guardrails.find(runsModeration);
   if (!fallback) {
     throw new ModerationRequestError(
       'No moderation guardrail configured. Create an enabled guardrail with the moderation policy, or pass its key as `model`.',

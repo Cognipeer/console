@@ -30,7 +30,7 @@ When a model has guardrails attached the runtime applies them at two points: bef
 
 ### Word lists
 
-The word filter merges four sources: built-in lists (toggled per policy), **tenant word lists** (managed under Guardrails → Word lists, uploaded as CSV/TXT or edited inline, up to 20k entries), inline `words`, and `regexes`. Uploaded lists are referenced from policies by key (`policy.wordFilter.customListKeys`) and are cached for 60 s at evaluation time.
+The word filter merges four sources: built-in lists (toggled per policy), **tenant word lists** (managed under Guardrails → Word lists, uploaded as CSV/TXT or edited inline, up to 20k entries), inline `words`, and `regexes`. Uploaded lists are referenced from policies by key (`customListKeys` on a `word_filter` policy) and are cached for 60 s at evaluation time.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|

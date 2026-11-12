@@ -10,11 +10,11 @@ import {
   listGuardrails,
 } from '@/lib/services/guardrail';
 import type { GuardrailView } from '@/lib/services/guardrail';
-import { ensureHooks } from '@/lib/services/guardrail/hooks/legacy';
 import {
   POLICY_VALID_HOOKS,
   HOOK_IDS,
   STREAM_ELIGIBLE_FAMILIES,
+  readHooks,
   toGuardrailMode,
 } from '@/lib/services/guardrail/hooks/contract';
 import type {
@@ -40,7 +40,6 @@ import {
   readHookEvaluationOptions,
   resolveVerdictVisibility,
   respondWithHookVerdict,
-  toGuardrailRecord,
 } from './guardrails';
 import {
   VALID_TYPES,
@@ -71,9 +70,6 @@ type GuardrailsListQuery = {
 /** What a listed guardrail says about its hook plane. */
 interface GuardrailHooksSummary {
   contractVersion: number;
-  /** false = this config was DERIVED from the legacy columns on read, and will
-   *  be re-derived on the next one. */
-  authored: boolean;
   /** The hooks `/guardrails/hooks/evaluate` will actually evaluate against this
    *  guardrail. A hook outside this list answers with a vacuous allow. */
   servable: HookId[];
@@ -136,20 +132,14 @@ function dispatchesOn(policy: GuardrailPolicy, hook: HookId): boolean {
 }
 
 /** A hook runs iff its binding is enabled AND an enabled policy names it —
- *  hooks/engine.ts states the rule, hooks/legacy.ts's downward projection and
- *  the save-time validator both depend on it. */
+ *  hooks/engine.ts states the rule, and the save-time validator depends on it. */
 function servesHook(hooks: GuardrailHooksConfig, hook: HookId): boolean {
   if (hooks.bindings?.[hook]?.enabled !== true) return false;
   return (hooks.policies ?? []).some((policy) => dispatchesOn(policy, hook));
 }
 
 function summarizeHooks(view: GuardrailView): GuardrailHooksSummary {
-  // A LEGACY row summarises too: `ensureHooks` lifts it exactly as the engine
-  // does, so what a caller reads is what would actually be enforced rather than
-  // "no hooks". Nothing is written — a GET must not provision the lifted PII
-  // policy, which the engine does for itself on the evaluate path.
-  const resolved = ensureHooks(toGuardrailRecord(view));
-  const hooks = resolved.hooks;
+  const hooks = readHooks(view);
 
   const bindings: GuardrailHooksSummary['bindings'] = {};
   for (const hook of HOOK_IDS) {
@@ -166,7 +156,6 @@ function summarizeHooks(view: GuardrailView): GuardrailHooksSummary {
 
   return {
     contractVersion: hooks.contractVersion,
-    authored: resolved.hooksVersion >= 1,
     servable: HOOK_IDS.filter((hook) => servesHook(hooks, hook)),
     bindings,
     policies: (hooks.policies ?? []).map((policy) => ({
@@ -187,7 +176,7 @@ function toClientGuardrailListItem(view: GuardrailView): ClientGuardrailListItem
   const item: ClientGuardrailListItem & { hooks?: GuardrailHooksConfig } = {
     ...view,
     // `mode` with `enabled` folded in, by the same rule the engine applies. A
-    // legacy row has no mode column at all, so a caller reading `mode: null`
+    // row can have no mode column at all, so a caller reading `mode: null`
     // cannot tell "unset, therefore enforcing" from "not enforcing".
     effectiveMode: toGuardrailMode(view.mode, view.enabled),
     hooksSummary: summarizeHooks(view),
@@ -386,7 +375,7 @@ export const clientGuardrailsApiPlugin: FastifyPluginAsync = async (app) => {
       // a caller that enabled them on the guardrail it cares about and still
       // gets a 200 because another key in the same call had not.
       const visibility = records
-        .map((record) => resolveVerdictVisibility(ensureHooks(toGuardrailRecord(record)).hooks))
+        .map((record) => resolveVerdictVisibility(readHooks(record)))
         .reduce((merged, next) => ({
           headers: merged.headers || next.headers,
           useVerdictStatusCodes: merged.useVerdictStatusCodes || next.useVerdictStatusCodes,

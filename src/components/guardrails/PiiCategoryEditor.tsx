@@ -103,7 +103,7 @@ interface PiiPolicyView {
   metadata?: Record<string, unknown>;
 }
 
-/** Only the part of a guardrail this panel counts on — a legacy row with no
+/** Only the part of a guardrail this panel counts on — a record with no
  *  `hooks` cannot reference a PII policy by key, so it contributes nothing. */
 interface GuardrailReferenceRow {
   hooks?: { policies?: Array<{ family?: string; piiPolicyKey?: string }> };

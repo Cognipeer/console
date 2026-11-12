@@ -39,9 +39,8 @@
  *
  * ── DEPENDENCY RULE ─────────────────────────────────────────────────────────
  * Client-bundle safe: `hooks/contract` and `services/guardrail/constants` only
- * — the same two `policyFamilyMeta.ts` is allowed. Never `hooks/legacy`,
- * `hooks/engine` or `@/lib/database`, each of which constructs providers on
- * load. No React, no `@tabler/icons-react`: an icon is a NAME here (see
+ * — the same two `policyFamilyMeta.ts` is allowed. Never `hooks/engine`
+ * or `@/lib/database`, each of which constructs providers on load. No React, no `@tabler/icons-react`: an icon is a NAME here (see
  * `families.ts`), which is what lets the server, a plain unit test and the
  * client all import this module.
  */
@@ -182,8 +181,7 @@ interface PolicyFieldCommon {
    *     (`minEntropy`, `maxArgDepth`, `timeoutMs`),
    *   · an OVERRIDE of a value that is already inherited from somewhere
    *     (`failMode`, a rule's own `action`, the per-policy block `message`),
-   *   · a compatibility carry-over only an upgrade writes (`legacyCategories`,
-   *     `word_filter.regexes`),
+   *   · a compatibility carry-over (`word_filter.regexes`),
    *   · a dial nobody reaches for until they have watched the policy run
    *     (`allowValues`, `runIf`, the `tool_access` argument-path declarations).
    *
@@ -339,11 +337,11 @@ export interface StringListFieldSpec extends PolicyFieldCommon {
 
 /**
  * `Record<string, boolean>`. `word_filter.builtinLists`,
- * `moderation.categories`, `pii.legacyCategories`.
+ * `moderation.categories`.
  *
  * `options` present = a closed, labelled key set rendered as checkboxes.
- * `options` absent = the keys come from whatever is stored (a lifted
- * `legacyCategories` map), and the control can only list and toggle them.
+ * `options` absent = the keys come from whatever is stored, and the control can
+ * only list and toggle them.
  */
 export interface FlagMapFieldSpec extends PolicyFieldCommon {
   kind: 'flag_map';

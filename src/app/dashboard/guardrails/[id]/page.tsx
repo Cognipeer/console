@@ -7,7 +7,6 @@ import {
   Alert,
   Badge,
   Button,
-  Card,
   Center,
   Code,
   Collapse,
@@ -43,7 +42,6 @@ import {
   IconCode,
   IconCopy,
   IconDots,
-  IconInfoCircle,
   IconLayoutGrid,
   IconListCheck,
   IconPlayerPlay,
@@ -58,9 +56,7 @@ import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/l
 import GuardrailPolicyCards from '@/components/guardrails/GuardrailPolicyCards';
 import GuardrailPolicyDrawer from '@/components/guardrails/GuardrailPolicyDrawer';
 import GuardrailHooksMatrix, {
-  HOOK_PRESETS,
   describeIssues,
-  emptyHooksConfig,
   estimateStreamCost,
   setHookEnabled,
 } from '@/components/guardrails/GuardrailHooksMatrix';
@@ -78,6 +74,7 @@ import {
 import type { GuardrailView } from '@/lib/services/guardrail/constants';
 import {
   HOOK_IDS,
+  emptyHooksConfig,
   readGuardrailMode,
   writeGuardrailMode,
 } from '@/lib/services/guardrail/hooks/contract';
@@ -87,7 +84,6 @@ import type {
   GuardrailHooksConfig,
   GuardrailMode,
 } from '@/lib/services/guardrail/hooks/contract';
-import type { IGuardrailPresetPolicy } from '@/lib/database';
 
 interface ModelOption {
   value: string;
@@ -174,13 +170,10 @@ function blankHooksConfig(): GuardrailHooksConfig {
  *
  * WHAT LEFT THIS FORM, AND WHERE IT WENT:
  *   · `action`   — the guardrail-level default action. Nobody sets it any more:
- *     every policy states its own, and `projectHooksToLegacy` (server side, on
- *     every save that carries `hooks`) folds them into the record's `action`
- *     column. See `handleSave`.
+ *     every policy states its own. See `handleSave`.
  *   · `failMode` — was labelled a DEFAULT for policies that set none, which is
  *     exactly what it is; it belongs on the policy, behind the drawer's
  *     disclosure, and only for the families that can actually fail to run.
- *     `foldFailModes` keeps projecting the column from those policies.
  *   · `enabled`  — absorbed by `mode`. See MODE_OPTIONS.
  */
 interface GuardrailFormValues {
@@ -211,7 +204,6 @@ export default function GuardrailDetailPage() {
   const streamParam = searchParams.get('stream');
   const streamPreference: boolean | null =
     streamParam === 'on' ? true : streamParam === 'off' ? false : null;
-  const streamOptOut = streamPreference === false;
 
   const [guardrail, setGuardrail] = useState<GuardrailView | null>(null);
   const [models, setModels] = useState<ModelOption[]>([]);
@@ -241,24 +233,10 @@ export default function GuardrailDetailPage() {
   const [activeTab, setActiveTab] = useState<string>(initialTab);
   const [dateFilter, setDateFilter] = useDashboardDateFilterState();
 
-  // policy state managed separately to avoid deep form cloning issues
-  const [policy, setPolicy] = useState<IGuardrailPresetPolicy | undefined>(undefined);
-  const [customPrompt, setCustomPrompt] = useState('');
-
   // ── hook plane ──
   const [hooks, setHooks] = useState<GuardrailHooksConfig | null>(null);
-  const [hooksVersion, setHooksVersion] = useState(0);
   const [mode, setMode] = useState<GuardrailMode>('enforce');
-  /**
-   * Whether the operator has touched the hook plane in this session.
-   *
-   * Load-bearing. A config with `hooksVersion` 0 is DERIVED from the legacy
-   * columns and re-derived on every read, so a later fix to the projection
-   * reaches it. Sending it back as version 1 on a save that only changed the
-   * guardrail's name would freeze that derivation for the row, permanently and
-   * invisibly. So the hook blob goes out only when it was actually edited, or
-   * when the row was already authored.
-   */
+  /** Whether the operator has touched the hook plane in this session. */
   const [hooksDirty, setHooksDirty] = useState(false);
   /**
    * A policy opened from the HOOKS tab.
@@ -342,14 +320,10 @@ export default function GuardrailDetailPage() {
   };
 
   /**
-   * Whether this save will actually TRANSMIT the hook blob.
-   *
-   * It is also the save gate's switch. A legacy guardrail nobody has touched
-   * sends no `hooks`, so nothing about its derived config can make a save fail
-   * — the operator can still rename it, or turn it off, without first being
-   * made to fix a configuration they never authored.
+   * Whether this save will TRANSMIT the hook blob, and the save gate's switch.
+   * Every guardrail has a stored config, so it always goes out with the save.
    */
-  const sendHooks = hooks !== null && (hooksDirty || hooksVersion >= 1);
+  const sendHooks = hooks !== null;
 
   /**
    * The client half of `validateGuardrailHooks`. That function lives behind the
@@ -485,64 +459,18 @@ export default function GuardrailDetailPage() {
         modelKey: g.modelKey ?? '',
       });
 
-      setPolicy(g.policy ?? undefined);
-      setCustomPrompt(g.customPrompt ?? '');
-
-      /**
-       * The record alone cannot answer "what does this guardrail evaluate?".
-       * A row written before the hook plane has `hooks` undefined and is LIFTED
-       * from its legacy columns at read time by `ensureHooks`, which runs behind
-       * the database barrel and so cannot run here. `/compiled` is the endpoint
-       * that has already applied it, and it reports `hooksVersion` 0 for a
-       * derived config — exactly the distinction this screen has to draw.
-       *
-       * Fetched after the record because it is keyed by `key`, not by id, and
-       * treated as optional: an older API build without the route must still
-       * render this page rather than break it.
-       */
-      let loadedHooks: GuardrailHooksConfig | null = g.hooks ?? null;
-      let loadedVersion = g.hooksVersion ?? 0;
-      let loadedMode: GuardrailMode | undefined = g.mode;
-      const compiledRes = await fetch(
-        `/api/guardrails/${encodeURIComponent(g.key)}/compiled`,
-        { cache: 'no-store' },
-      ).catch(() => null);
-      if (compiledRes?.ok) {
-        const compiled = (await compiledRes.json()) as {
-          hooks?: GuardrailHooksConfig;
-          guardrail?: { hooksVersion?: number; mode?: GuardrailMode | null };
-        };
-        if (compiled.hooks) loadedHooks = compiled.hooks;
-        if (typeof compiled.guardrail?.hooksVersion === 'number') {
-          loadedVersion = compiled.guardrail.hooksVersion;
-        }
-        if (compiled.guardrail?.mode) loadedMode = compiled.guardrail.mode;
-      }
+      // The stored config; a record with none is an empty one.
+      let loadedHooks: GuardrailHooksConfig = g.hooks ?? blankHooksConfig();
       /**
        * Apply the create modal's streaming choice to a config nobody has
-       * authored yet.
+       * populated yet. Gated on the parameter being PRESENT, not on its
+       * absence, and on the config having no policies: seeding on every visit
+       * would flip the switch on for guardrails that chose otherwise.
        *
-       * Without this the toggle changes nothing. `/compiled` answers for EVERY
-       * guardrail that exists — `ensureHooks` lifts one from the legacy columns
-       * when none was authored — so `loadedHooks` is never null in practice,
-       * the "no hook configuration yet" branch below is effectively
-       * unreachable, and that branch used to be the only place the choice was
-       * read. A guardrail created with streaming ticked on then arrived
-       * carrying `liftLegacyHooks`' `stream: { enabled: false }`, while the
-       * modal had just quoted the operator a hold-back window and its latency.
-       *
-       * Gated on the parameter being PRESENT, not on its absence: seeding on
-       * every visit would flip the switch on for every pre-hook-plane guardrail
-       * in the fleet and report a hold-back none of them do.
-       *
-       * Deliberately does NOT mark the config dirty. Arriving on a page must
-       * not manufacture unsaved changes, and a version-0 config sent back as
-       * authored freezes the legacy projection for the row permanently (see
-       * `hooksDirty`). The preference rides along with the first real edit
-       * instead — which is also the edit that gives the guardrail a policy on
-       * the streaming hook, the thing that makes the setting mean anything.
+       * Deliberately does NOT mark the config dirty: arriving on a page must
+       * not manufacture unsaved changes.
        */
-      if (streamPreference !== null && loadedVersion === 0 && loadedHooks) {
+      if (streamPreference !== null && (loadedHooks.policies ?? []).length === 0) {
         loadedHooks = {
           ...loadedHooks,
           stream: { ...loadedHooks.stream, enabled: streamPreference },
@@ -550,13 +478,12 @@ export default function GuardrailDetailPage() {
       }
 
       setHooks(loadedHooks);
-      setHooksVersion(loadedVersion);
       // The engine's own fold over the PAIR, not a second opinion about it:
       // `readGuardrailMode` wraps `toGuardrailMode`, so a row that never wrote
       // the column, one that wrote an alias ('simulate', 'off'), and one that
       // says 'enforce' beside `enabled: false` all read here exactly as the
       // evaluator reads them.
-      setMode(readGuardrailMode({ mode: loadedMode, enabled: g.enabled }));
+      setMode(readGuardrailMode({ mode: g.mode, enabled: g.enabled }));
       setHooksDirty(false);
 
       if (modelsRes.ok) {
@@ -617,21 +544,9 @@ export default function GuardrailDetailPage() {
     setSaving(true);
     try {
       /**
-       * WHAT THIS PATCH DELIBERATELY DOES NOT SEND, and why the columns survive.
-       *
-       * `action` and `failMode` have no control on this screen any more, and
-       * omitting them is not the same as clearing them:
-       *   · with `hooks` in the body the server RECOMPUTES both from the
-       *     policies — `projectLegacyColumns` → `projectHooksToLegacy`, whose
-       *     `foldPolicyActions` / `foldFailModes` win over anything the body
-       *     carries. That projection is what keeps the `action` column
-       *     populated for its readers: the guardrails list and detail screens,
-       *     `GET /api/guardrails/:id`, `client-guardrails`, and an older console
-       *     binary sharing the tenant database that enforces from it.
-       *   · with no `hooks` (a legacy row nobody has touched) the update
-       *     receives `undefined` for both, and every provider mixin skips an
-       *     undefined field — `if (data.action !== undefined)` — so the stored
-       *     value stays exactly as it was.
+       * `action` and `failMode` have no control on this screen: every policy
+       * states its own, and omitting them leaves the stored defaults as they
+       * are (every provider mixin skips an undefined field).
        *
        * `mode` and `enabled` go together or not at all: `writeGuardrailMode` is
        * the only place the pair is assembled.
@@ -642,25 +557,7 @@ export default function GuardrailDetailPage() {
         ...writeGuardrailMode(mode),
       };
 
-      /**
-       * The legacy policy columns are no longer EDITED anywhere on this page —
-       * the policy list replaced that editor — but they are still round-tripped
-       * verbatim. They remain the source of truth for a row whose hooks have
-       * never been authored, and dropping them from the PATCH would be a
-       * different write than the one that used to happen here.
-       */
-      if (guardrail?.type === 'preset') {
-        body.policy = policy;
-      } else {
-        body.customPrompt = customPrompt;
-      }
-
-      if (sendHooks) {
-        body.hooks = hooks;
-        // >= 1 means AUTHORED. Once an operator has edited the grid, the legacy
-        // columns stop being the source of truth for this row.
-        body.hooksVersion = Math.max(1, hooksVersion);
-      }
+      if (sendHooks) body.hooks = hooks;
 
       const res = await fetch(`/api/guardrails/${params.id}`, {
         method: 'PATCH',
@@ -697,7 +594,7 @@ export default function GuardrailDetailPage() {
       // which for these two fields means a guardrail that is disarmed, or one
       // that blocks while its operator believes it is only watching.
       const dropped: string[] = [];
-      if (sendHooks && (saved.hooksVersion ?? 0) < 1) dropped.push('`hooks`');
+      if (sendHooks && saved.hooks === undefined) dropped.push('`hooks`');
       if (saved.mode !== undefined && saved.mode !== mode) dropped.push('`mode`');
       // The other half of the pair, checked separately on purpose: the two are
       // written together and forwarded by different lines of the route, so a
@@ -713,10 +610,7 @@ export default function GuardrailDetailPage() {
           autoClose: false,
         });
       }
-      if (sendHooks && (saved.hooksVersion ?? 0) >= 1) {
-        setHooksVersion(saved.hooksVersion ?? 1);
-        setHooksDirty(false);
-      }
+      if (sendHooks && saved.hooks !== undefined) setHooksDirty(false);
 
       // Everything on screen is persisted now, so no policy id is editable any
       // more — from here a rename would orphan the findings that name it.
@@ -925,21 +819,17 @@ export default function GuardrailDetailPage() {
                       {MODE_OPTIONS.find((option) => option.value === mode)?.label ?? mode}
                     </Badge>
                   </Group>
-                  {/* NOT "Default Action" any more, and not a control anywhere:
-                      the `action` column is DERIVED from the policies on every
-                      save (`projectHooksToLegacy`). It is shown because it is
-                      still what an older console binary and the AI App Gateway
-                      enforce from, so an operator has to be able to read it —
-                      never to set it. */}
+                  {/* Not a control anywhere: the record's `action` is the default
+                      a policy inherits when it states none of its own. */}
                   <Group justify="space-between" wrap="nowrap" align="flex-start">
                     <Tooltip
-                      label="Worked out from the policies below and stored on the record, for the integrations that read a single action per guardrail. Change it by changing what a policy does when it finds something."
+                      label="The default action of a policy that does not state its own. Change what a policy does when it finds something on that policy."
                       multiline
                       w={300}
                       withArrow
                     >
                       <Text size="sm" c="dimmed" style={{ cursor: 'help' }}>
-                        Action (derived)
+                        Default action
                       </Text>
                     </Tooltip>
                     <Badge variant="light" color={actionColor}>{guardrail.action}</Badge>
@@ -1062,10 +952,8 @@ export default function GuardrailDetailPage() {
                 {/* The record-level model, and the one control on this panel
                     that is not a posture. It is a FALLBACK — the engine reads
                     `policy.modelKey || record.modelKey` — so a policy that pins
-                    its own model in the drawer never consults it; it is kept
-                    reachable because a `custom` guardrail written before the
-                    hook plane runs from this column alone. Collapsed, because
-                    it is not a question a new guardrail has to answer. */}
+                    its own model in the drawer never consults it. Collapsed,
+                    because it is not a question a new guardrail has to answer. */}
                 {guardrail.type === 'custom' && (
                   <div>
                     <UnstyledButton
@@ -1087,7 +975,7 @@ export default function GuardrailDetailPage() {
                       <Select
                         mt="xs"
                         label="Fallback model"
-                        description="Used by any model-backed policy that does not name a model of its own — including the legacy custom prompt on this record."
+                        description="Used by any model-backed policy that does not name a model of its own."
                         placeholder="Select a model"
                         clearable
                         data={models}
@@ -1112,8 +1000,7 @@ export default function GuardrailDetailPage() {
                 settings={hooks.blockedMessage}
                 activeFamilies={activeFamilies}
                 policies={hooks.policies ?? []}
-                derived={hooksVersion === 0}
-                onChange={(blockedMessage) => updateHooks({ ...hooks, blockedMessage })}
+                                onChange={(blockedMessage) => updateHooks({ ...hooks, blockedMessage })}
                 // Someone who followed a `?tab=messages` bookmark came here for
                 // this panel and nothing else; landing them on a collapsed
                 // header would look like the capability was removed.
@@ -1121,39 +1008,14 @@ export default function GuardrailDetailPage() {
               />
             )}
 
-            {/* The policy grid. A legacy row arrives here already lifted by
-                `/compiled`, so its migrated policies are ordinary cards — each
-                carrying a quiet "migrated" badge, above the grid's own note
-                that they were derived rather than authored. Never an empty
-                screen, and never a save it has to fix first. */}
-            {hooks === null ? (
-              <Alert color="gray" variant="light" icon={<IconInfoCircle size={16} />}>
-                <Text size="xs">
-                  This guardrail&apos;s hook configuration could not be read, so there is nothing to
-                  list. That endpoint (<Code fz="xs">GET /api/guardrails/:key/compiled</Code>) is what
-                  translates a pre-hook-plane guardrail into policies; without it the legacy fields
-                  still run, they just cannot be shown. Start a configuration from the{' '}
-                  <Button
-                    variant="subtle"
-                    size="compact-xs"
-                    onClick={() => setActiveTab('hooks')}
-                  >
-                    Hooks tab
-                  </Button>
-                  .
-                </Text>
-              </Alert>
-            ) : (
+            {/* The policy grid. */}
+            {hooks !== null && (
               <GuardrailPolicyCards
                 policies={hooks.policies ?? []}
                 bindings={hooks.bindings}
                 resources={policyResources}
-                // The STORED columns, not form fields: neither is authored on
-                // this page any more. They are what a policy that names no
-                // action or failure mode of its own inherits today, and they
-                // refresh from the server's own projection after every save
-                // (`setGuardrail(saved)`), so the inheritance a card reports is
-                // the one the engine will apply.
+                // The stored defaults a policy that names no action or failure
+                // mode of its own inherits.
                 guardrailAction={guardrail.action}
                 guardrailFailMode={guardrail.failMode}
                 guardrailMode={mode}
@@ -1161,7 +1023,6 @@ export default function GuardrailDetailPage() {
                 // inherit — the panel above, then the built-in — instead of
                 // claiming the built-in while this workspace has its own voice.
                 blockedMessage={hooks.blockedMessage}
-                derived={hooksVersion === 0}
                 savedSignal={savedAt}
                 onChange={applyPolicies}
               />
@@ -1200,67 +1061,7 @@ export default function GuardrailDetailPage() {
         {/* ── Hooks tab ── */}
         <Tabs.Panel value="hooks">
           <Stack gap="md">
-            {hooks === null ? (
-              <Paper withBorder radius="md" p="lg">
-                <Stack gap="sm">
-                  <Group gap="xs">
-                    <IconLayoutGrid size={18} stroke={1.7} />
-                    <Text fw={600} size="sm">No hook configuration yet</Text>
-                  </Group>
-                  <Text size="xs" c="dimmed" maw={720}>
-                    This guardrail still runs from the legacy policy columns on its record, which
-                    are translated into policies at evaluation time — those columns no longer have an
-                    editor of their own. Start from one of the postures below to take control of
-                    what runs and where; the translation stops the moment you save.
-                  </Text>
-                  <SimpleGrid cols={{ base: 1, md: 3 }} spacing="md" mt="xs">
-                    {HOOK_PRESETS.map((preset) => (
-                      <Card key={preset.id} withBorder padding="sm" radius="md">
-                        <Stack gap={6} h="100%" justify="space-between">
-                          <div>
-                            <Text fw={600} size="sm">{preset.name}</Text>
-                            <Text size="xs" c="dimmed" mt={4}>{preset.description}</Text>
-                            {preset.requires.map((req) => (
-                              <Text key={req} size="xs" c="orange.7" mt={6}>Needs: {req}</Text>
-                            ))}
-                          </div>
-                          <Button
-                            size="xs"
-                            variant="light"
-                            mt="xs"
-                            onClick={() => {
-                              const built = preset.build(models[0]?.value);
-                              updateHooks(
-                                streamOptOut
-                                  ? { ...built, stream: { ...built.stream, enabled: false } }
-                                  : built,
-                              );
-                            }}
-                          >
-                            Start from this
-                          </Button>
-                        </Stack>
-                      </Card>
-                    ))}
-                  </SimpleGrid>
-                  <Divider my="xs" />
-                  <Group>
-                    <Button
-                      size="xs"
-                      variant="default"
-                      onClick={() => {
-                        const blank = blankHooksConfig();
-                        updateHooks(
-                          streamOptOut ? { ...blank, stream: { enabled: false } } : blank,
-                        );
-                      }}
-                    >
-                      Start from an empty grid
-                    </Button>
-                  </Group>
-                </Stack>
-              </Paper>
-            ) : (
+            {hooks !== null && (
               <>
                 <GuardrailHooksMatrix
                   guardrailId={params.id}
@@ -1273,13 +1074,12 @@ export default function GuardrailDetailPage() {
                   // state on both screens now.
                   mode={mode}
                   onModeChange={(m) => setMode(m)}
-                  derived={hooksVersion === 0}
-                  models={models}
+                                    models={models}
                   /* This grid says WHERE a policy runs; it deliberately no
                      longer edits WHAT one looks for. Both routes below hand
                      that over to the Policies tab, which is the only screen with
                      a per-policy editor — without them, an issue the grid
-                     reports (a lifted policy with no model, say) is unfixable
+                     reports (a policy with no model, say) is unfixable
                      from the tab that reports it. */
                   onOpenPolicy={(policyId) => {
                     setActiveTab('config');
@@ -1313,18 +1113,6 @@ export default function GuardrailDetailPage() {
                       }
                     />
                   </Group>
-
-                  {hooksVersion === 0 && hooks.stream?.enabled !== true && (
-                    <Alert color="blue" variant="light" mt="sm" icon={<IconBolt size={15} />}>
-                      <Text size="xs">
-                        This is off because the guardrail was migrated, and the migration preserves
-                        exactly what your streams do today. Nothing about your traffic requires it to
-                        stay off — turning it on costs roughly{' '}
-                        <strong>+{streamCost.addedTtftMs} ms</strong> to the first character and
-                        catches what the post-hoc audit can only report.
-                      </Text>
-                    </Alert>
-                  )}
 
                   {/* `gated` is the honest test, not "is a policy bound?": the
                       engine skips the gate when the hook binding is off, when
@@ -1400,13 +1188,7 @@ export default function GuardrailDetailPage() {
         {/* ── Usage tab (id stays `api`: it is a live URL contract) ── */}
         <Tabs.Panel value="api">
           <Stack gap="md">
-            {/*
-              The RAW stored config, not the lifted one this page holds in
-              `hooks`. The panel applies the legacy fail-safe itself and prints
-              the "predates the hook plane" note; handing it an already-lifted
-              config would hide exactly the fact an integrator needs, which is
-              that the two hooks it covers were derived rather than chosen.
-            */}
+
             <GuardrailUsagePanel
               guardrailKey={guardrail.key}
               guardrailName={guardrail.name}
@@ -1472,8 +1254,7 @@ export default function GuardrailDetailPage() {
           guardrailFailMode={guardrail.failMode}
           guardrailMode={mode}
           blockedMessage={hooks?.blockedMessage}
-          derived={hooksVersion === 0}
-          onApply={(next) =>
+                    onApply={(next) =>
             applyPolicies(
               (hooks?.policies ?? []).map((policy) => (policy.id === openPolicy.id ? next : policy)),
             )

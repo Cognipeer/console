@@ -120,9 +120,7 @@ export interface FamilyRunResult {
  * DERIVED from the persisted field rather than restated, so the two cannot
  * drift: `GuardrailPolicyBase.runIf` (provider/types.domain.ts) is the
  * declaration, and this is the same union with `undefined` resolved away.
- * Absent means `'always'`, which is exactly what every lifted legacy policy
- * needs, because `evaluateGuardrail` has always run its LLM policies
- * unconditionally.
+ * Absent means `'always'`: the policy runs its model call unconditionally.
  */
 export type GuardrailPolicyRunIf = NonNullable<GuardrailPolicy['runIf']>;
 
@@ -163,9 +161,7 @@ export interface LlmFamilyRunContext extends FamilyRunContext {
    * the deterministic pass already spent.
    *
    * Note the deliberate asymmetry with `policy.timeoutMs`, where 0 or absent
-   * means NO timeout (the legacy contract — `liftLegacyBindings` writes
-   * `timeoutMs: 0` so no tenant's slow-but-passing moderation model starts
-   * failing on upgrade). Here, absent means unbounded but `<= 0` means the
+   * means NO timeout (`0` is what a binding with no declared budget stores). Here, absent means unbounded but `<= 0` means the
    * budget is already spent and the policy does not start. Two conventions for
    * the same number would be a trap, so they live on two differently named
    * fields.
@@ -499,11 +495,10 @@ export async function runLlmPolicy(
 
   const modelKey = llmPolicyModelKey(policy, ctx.modelKey);
   if (!modelKey) {
-    // Preserved quirk, and the reason `onMissingModel` exists: a legacy custom
-    // guardrail with no model evaluates nothing and passes
-    // (guardrailService.ts:358), so lifted policies carry 'skip' and only
-    // newly-authored ones fail visibly. The skip is still recorded — the whole
-    // point of the flag is that the quirk is named rather than hidden.
+    // `onMissingModel: 'skip'` is a stored value an operator (or an older
+    // write) may carry: such a custom policy with no model evaluates nothing
+    // and passes. The skip is still recorded, so it is named rather than
+    // hidden. Absent means the policy fails visibly.
     if (family === 'custom' && policy.onMissingModel === 'skip') {
       return degrade('no evaluation model configured; policy declares onMissingModel=skip');
     }
