@@ -32,7 +32,9 @@ import type {
 } from './types';
 import {
   GUARDRAIL_CONTRACT_VERSION,
+  HOOK_IDS,
   emptyHooksConfig,
+  hookDirection,
   normalizeHooksConfig,
   textSubject,
 } from './hooks/contract';
@@ -48,21 +50,54 @@ import { invalidateGuardrailCache } from './hooks/recordCache';
 
 // ── Serialization ─────────────────────────────────────────────────────────
 
+/** The hooks that are switched on and run at least one enabled policy. */
+function activeHooks(hooks: GuardrailHooksConfig): HookId[] {
+  const policies = hooks.policies ?? [];
+  return HOOK_IDS.filter(
+    (hook) =>
+      hooks.bindings?.[hook]?.enabled === true &&
+      policies.some((policy) => policy.enabled && policy.hooks?.includes(hook)),
+  );
+}
+
+/**
+ * The direction a hook config protects, always derived from the hooks, never
+ * authored: `input` when any active hook runs on the input side, `output` when
+ * only output-side hooks are active, and `fallback` when nothing is active.
+ * Consumers pick guardrails by it (the AI App Gateway offers `input` ones as
+ * request protection), so it must never claim a side no active hook covers.
+ */
+export function deriveGuardrailTarget(
+  hooks: GuardrailHooksConfig | undefined,
+  fallback: IGuardrail['target'],
+): IGuardrail['target'] {
+  const active = hooks ? activeHooks(hooks) : [];
+  if (active.length === 0) return fallback;
+  return active.some((hook) => hookDirection(hook) === 'input') ? 'input' : 'output';
+}
+
 /**
  * A read-only, legacy-shaped summary of which policy families a hook config
- * enables. Nothing stored and nothing the engine reads: it exists for consumers
- * that decide from `view.policy.<family>.enabled` (the AI App Gateway's
- * guardrail picker). Flags only; the PII categories live on the referenced PII
+ * enforces IN THE DIRECTION `target` NAMES: a family counts only when an
+ * enabled policy of it runs on an active hook of that side. Nothing stored and
+ * nothing the engine reads: it exists for consumers that decide from
+ * `view.target` and `view.policy.<family>.enabled` together (the AI App
+ * Gateway's guardrail picker), which must never see PII protection on a side
+ * where none runs. Flags only; the PII categories live on the referenced PII
  * policy, so `pii.categories` is empty except for the `apiKey` a secrets
  * policy stands for.
  */
 function summarizePolicyFamilies(
   hooks: GuardrailHooksConfig | undefined,
   action: IGuardrail['action'],
+  target: IGuardrail['target'],
 ): IGuardrailPresetPolicy | undefined {
   if (!hooks) return undefined;
+  const onThisSide = new Set(activeHooks(hooks).filter((hook) => hookDirection(hook) === target));
   const enabled = (family: PolicyFamily): boolean =>
-    (hooks.policies ?? []).some((policy) => policy.enabled && policy.family === family);
+    (hooks.policies ?? []).some(
+      (policy) => policy.enabled && policy.family === family && (policy.hooks ?? []).some((hook) => onThisSide.has(hook)),
+    );
   return {
     pii: {
       enabled: enabled('pii') || enabled('secrets'),
@@ -94,7 +129,8 @@ export function serializeGuardrail(record: IGuardrail): GuardrailView {
   // `hooks: undefined`.
   if (view.hooks !== undefined) {
     view.hooks = normalizeHooksConfig(view.hooks);
-    view.policy = summarizePolicyFamilies(view.hooks, view.action);
+    view.target = deriveGuardrailTarget(view.hooks, view.target);
+    view.policy = summarizePolicyFamilies(view.hooks, view.action, view.target);
   }
   return view;
 }
@@ -196,10 +232,10 @@ export async function createGuardrail(
       key,
       name: input.name,
       description: input.description,
-      // Stored labels with one value each: nothing reads them to decide what to
-      // enforce. The columns stay for the list screen and the evaluation log.
+      // Nothing reads these to decide what to enforce. `type` is a stored label;
+      // `target` follows the hooks (views derive it again on every read).
       type: 'preset',
-      target: 'input',
+      target: deriveGuardrailTarget(hooks, 'input'),
       action: input.action,
       enabled: input.enabled ?? true,
       failMode: input.failMode ?? resolveDefaultFailMode(hooks),
@@ -235,7 +271,7 @@ export async function updateGuardrail(
 
     const updated = await db.updateGuardrail(id, {
       ...input,
-      ...(hooks ? { hooks, hooksVersion: GUARDRAIL_CONTRACT_VERSION } : {}),
+      ...(hooks ? { hooks, hooksVersion: GUARDRAIL_CONTRACT_VERSION, target: deriveGuardrailTarget(hooks, 'input') } : {}),
       updatedBy,
     });
 
