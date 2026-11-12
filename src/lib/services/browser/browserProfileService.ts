@@ -6,18 +6,12 @@ import slugify from 'slugify';
 import { z } from 'zod';
 import { createLogger } from '@/lib/core/logger';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
-import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type { IBrowser } from '@/lib/database';
 import type { BrowserView, CreateBrowserInput, UpdateBrowserInput } from './types';
 import { matchesProjectScope } from './internals';
 
 const logger = createLogger('browser:profile-service');
-
-async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
-}
 
 /**
  * DTO for a browser record — WITHOUT the encrypted profile.
@@ -95,25 +89,27 @@ export async function listBrowsers(
   ctx: BrowserCtx,
   filters?: { status?: string; search?: string },
 ): Promise<BrowserView[]> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const records = await db.listBrowsers(ctx.tenantId, {
-    projectId: ctx.projectId,
-    status: filters?.status,
-    search: filters?.search,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const records = await db.listBrowsers(ctx.tenantId, {
+      projectId: ctx.projectId,
+      status: filters?.status,
+      search: filters?.search,
+    });
+    return records.map(serializeBrowser);
   });
-  return records.map(serializeBrowser);
 }
 
 export async function getBrowser(
   ctx: BrowserCtx,
   idOrKey: string,
 ): Promise<BrowserView | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const record =
-    (await db.findBrowserById(idOrKey).catch(() => null)) ??
-    (await db.findBrowserByKey(ctx.tenantId, idOrKey, ctx.projectId));
-  if (!canAccessBrowser(ctx, record)) return null;
-  return serializeBrowser(record);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const record =
+      (await db.findBrowserById(idOrKey).catch(() => null)) ??
+      (await db.findBrowserByKey(ctx.tenantId, idOrKey, ctx.projectId));
+    if (!canAccessBrowser(ctx, record)) return null;
+    return serializeBrowser(record);
+  });
 }
 
 export async function updateBrowser(
@@ -121,56 +117,59 @@ export async function updateBrowser(
   idOrKey: string,
   input: UpdateBrowserInput,
 ): Promise<BrowserView | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const existing =
-    (await db.findBrowserById(idOrKey).catch(() => null)) ??
-    (await db.findBrowserByKey(ctx.tenantId, idOrKey, ctx.projectId));
-  if (!canAccessBrowser(ctx, existing)) return null;
-  const updated = await db.updateBrowser(String(existing._id ?? ''), {
-    name: input.name,
-    description: input.description,
-    status: input.status,
-    artifactBucketKey: input.artifactBucketKey,
-    defaultSessionConfig: input.defaultSessionConfig,
-    defaultModelKey: input.defaultModelKey,
-    defaultRunOptions: input.defaultRunOptions,
-    metadata: input.metadata,
-    updatedBy: input.updatedBy,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const existing =
+      (await db.findBrowserById(idOrKey).catch(() => null)) ??
+      (await db.findBrowserByKey(ctx.tenantId, idOrKey, ctx.projectId));
+    if (!canAccessBrowser(ctx, existing)) return null;
+    const updated = await db.updateBrowser(String(existing._id ?? ''), {
+      name: input.name,
+      description: input.description,
+      status: input.status,
+      artifactBucketKey: input.artifactBucketKey,
+      defaultSessionConfig: input.defaultSessionConfig,
+      defaultModelKey: input.defaultModelKey,
+      defaultRunOptions: input.defaultRunOptions,
+      metadata: input.metadata,
+      updatedBy: input.updatedBy,
+    });
+    return updated ? serializeBrowser(updated) : null;
   });
-  return updated ? serializeBrowser(updated) : null;
 }
 
 export async function deleteBrowser(
   ctx: BrowserCtx,
   idOrKey: string,
 ): Promise<boolean> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const existing =
-    (await db.findBrowserById(idOrKey).catch(() => null)) ??
-    (await db.findBrowserByKey(ctx.tenantId, idOrKey, ctx.projectId));
-  if (!canAccessBrowser(ctx, existing)) return false;
-  // Block delete if children exist
-  const sessions = await db.listBrowserSessions(ctx.tenantId, {
-    projectId: ctx.projectId,
-    browserId: String(existing._id ?? ''),
-    limit: 1,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const existing =
+      (await db.findBrowserById(idOrKey).catch(() => null)) ??
+      (await db.findBrowserByKey(ctx.tenantId, idOrKey, ctx.projectId));
+    if (!canAccessBrowser(ctx, existing)) return false;
+    // Block delete if children exist
+    const sessions = await db.listBrowserSessions(ctx.tenantId, {
+      projectId: ctx.projectId,
+      browserId: String(existing._id ?? ''),
+      limit: 1,
+    });
+    if (sessions.length > 0) {
+      throw new Error('Cannot delete browser with existing sessions. Delete or archive sessions first.');
+    }
+    return db.deleteBrowser(String(existing._id ?? ''));
   });
-  if (sessions.length > 0) {
-    throw new Error('Cannot delete browser with existing sessions. Delete or archive sessions first.');
-  }
-  return db.deleteBrowser(String(existing._id ?? ''));
 }
 
 export async function resolveBrowser(
   ctx: BrowserCtx,
   idOrKey: string,
 ): Promise<IBrowser | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const record =
-    (await db.findBrowserById(idOrKey).catch(() => null)) ??
-    (await db.findBrowserByKey(ctx.tenantId, idOrKey, ctx.projectId));
-  if (!canAccessBrowser(ctx, record)) return null;
-  return record;
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const record =
+      (await db.findBrowserById(idOrKey).catch(() => null)) ??
+      (await db.findBrowserByKey(ctx.tenantId, idOrKey, ctx.projectId));
+    if (!canAccessBrowser(ctx, record)) return null;
+    return record;
+  });
 }
 
 // ── Signed-in profile (storageState) ────────────────────────────────────
@@ -228,57 +227,58 @@ export async function setBrowserStorageState(
     sourceFileName?: string;
   },
 ): Promise<StorageStateSummary> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const existing = await resolveBrowser(ctx, idOrKey);
-  if (!existing) throw new Error(`Browser not found: ${idOrKey}`);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const existing = await resolveBrowser(ctx, idOrKey);
+    if (!existing) throw new Error(`Browser not found: ${idOrKey}`);
 
-  const parsed = storageStateSchema.safeParse(input.storageState);
-  if (!parsed.success) {
-    throw new Error(
-      'Not a valid Playwright storageState file. Expected an object with `cookies` and/or `origins`.',
-    );
-  }
+    const parsed = storageStateSchema.safeParse(input.storageState);
+    if (!parsed.success) {
+      throw new Error(
+        'Not a valid Playwright storageState file. Expected an object with `cookies` and/or `origins`.',
+      );
+    }
 
-  const state = parsed.data;
-  const cookies = state.cookies ?? [];
-  if (cookies.length === 0 && (state.origins ?? []).length === 0) {
-    throw new Error('This storageState carries no cookies and no origin storage — nothing to restore.');
-  }
+    const state = parsed.data;
+    const cookies = state.cookies ?? [];
+    if (cookies.length === 0 && (state.origins ?? []).length === 0) {
+      throw new Error('This storageState carries no cookies and no origin storage — nothing to restore.');
+    }
 
-  // Cookie `expires` is Unix SECONDS, and -1 means a session cookie (no
-  // expiry). Surfacing the earliest real expiry is what lets the UI say "this
-  // profile stops working on the 14th" instead of leaving an operator to
-  // discover it from a failed 3am run.
-  const expiries = cookies
-    .map((cookie) => (typeof cookie.expires === 'number' ? cookie.expires : -1))
-    .filter((value) => value > 0);
-  const earliestExpiry = expiries.length ? new Date(Math.min(...expiries) * 1000) : undefined;
+    // Cookie `expires` is Unix SECONDS, and -1 means a session cookie (no
+    // expiry). Surfacing the earliest real expiry is what lets the UI say "this
+    // profile stops working on the 14th" instead of leaving an operator to
+    // discover it from a failed 3am run.
+    const expiries = cookies
+      .map((cookie) => (typeof cookie.expires === 'number' ? cookie.expires : -1))
+      .filter((value) => value > 0);
+    const earliestExpiry = expiries.length ? new Date(Math.min(...expiries) * 1000) : undefined;
 
-  const meta: IBrowser['storageStateMeta'] = {
-    uploadedAt: new Date(),
-    uploadedBy: input.uploadedBy,
-    cookieCount: cookies.length,
-    origins: Array.from(new Set([
-      ...cookies.map((cookie) => cookie.domain),
-      ...(state.origins ?? []).map((origin) => origin.origin),
-    ])).slice(0, 50),
-    earliestExpiry,
-    sourceFileName: input.sourceFileName,
-  };
+    const meta: IBrowser['storageStateMeta'] = {
+      uploadedAt: new Date(),
+      uploadedBy: input.uploadedBy,
+      cookieCount: cookies.length,
+      origins: Array.from(new Set([
+        ...cookies.map((cookie) => cookie.domain),
+        ...(state.origins ?? []).map((origin) => origin.origin),
+      ])).slice(0, 50),
+      earliestExpiry,
+      sourceFileName: input.sourceFileName,
+    };
 
-  await db.updateBrowser(String(existing._id ?? ''), {
-    storageStateEnc: encryptObject(state),
-    storageStateMeta: meta,
-    updatedBy: input.uploadedBy,
+    await db.updateBrowser(String(existing._id ?? ''), {
+      storageStateEnc: encryptObject(state),
+      storageStateMeta: meta,
+      updatedBy: input.uploadedBy,
+    });
+
+    logger.info('Browser storage state attached', {
+      browserId: String(existing._id ?? ''),
+      cookieCount: meta.cookieCount,
+      origins: meta.origins.length,
+    });
+
+    return meta as StorageStateSummary;
   });
-
-  logger.info('Browser storage state attached', {
-    browserId: String(existing._id ?? ''),
-    cookieCount: meta.cookieCount,
-    origins: meta.origins.length,
-  });
-
-  return meta as StorageStateSummary;
 }
 
 export async function clearBrowserStorageState(
@@ -286,17 +286,18 @@ export async function clearBrowserStorageState(
   idOrKey: string,
   updatedBy?: string,
 ): Promise<boolean> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const existing = await resolveBrowser(ctx, idOrKey);
-  if (!existing) return false;
-  // NULL, not undefined: both providers skip undefined fields when building
-  // the update, so `undefined` here silently left the profile in place.
-  await db.updateBrowser(String(existing._id ?? ''), {
-    storageStateEnc: null,
-    storageStateMeta: null,
-    updatedBy,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const existing = await resolveBrowser(ctx, idOrKey);
+    if (!existing) return false;
+    // NULL, not undefined: both providers skip undefined fields when building
+    // the update, so `undefined` here silently left the profile in place.
+    await db.updateBrowser(String(existing._id ?? ''), {
+      storageStateEnc: null,
+      storageStateMeta: null,
+      updatedBy,
+    });
+    return true;
   });
-  return true;
 }
 
 /**

@@ -24,7 +24,7 @@ vi.mock('@/lib/limits', async () => {
 vi.mock('@/lib/core/queue', () => ({ getQueue: vi.fn() }));
 vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(async () => h.db),
-  runWithTenantScope: vi.fn(async (_db: string, fn: () => Promise<unknown>) => fn()),
+  runWithTenantScope: async (_db: string, fn: (db: unknown) => unknown) => fn(h.db),
 }));
 vi.mock('../../lib/services/browser/browserManager', () => ({ browserManager: h.manager }));
 vi.mock('@/lib/core/cluster', () => ({ getThisNodeName: () => 'node-1', routeInstanceCall: vi.fn() }));
