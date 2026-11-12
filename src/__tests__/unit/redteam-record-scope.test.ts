@@ -18,6 +18,7 @@ const db = vi.hoisted(() => ({
 vi.mock('@/lib/database', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/database')>()),
   getDatabase: vi.fn(async () => db),
+  runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(db)),
 }));
 
 import { runScheduledScans } from '@/lib/services/redteam/campaignJob';
