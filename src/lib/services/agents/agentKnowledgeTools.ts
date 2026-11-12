@@ -17,6 +17,7 @@ import type { TraceToolDefinition } from '@/lib/services/tracingToolDefinitions'
 import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
 import { agentToolPolicyName, type AgentToolGuard } from './agentToolGuard';
 import { createLogger } from '@/lib/core/logger';
+import { allInOrder } from './concurrentBuild';
 
 const logger = createLogger('agents');
 
@@ -386,15 +387,16 @@ export async function buildAgentKnowledgeTools(
     if (source.knowledgeToolMode === 'separate') {
         const tools: AgentSdkToolInterface[] = [];
         const toolDefinitions: TraceToolDefinition[] = [];
-        for (const binding of bindings) {
-            const built = await buildKnowledgeTools(tenantDbName, tenantId, projectId, binding.key, guard, {
-                suffix: knowledgeKeySlug(binding.key),
-                description: binding.description,
-                topK: binding.topK,
-                minScore: binding.minScore,
-                filter: binding.filter,
-                access,
-            });
+        // Each knowledge base is looked up at once; the tools are collected in binding order.
+        const builtSets = await allInOrder(bindings.map((binding) => buildKnowledgeTools(tenantDbName, tenantId, projectId, binding.key, guard, {
+            suffix: knowledgeKeySlug(binding.key),
+            description: binding.description,
+            topK: binding.topK,
+            minScore: binding.minScore,
+            filter: binding.filter,
+            access,
+        })));
+        for (const built of builtSets) {
             tools.push(...built.tools);
             toolDefinitions.push(...built.toolDefinitions);
         }
@@ -416,8 +418,10 @@ async function buildCombinedKnowledgeTools(
     const kbAccess = opts.access ?? createKnowledgeAccess(tenantDbName, tenantId);
 
     const visible: Array<{ binding: IAgentKnowledgeBinding; scope: string; ragModule: RagAccessModule }> = [];
-    for (const binding of bindings) {
-        const mod = await resolveAgentKnowledgeModule(tenantDbName, binding.key, projectId);
+    // One read per knowledge base, all at once; each is judged in binding order below.
+    const modules = await allInOrder(bindings.map((binding) => resolveAgentKnowledgeModule(tenantDbName, binding.key, projectId)));
+    for (const [index, binding] of bindings.entries()) {
+        const mod = modules[index];
         if (!mod) {
             logger.warn('Skipping knowledge engine not visible to the agent\'s project', { key: binding.key, projectId });
             continue;

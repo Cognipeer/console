@@ -158,6 +158,7 @@ import {
 } from './agentGuardrails';
 import { buildTracingMetadata, reconcileTraceTotals, markTraceSessionFailed, createInternalTracingSink } from './agentTracing';
 import { resolveAgentPrompt } from './agentPrompt';
+import { deferredWarnings, settleInOrder, started } from './concurrentBuild';
 import { assertOwnedAgentReachable, ownedAgentFlowTags, buildAgentSubagents } from './agentSubagents';
 import { buildBoundTools, runBoundToolCleanup } from './agentBoundTools';
 import { endRunsOfDroppedPause, buildAgentChatModel, describeRunOutcome } from './agentRecords';
@@ -522,7 +523,68 @@ export async function buildLocalAgentRun(input: {
     if (!config.modelKey) throw new Error('Agent has no model configured');
     // How the main model's calls end at the output limit, read when the turn's outcome is described.
     const outputLimit = createOutputLimitTap();
-    const { model, chatModel } = await buildAgentChatModel(tenantDbName, tenantId, projectId, config.modelKey, {
+    // Non-fatal failures during the run (memory, sandbox, sub-agents), reported with the answer.
+    const warnings = new Set<string>();
+
+    // System prompt
+    const promptVariables = buildPromptVariables({
+        config,
+        agentKey,
+        agentName: agent.name,
+        version: input.version,
+        runtimeContext,
+        userId: input.userId,
+        variables: input.variables,
+        variablesInPrompt: input.variablesInPrompt,
+        literalVariables: input.literalVariables,
+    });
+
+    // Guardrails. One guard for the whole run — resolving the bindings once
+    // keeps every tool this agent gets under the same policy, and a legacy
+    // config (no `guardrails` array) resolves to the no-op guard.
+    warnUnservableStreamBinding(config, agentKey);
+    const toolGuard = createAgentToolGuard({ tenantDbName, tenantId, projectId, agentKey, config, actorId, source });
+
+    // THE TEXT HOOKS NOW RUN INSIDE THE AGENT, not around it.
+    //
+    // `prompt.pre`, `input.pre` and `output.pre` are served by the SDK plugin
+    // built here and handed to `createSmartAgent` below. The brackets that
+    // used to sit on either side of `invoke()` are gone: they ran `input.pre`
+    // once per TURN, where `preModelCall` runs it on every model call — which is
+    // what `input.pre` has always meant on the gateway, and what an operator
+    // binding it expects. `prompt.pre` is the once-per-turn hook, and it now
+    // actually fires.
+    //
+    // Tool hooks stay on `toolGuard` above; see `AGENT_PLUGIN_HOOKS`.
+
+    const filesCfg = resolveAttachmentsConfig(config.attachments);
+    const sessionFilesScope = { tenantDbName, tenantId, projectId };
+    const outputsOn = outputsAvailability(config);
+    const sessionBudgetActive = Boolean(activeSessionBudget(input.conversation));
+    // What the session allowed ahead of time: read by the approval gates of the run and of its sub-agents.
+    const allowedTools = sessionAllowedTools(input.conversation?.metadata);
+    let traceSessionId: string | undefined;
+    // The run's usage rows name the trace session once it is open (its first streamed event).
+    const callerRun = getRoutingCaller()?.run;
+    const approvalSubagents = new Map<string, string>();
+
+    // EVERYTHING BELOW THAT ONLY READS IS STARTED TOGETHER and awaited once (see `settleInOrder`): the model, the
+    // prompt, the guardrails and every tool builder run side by side, so turn setup takes as long as its slowest
+    // read instead of the sum of all of them. Three things stay exactly as they were when it was one chain of awaits:
+    //  - the tools are pushed, and the warnings emitted, in the original order (the model sees that order, and it
+    //    decides prompt-cache hits), because each builder only hands back its result;
+    //  - the error that is thrown is the first of the original order, not the first to fail in time;
+    //  - a builder that opened something (a browser session, a sandbox, a sub-agent's tools) has it closed when
+    //    another builder fails, instead of leaving it open.
+    // A builder that needs another one's result waits for it: the sub-agents are given the `read` tool and the
+    // session's images, which come from the model, the sandbox and the session's files.
+    const builtCleanups: Array<() => Promise<void>> = [];
+    const sandboxWarnings = deferredWarnings(warnings);
+    const subagentWarnings = deferredWarnings(warnings);
+    const costWarnings = deferredWarnings(warnings);
+    const sdkP = Promise.all([import('@cognipeer/agent-sdk'), import('zod')]);
+
+    const modelP = buildAgentChatModel(tenantDbName, tenantId, projectId, config.modelKey, {
         ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
         ...(config.topP !== undefined ? { top_p: config.topP } : {}),
         ...(config.maxTokens !== undefined ? { max_tokens: config.maxTokens } : {}),
@@ -543,39 +605,8 @@ export async function buildLocalAgentRun(input: {
         ...(spend ? { onCost: agentSpendSettler(spend, config.modelKey) } : {}),
         outputLimitTap: outputLimit,
     });
-
-    // System prompt
-    const promptVariables = buildPromptVariables({
-        config,
-        agentKey,
-        agentName: agent.name,
-        version: input.version,
-        runtimeContext,
-        userId: input.userId,
-        variables: input.variables,
-        variablesInPrompt: input.variablesInPrompt,
-        literalVariables: input.literalVariables,
-    });
-    let systemPrompt = await resolveAgentPrompt({ db, projectId, agentKey, config, systemPrompt: config.systemPrompt, variables: promptVariables });
-
-    // Guardrails. One guard for the whole run — resolving the bindings once
-    // keeps every tool this agent gets under the same policy, and a legacy
-    // config (no `guardrails` array) resolves to the no-op guard.
-    warnUnservableStreamBinding(config, agentKey);
-    const toolGuard = createAgentToolGuard({ tenantDbName, tenantId, projectId, agentKey, config, actorId, source });
-
-    // THE TEXT HOOKS NOW RUN INSIDE THE AGENT, not around it.
-    //
-    // `prompt.pre`, `input.pre` and `output.pre` are served by the SDK plugin
-    // built here and handed to `createSmartAgent` below. The brackets that
-    // used to sit on either side of `invoke()` are gone: they ran `input.pre`
-    // once per TURN, where `preModelCall` runs it on every model call — which is
-    // what `input.pre` has always meant on the gateway, and what an operator
-    // binding it expects. `prompt.pre` is the once-per-turn hook, and it now
-    // actually fires.
-    //
-    // Tool hooks stay on `toolGuard` above; see `AGENT_PLUGIN_HOOKS`.
-    const guardrailPlugins = await buildAgentGuardrailPlugins({
+    const promptP = resolveAgentPrompt({ db, projectId, agentKey, config, systemPrompt: config.systemPrompt, variables: promptVariables });
+    const pluginsP = buildAgentGuardrailPlugins({
         tenantDbName,
         tenantId,
         projectId,
@@ -585,26 +616,13 @@ export async function buildLocalAgentRun(input: {
         source,
         onMessageRewrite: input.onMessageRewrite,
     });
-
-    const { createSmartAgent, createTool } = await import('@cognipeer/agent-sdk');
-    const { z } = await import('zod');
-
-    // RAG retrieval tools, and the instruction to use them first
-    const tools: AgentSdkToolInterface[] = [];
-    const toolDefinitions: TraceToolDefinition[] = [];
-    if (hasKnowledgeConfigured(config)) {
-        const knowledgeTools = await buildAgentKnowledgeTools(
-            tenantDbName, tenantId, projectId, config, toolGuard, { caller: kbCaller },
-        );
-        tools.push(...knowledgeTools.tools);
-        toolDefinitions.push(...knowledgeTools.toolDefinitions);
-        systemPrompt = systemPrompt
-            ? `${KNOWLEDGE_FIRST_INSTRUCTION}\n\n${systemPrompt}`
-            : KNOWLEDGE_FIRST_INSTRUCTION;
-    }
+    // RAG retrieval tools (the instruction to use them first is added to the prompt below)
+    const knowledgeP = hasKnowledgeConfigured(config)
+        ? buildAgentKnowledgeTools(tenantDbName, tenantId, projectId, config, toolGuard, { caller: kbCaller })
+        : undefined;
 
     // Bound tools from toolBindings (MCP, future sources)
-    const { cleanupTasks, tools: boundTools, definitions: boundToolDefinitions } = await buildBoundTools(
+    const boundP = sdkP.then(([{ createTool }, { z }]) => buildBoundTools(
         tenantDbName,
         tenantId,
         projectId,
@@ -620,7 +638,163 @@ export async function buildLocalAgentRun(input: {
             ...(input.accountableUserId ? { accountableUserId: input.accountableUserId } : {}),
         },
         agent._id ? String(agent._id) : undefined,
-    );
+    )).then((built) => {
+        builtCleanups.push(...built.cleanupTasks);
+        return built;
+    });
+
+    // What the session already holds, and whether the files bucket works: both only decide which file tools exist.
+    const sessionFactsP: Promise<Awaited<ReturnType<typeof conversationFileFacts>>> = input.conversation && (agentTakesAttachments(config) || outputsOn.available)
+        ? conversationFileFacts(db, String(input.conversation._id))
+        : Promise.resolve({ any: false, images: false });
+    const bucketP = input.conversation && outputsOn.available
+        ? inspectFileBucket(db, tenantId, projectId, outputsOn.cfg.bucketKey).catch(() => null)
+        : Promise.resolve(null);
+
+    // Sandbox access (Enterprise). Provisioned on first use; cleaned up with
+    // the other bound tools once the run is over. A conversation keeps a
+    // persistent sandbox across its turns, a stateless call gets a throwaway one.
+    const sandboxP = sdkP.then(([{ createTool }, { z }]) => buildAgentSandboxTools({
+        sandbox: config.sandbox,
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        conversation: input.conversation,
+        createToolFn: createTool,
+        zod: z,
+        protect: (name, tool) => protectBuiltTool(toolGuard, { name, requestedName: tool.name }, tool),
+        onWarning: sandboxWarnings.add,
+        outputs: { agentConfig: config, actorId, ...(runtimeContext?.tokenId ? { tokenId: runtimeContext.tokenId } : {}) },
+    })).then((built) => {
+        builtCleanups.push(built.cleanup);
+        return built;
+    });
+
+    // The model's view of files: the `read` tool (one tool for the sandbox's files and the conversation's, images, PDFs and
+    // video included) and the images in this session's context, which are references (a session file, or a tool's image of
+    // this run) whose bytes are read at the model call. Wrapped even for an agent that no longer takes files (its saved
+    // state can still hold references) and for a stateless run, which still shows what its tools return.
+    const mediaP = Promise.all([modelP, sdkP, sessionFactsP, sandboxP]).then(([{ model, chatModel }, [{ createTool }, { z }], sessionFacts, sandboxTools]) => {
+        const modelTakesImages = resolveModelCapabilities(model).inputModalities.includes('image');
+        // What this run's tools showed the model (screenshots, rendered pages): shared with its sub-agents.
+        const toolMedia: ToolMediaContext = {
+            store: createToolMediaStore(),
+            modelTakesImages,
+            maxImageBytes: Math.min(filesCfg.maxBytes, 5 * 1024 * 1024),
+        };
+        const readSession = input.conversation && sessionFacts.any
+            ? { scope: sessionFilesScope, conversationId: String(input.conversation._id), readPageChars: filesCfg.readPageChars, maxImageBytes: filesCfg.maxBytes }
+            : undefined;
+        const readTool = buildReadTool({
+            createToolFn: createTool,
+            zod: z,
+            guard: toolGuard,
+            ...(sandboxTools.reader ? { sandbox: sandboxTools.reader } : {}),
+            ...(readSession ? { session: readSession } : {}),
+            media: { store: toolMedia.store },
+            modelTakesImages,
+        });
+        const sessionImages: SessionImagesOptions | undefined = input.conversation || modelTakesImages
+            ? {
+                source: createCompositeImageSource(
+                    toolMedia.store,
+                    input.conversation ? createSessionImageSource(sessionFilesScope, String(input.conversation._id)) : null,
+                ),
+                maxImages: filesCfg.maxImages,
+                maxBytes: filesCfg.maxBytes,
+                viewImageTool: Boolean(readTool),
+                toolMedia: toolMedia.store,
+            }
+            : undefined;
+        // Outermost: whatever the SDK sends the model passes through the image resolver first
+        // (sessionImages.ts), so the SDK, the saved state and the traces only ever see references.
+        // The model itself is a gateway call (gatewayChatModel.ts): usage, cost and the model's
+        // own rules are the gateway's business, not this layer's.
+        const sdkModel = sessionImages ? withSessionImages(chatModel, sessionImages) : chatModel;
+        return { modelTakesImages, toolMedia, readSession, readTool, sessionImages, sdkModel };
+    });
+
+    const subagentsP = Promise.all([mediaP, sdkP]).then(([{ toolMedia, modelTakesImages, sessionImages }, [{ createTool }, { z }]]) => buildAgentSubagents({
+        db,
+        tenantDbName,
+        tenantId,
+        projectId,
+        ...(agent._id ? { agentId: String(agent._id) } : {}),
+        subagents: activeSubagentEntries(config),
+        createToolFn: createTool,
+        zod: z,
+        guard: toolGuard,
+        runtimeContext,
+        identity,
+        kbCaller,
+        ...(spend ? { spend } : {}),
+        ...(sessionImages ? { images: sessionImages } : {}),
+        toolMedia,
+        modelTakesImages,
+        caller: {
+            agentKey,
+            ...(input.conversation?._id ? { sessionId: String(input.conversation._id) } : {}),
+            ...(input.userId ? { userId: input.userId } : {}),
+            ...(config.piiProtection ? { piiProtection: config.piiProtection } : {}),
+        },
+        output: {
+            ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
+            ...(Number(config.runtime?.limits?.maxTotalOutputTokens) > 0
+                ? { maxTotalOutputTokens: Number(config.runtime?.limits?.maxTotalOutputTokens) }
+                : {}),
+        },
+        reasoning: { config, ...(input.requestReasoning ? { request: input.requestReasoning } : {}) },
+        prompt: {
+            parent: { config, variables: promptVariables },
+            ...(input.variables ? { variables: input.variables } : {}),
+            ...(input.variablesInPrompt !== undefined ? { variablesInPrompt: input.variablesInPrompt } : {}),
+            ...(input.userId ? { userId: input.userId } : {}),
+        },
+        onWarning: subagentWarnings.add,
+        approvals: { hitl, mode: hitlMode, run: { unattended: input.unattended, canPause: input.canPause }, allowedTools, log: hitlLog },
+    })).then((built) => {
+        builtCleanups.push(...built.cleanupTasks);
+        return built;
+    });
+
+    // A skill whose access list keeps this run's person out is left out of the catalog (managed:access:*).
+    const skillsP = buildAgentSkills(tenantDbName, projectId, config.skills, {
+        tenantDbName,
+        tenantId,
+        caller: identity,
+        source: runtimeContext?.source,
+    }, agent._id ? String(agent._id) : undefined);
+    // A hidden agent a flow owns is traced under its flow even when no flow run started the turn (the Build editor's playground).
+    const ownerTagsP = !runtimeContext?.flow && agent.owner ? ownedAgentFlowTags(tenantDbName, agent) : Promise.resolve(undefined);
+
+    const built = await settleInOrder([
+        modelP, promptP, pluginsP, sdkP, knowledgeP, boundP, sessionFactsP, bucketP, sandboxP, mediaP, subagentsP, skillsP, ownerTagsP,
+    ]);
+    if (!built.ok) {
+        await runBoundToolCleanup(builtCleanups, { agentKey, mode: source === 'agent' ? 'chat' : 'playground' });
+        throw built.reason;
+    }
+    const [
+        { model }, resolvedPrompt, guardrailPlugins, [{ createSmartAgent, createTool }, { z }], knowledgeTools, bound, sessionFacts, fileBucket,
+        sandboxTools, media, subagentBuild, skills, ownerTags,
+    ] = built.values;
+    const { toolMedia, readTool, readSession, sdkModel } = media;
+    // Prices the main model and every sub-agent's model; needs only those, so it runs while the tools are put together.
+    const costEstimatorP = started(buildAgentCostEstimator(config, model, subagentBuild.models, sessionBudgetActive, costWarnings.add, tenantId));
+
+    let systemPrompt = resolvedPrompt;
+    const tools: AgentSdkToolInterface[] = [];
+    const toolDefinitions: TraceToolDefinition[] = [];
+    if (knowledgeTools) {
+        tools.push(...knowledgeTools.tools);
+        toolDefinitions.push(...knowledgeTools.toolDefinitions);
+        systemPrompt = systemPrompt
+            ? `${KNOWLEDGE_FIRST_INSTRUCTION}\n\n${systemPrompt}`
+            : KNOWLEDGE_FIRST_INSTRUCTION;
+    }
+
+    const { cleanupTasks, tools: boundTools, definitions: boundToolDefinitions } = bound;
     tools.push(...boundTools);
     toolDefinitions.push(...boundToolDefinitions);
 
@@ -629,8 +803,6 @@ export async function buildLocalAgentRun(input: {
     // happen at compaction, so an agent can neither look a fact up nor record
     // what it was just told. Built from the SAME store the SDK path reads, so
     // a tool write is visible to next turn's injection.
-    // Non-fatal failures during the run (memory today), reported with the answer.
-    const warnings = new Set<string>();
     const memory = buildAgentMemoryOption(config.memory, {
         tenantDbName,
         tenantId,
@@ -662,32 +834,15 @@ export async function buildLocalAgentRun(input: {
     // them, images included, with `read` (built below next to the sandbox). Offered whenever the
     // conversation holds a file and the agent takes uploads or writes files (then they are its
     // own outputs).
-    const modelTakesImages = resolveModelCapabilities(model).inputModalities.includes('image');
-    const filesCfg = resolveAttachmentsConfig(config.attachments);
-    const sessionFilesScope = { tenantDbName, tenantId, projectId };
-    const outputsOn = outputsAvailability(config);
-    // What this run's tools showed the model (screenshots, rendered pages): shared with its sub-agents.
-    const toolMedia: ToolMediaContext = {
-        store: createToolMediaStore(),
-        modelTakesImages,
-        maxImageBytes: Math.min(filesCfg.maxBytes, 5 * 1024 * 1024),
-    };
-    let sessionFacts: Awaited<ReturnType<typeof conversationFileFacts>> = { any: false, images: false };
-    if (input.conversation) {
-        const conversationId = String(input.conversation._id);
-        sessionFacts = agentTakesAttachments(config) || outputsOn.available
-            ? await conversationFileFacts(db, conversationId)
-            : { any: false, images: false };
-        if (sessionFacts.any) {
-            tools.push(...buildSessionFileTools({
-                createToolFn: createTool,
-                zod: z,
-                guard: toolGuard,
-                scope: sessionFilesScope,
-                conversationId,
-            }));
-            toolDefinitions.push(...sessionFileToolDefinitions());
-        }
+    if (input.conversation && sessionFacts.any) {
+        tools.push(...buildSessionFileTools({
+            createToolFn: createTool,
+            zod: z,
+            guard: toolGuard,
+            scope: sessionFilesScope,
+            conversationId: String(input.conversation._id),
+        }));
+        toolDefinitions.push(...sessionFileToolDefinitions());
     }
 
     // Files the agent writes itself (`session_files_create` / `_append`, no sandbox needed): offered to a run with a
@@ -695,8 +850,7 @@ export async function buildLocalAgentRun(input: {
     // reservation (`taken`, below) covers these too.
     let fileOutputs: FileOutputTools | undefined;
     if (input.conversation && outputsOn.available) {
-        const bucket = await inspectFileBucket(db, tenantId, projectId, outputsOn.cfg.bucketKey).catch(() => null);
-        if (bucket?.usable) {
+        if (fileBucket?.usable) {
             fileOutputs = buildFileOutputTools({
                 createToolFn: createTool,
                 zod: z,
@@ -716,22 +870,8 @@ export async function buildLocalAgentRun(input: {
         }
     }
 
-    // Sandbox access (Enterprise). Provisioned on first use; cleaned up with
-    // the other bound tools once the run is over. A conversation keeps a
-    // persistent sandbox across its turns, a stateless call gets a throwaway one.
-    const sandboxTools = await buildAgentSandboxTools({
-        sandbox: config.sandbox,
-        tenantDbName,
-        tenantId,
-        projectId,
-        agentKey,
-        conversation: input.conversation,
-        createToolFn: createTool,
-        zod: z,
-        protect: (name, tool) => protectBuiltTool(toolGuard, { name, requestedName: tool.name }, tool),
-        onWarning: (message) => warnings.add(message),
-        outputs: { agentConfig: config, actorId, ...(runtimeContext?.tokenId ? { tokenId: runtimeContext.tokenId } : {}) },
-    });
+    // Sandbox warnings join the run's here, where the serial build used to emit them.
+    sandboxWarnings.release();
     // Files the agent writes to /outputs/ are delivered after the turn; that needs a session to attach them to and a bucket.
     if (sandboxTools.tools.length > 0 && input.conversation && resolveAttachmentsConfig(config.attachments).bucketKey) {
         systemPrompt = withSandboxOutputsPrompt(systemPrompt);
@@ -740,18 +880,6 @@ export async function buildLocalAgentRun(input: {
     toolDefinitions.push(...sandboxTools.definitions);
     cleanupTasks.push(sandboxTools.cleanup);
     // `read`: one tool for the sandbox's files and the conversation's (images, PDFs, video included).
-    const readSession = input.conversation && sessionFacts.any
-        ? { scope: sessionFilesScope, conversationId: String(input.conversation._id), readPageChars: filesCfg.readPageChars, maxImageBytes: filesCfg.maxBytes }
-        : undefined;
-    const readTool = buildReadTool({
-        createToolFn: createTool,
-        zod: z,
-        guard: toolGuard,
-        ...(sandboxTools.reader ? { sandbox: sandboxTools.reader } : {}),
-        ...(readSession ? { session: readSession } : {}),
-        media: { store: toolMedia.store },
-        modelTakesImages,
-    });
     if (readTool) {
         tools.push(readTool);
         toolDefinitions.push(readToolDefinition({
@@ -760,21 +888,6 @@ export async function buildLocalAgentRun(input: {
             media: { store: toolMedia.store },
         }));
     }
-    // Images in this session's context are references (a session file, or a tool's image of this run); the
-    // bytes are read at the model call. Wrapped even for an agent that no longer takes files (its saved
-    // state can still hold references) and for a stateless run, which still shows what its tools return.
-    const sessionImages: SessionImagesOptions | undefined = input.conversation || modelTakesImages
-        ? {
-            source: createCompositeImageSource(
-                toolMedia.store,
-                input.conversation ? createSessionImageSource(sessionFilesScope, String(input.conversation._id)) : null,
-            ),
-            maxImages: filesCfg.maxImages,
-            maxBytes: filesCfg.maxBytes,
-            viewImageTool: Boolean(readTool),
-            toolMedia: toolMedia.store,
-        }
-        : undefined;
     if (sandboxTools.promptNote) {
         systemPrompt = systemPrompt ? `${systemPrompt}\n\n${sandboxTools.promptNote}` : sandboxTools.promptNote;
     }
@@ -826,7 +939,6 @@ export async function buildLocalAgentRun(input: {
     // out of the approval pass below, which only knows the tools built above; their own
     // approval follows the agent's policy (see `clientToolNeedsApproval`), unless the tool
     // is exempted by its declaration.
-    const allowedTools = sessionAllowedTools(input.conversation?.metadata);
     let clientTools: AgentSdkToolInterface[] = [];
     // The agent's own declaration is offered on three surfaces, each switchable by the author
     // (`clientToolSurfaces`, all on by default): the client API (its caller answers on the actions
@@ -889,68 +1001,13 @@ export async function buildLocalAgentRun(input: {
         }
     }
 
-    // Outermost: whatever the SDK sends the model passes through the image resolver first
-    // (sessionImages.ts), so the SDK, the saved state and the traces only ever see references.
-    // The model itself is a gateway call (gatewayChatModel.ts): usage, cost and the model's
-    // own rules are the gateway's business, not this layer's.
-    const sdkModel = sessionImages ? withSessionImages(chatModel, sessionImages) : chatModel;
-    let traceSessionId: string | undefined;
-    // The run's usage rows name the trace session once it is open (its first streamed event).
-    const callerRun = getRoutingCaller()?.run;
-    const approvalSubagents = new Map<string, string>();
-
-    const { subagents, cleanupTasks: subagentCleanupTasks, models: subagentModels } = await buildAgentSubagents({
-        db,
-        tenantDbName,
-        tenantId,
-        projectId,
-        ...(agent._id ? { agentId: String(agent._id) } : {}),
-        subagents: activeSubagentEntries(config),
-        createToolFn: createTool,
-        zod: z,
-        guard: toolGuard,
-        runtimeContext,
-        identity,
-        kbCaller,
-        ...(spend ? { spend } : {}),
-        ...(sessionImages ? { images: sessionImages } : {}),
-        toolMedia,
-        modelTakesImages,
-        caller: {
-            agentKey,
-            ...(input.conversation?._id ? { sessionId: String(input.conversation._id) } : {}),
-            ...(input.userId ? { userId: input.userId } : {}),
-            ...(config.piiProtection ? { piiProtection: config.piiProtection } : {}),
-        },
-        output: {
-            ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
-            ...(Number(config.runtime?.limits?.maxTotalOutputTokens) > 0
-                ? { maxTotalOutputTokens: Number(config.runtime?.limits?.maxTotalOutputTokens) }
-                : {}),
-        },
-        reasoning: { config, ...(input.requestReasoning ? { request: input.requestReasoning } : {}) },
-        prompt: {
-            parent: { config, variables: promptVariables },
-            ...(input.variables ? { variables: input.variables } : {}),
-            ...(input.variablesInPrompt !== undefined ? { variablesInPrompt: input.variablesInPrompt } : {}),
-            ...(input.userId ? { userId: input.userId } : {}),
-        },
-        onWarning: (message) => warnings.add(message),
-        approvals: { hitl, mode: hitlMode, run: { unattended: input.unattended, canPause: input.canPause }, allowedTools, log: hitlLog },
-    });
+    // Sub-agent warnings, then the sub-agents' own cleanup, in the order the serial build produced them.
+    subagentWarnings.release();
+    const { subagents, cleanupTasks: subagentCleanupTasks } = subagentBuild;
     cleanupTasks.push(...subagentCleanupTasks);
 
-    // A skill whose access list keeps this run's person out is left out of the catalog (managed:access:*).
-    const skills = await buildAgentSkills(tenantDbName, projectId, config.skills, {
-        tenantDbName,
-        tenantId,
-        caller: identity,
-        source: runtimeContext?.source,
-    }, agent._id ? String(agent._id) : undefined);
     const outputSchema = resolveTurnOutputSchema(config, input.responseFormat);
     const skillPolicy = resolveAgentSkillPolicy(config);
-    // A hidden agent a flow owns is traced under its flow even when no flow run started the turn (the Build editor's playground).
-    const ownerTags = !runtimeContext?.flow && agent.owner ? await ownedAgentFlowTags(tenantDbName, agent) : undefined;
     const baseTracingMetadata = ownerTags || agent.owner
         // `flowOwned` marks the session as one of a hidden agent: it is listed under its flow, never as an agent of its own.
         ? { ...buildTracingMetadata(runtimeContext), ...ownerTags, ...(agent.owner ? { flowOwned: 'true' } : {}) }
@@ -972,8 +1029,8 @@ export async function buildLocalAgentRun(input: {
             ...(tracingMetadata ? { metadata: tracingMetadata } : {}),
         },
     );
-    const sessionBudgetActive = Boolean(activeSessionBudget(input.conversation));
-    const costEstimator = await buildAgentCostEstimator(config, model, subagentModels, sessionBudgetActive, (message) => warnings.add(message), tenantId);
+    costWarnings.release();
+    const costEstimator = await costEstimatorP;
     if (sessionBudgetActive && !costEstimator) {
         // A budget nothing can measure would let the session spend without
         // limit, so the turn is refused rather than run unmetered.
