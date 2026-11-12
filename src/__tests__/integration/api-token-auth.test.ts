@@ -159,11 +159,11 @@ describe('requireApiToken', () => {
       expect(ctx.tenantDbName).toBe(TENANT_ACME.dbName);
     });
 
-    it('calls switchToTenant with the correct dbName', async () => {
+    it('opens a tenant scope for the correct dbName', async () => {
       const req = buildRequest(`Bearer ${API_TOKEN_VALID.token}`);
       await requireApiToken(req);
 
-      expect(mockDb.switchToTenant).toHaveBeenCalledWith(TENANT_ACME.dbName);
+      expect(runWithTenantScope).toHaveBeenCalledWith(TENANT_ACME.dbName, expect.any(Function));
     });
 
     it('updates last-used timestamp for the token', async () => {

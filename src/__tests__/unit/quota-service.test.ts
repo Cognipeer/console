@@ -7,11 +7,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(await getDatabase())),
+  };
+});
 
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { createMockDb } from '../helpers/db.mock';
 import {
   listQuotaPolicies,
@@ -83,9 +87,9 @@ describe('listQuotaPolicies', () => {
     expect(result[0].label).toBe('Rate Limit Policy');
   });
 
-  it('calls switchToTenant with correct DB name', async () => {
+  it('reads inside a scope for the correct tenant DB', async () => {
     await listQuotaPolicies(TENANT_DB, TENANT_ID);
-    expect(db.switchToTenant).toHaveBeenCalledWith(TENANT_DB);
+    expect(runWithTenantScope).toHaveBeenCalledWith(TENANT_DB, expect.any(Function));
   });
 
   it('filters by domain when provided (includes global policies too)', async () => {
@@ -194,7 +198,7 @@ describe('createQuotaPolicy', () => {
     expect(call.updatedAt).toBeInstanceOf(Date);
   });
 
-  it('switches to correct tenant DB before creating', async () => {
+  it('creates inside a scope for the correct tenant DB', async () => {
     await createQuotaPolicy(TENANT_DB, TENANT_ID, {
       scope: 'tenant' as const,
       domain: 'llm' as const,
@@ -203,7 +207,7 @@ describe('createQuotaPolicy', () => {
       limits: {},
     });
 
-    expect(db.switchToTenant).toHaveBeenCalledWith(TENANT_DB);
+    expect(runWithTenantScope).toHaveBeenCalledWith(TENANT_DB, expect.any(Function));
   });
 });
 

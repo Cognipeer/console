@@ -128,8 +128,8 @@ describe('requireApiTokenFromHeader: owner state', () => {
 
   it('loads the owner inside the token tenant', async () => {
     await requireApiTokenFromHeader(AUTH);
-    expect(h.db.switchToTenant).toHaveBeenCalledWith('tenant_acme');
-    expect(h.db.switchToTenant.mock.invocationCallOrder[0])
+    expect(h.runWithTenantScope).toHaveBeenCalledWith('tenant_acme', expect.any(Function));
+    expect(h.runWithTenantScope.mock.invocationCallOrder[0])
       .toBeLessThan(h.db.findUserById.mock.invocationCallOrder[0]);
   });
 });

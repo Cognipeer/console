@@ -8,7 +8,7 @@
  */
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 
 const logger = createLogger('support-handoff');
 
@@ -108,11 +108,11 @@ async function resolveUserName(
   email: string,
 ): Promise<string> {
   try {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    db.assertTenantContext?.(tenantDbName);
-    const user = await db.findUserById(input.userId);
-    return user?.name?.trim() || email;
+    return await runWithTenantScope(tenantDbName, async (db) => {
+      db.assertTenantContext?.(tenantDbName);
+      const user = await db.findUserById(input.userId);
+      return user?.name?.trim() || email;
+    });
   } catch (error) {
     logger.warn('Support handoff could not resolve the user name', {
       error: error instanceof Error ? error.message : String(error),

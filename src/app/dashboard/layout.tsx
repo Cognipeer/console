@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation';
 import DashboardLayout from '@/components/layout/DashboardLayout';
 import { getConfig } from '@/lib/core/config';
 import { planLimitsActive } from '@/lib/limits/mode';
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { isTenantRole } from '@/lib/iam/identity';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
@@ -36,8 +36,19 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
   const tenantRecord = await (async () => {
     try { return await db.findTenantById(tenantId); } catch { return null; }
   })();
-  await db.switchToTenant(tenantDbName);
-  const user = await db.findUserById(userId);
+  // A server component has no request-level tenant scope, so the tenant reads open their own.
+  const { user, assignedProjectCount } = await runWithTenantScope(tenantDbName, async (tenantDb) => {
+    const found = await tenantDb.findUserById(userId);
+    if (!found || isUserDisabled(found)) return { user: null, assignedProjectCount: null };
+    // If a non-admin user has no assigned projects, the dashboard is not rendered at all.
+    // A project counts however it was given: directly, in the legacy list, or through a group
+    // (the same answer as the session endpoint and the project switcher).
+    const needsProject = found.role === 'user' || found.role === 'project_admin' || !isTenantRole(found.role);
+    const assigned = needsProject
+      ? await collectAccessibleProjectIds(tenantDb, userId, found.projectIds)
+      : null;
+    return { user: found, assignedProjectCount: assigned ? assigned.length : null };
+  });
 
   // A disabled account keeps a valid JWT until it expires; treat it exactly
   // like a deleted one so it cannot render the dashboard shell.
@@ -61,14 +72,8 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
     redirect('/p');
   }
 
-  // If a non-admin user has no assigned projects, do not render the dashboard at all.
-  // A project counts however it was given: directly, in the legacy list, or through a group
-  // (the same answer as the session endpoint and the project switcher).
-  if (role === 'user' || role === 'project_admin') {
-    const assigned = await collectAccessibleProjectIds(db, userId, user?.projectIds);
-    if (assigned.length === 0) {
-      redirect('/no-project');
-    }
+  if ((role === 'user' || role === 'project_admin') && assignedProjectCount === 0) {
+    redirect('/no-project');
   }
 
   // The same live license the API guard decides enterprise routes by, so an enterprise page is

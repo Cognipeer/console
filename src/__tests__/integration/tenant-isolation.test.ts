@@ -53,7 +53,7 @@ describe('Tenant isolation — switchToTenant is always called', () => {
   });
 
   describe('requireApiToken auth flow', () => {
-    it('calls switchToTenant before any user operations', async () => {
+    it('opens the tenant scope before any user operations', async () => {
       const { NextRequest } = await import('next/server');
       const { requireApiToken } = await import('@/lib/services/apiTokenAuth');
 
@@ -67,9 +67,6 @@ describe('Tenant isolation — switchToTenant is always called', () => {
       });
 
       await requireApiToken(req);
-
-      // switchToTenant must be called with the correct tenant DB name
-      expect(mockDb.switchToTenant).toHaveBeenCalledWith(TENANT_ACME.dbName);
 
       // The owner lookup is pinned to the token's tenant via the scoped helper,
       // not the process-global binding a concurrent request could overwrite.

@@ -220,71 +220,71 @@ export async function requireApiTokenFromHeader(
   }
 
   const effectiveLicense = LicenseManager.getEffectiveLicenseForTenant(tenant);
-  tenant = {
+  const resolvedTenant: ITenant = {
     ...tenant,
     licenseType: effectiveLicense.licenseType,
   };
 
-  await db.switchToTenant(tenant.dbName);
+  // Everything below reads the tenant database; this runs before the request-bound
+  // tenant scope exists, so it opens its own (a process-global switch could be
+  // overwritten by a concurrent request for another tenant).
+  return runWithTenantScope(resolvedTenant.dbName, async (scopedDb) => {
+    // The owner is loaded fresh on every request (never cached) so disabling or
+    // deleting the account cuts off its tokens immediately. It is resolved
+    // before anything with side effects (default-project creation, last-used
+    // stamp) and fails closed: an unreadable, missing, or disabled owner means
+    // no access.
+    let user: IUser | null;
+    try {
+      user = await scopedDb.findUserById(tokenRecord.userId);
+    } catch (error) {
+      logger.warn('Unable to resolve user for API token', { error });
+      throw new ApiTokenAuthError('Unable to verify API token owner', 503);
+    }
+    if (!user) {
+      throw new ApiTokenAuthError('API token owner no longer exists', 401);
+    }
+    if (isUserDisabled(user)) {
+      throw new ApiTokenAuthError('API token owner is disabled', 401);
+    }
+    // An external account (a person of a host application) holds no API tokens: a token that somehow names one
+    // authenticates nobody.
+    if (user.kind === 'external') {
+      throw new ApiTokenAuthError('API token owner cannot hold API tokens', 401);
+    }
 
-  // The owner is loaded fresh on every request (never cached) so disabling or
-  // deleting the account cuts off its tokens immediately. It is resolved
-  // before anything with side effects (default-project creation, last-used
-  // stamp) and fails closed: an unreadable, missing, or disabled owner means
-  // no access.
-  let user: IUser | null;
-  try {
-    // Scoped lookup: this runs before the request-bound tenant context exists,
-    // and the process-global switchToTenant binding above can be overwritten by
-    // a concurrent request for another tenant (spurious 401s under load).
-    user = await runWithTenantScope(tenant.dbName, (d) => d.findUserById(tokenRecord.userId));
-  } catch (error) {
-    logger.warn('Unable to resolve user for API token', { error });
-    throw new ApiTokenAuthError('Unable to verify API token owner', 503);
-  }
-  if (!user) {
-    throw new ApiTokenAuthError('API token owner no longer exists', 401);
-  }
-  if (isUserDisabled(user)) {
-    throw new ApiTokenAuthError('API token owner is disabled', 401);
-  }
-  // An external account (a person of a host application) holds no API tokens: a token that somehow names one
-  // authenticates nobody.
-  if (user.kind === 'external') {
-    throw new ApiTokenAuthError('API token owner cannot hold API tokens', 401);
-  }
+    const defaultProject = await ensureDefaultProject(
+      resolvedTenant.dbName,
+      tokenRecord.tenantId,
+      tokenRecord.userId,
+    );
+    const defaultProjectId = defaultProject._id ? String(defaultProject._id) : undefined;
+    const projectId = tokenRecord.projectId || defaultProjectId;
+    if (!projectId) {
+      throw new ApiTokenAuthError('Token project context is missing', 400);
+    }
 
-  const defaultProject = await ensureDefaultProject(
-    tenant.dbName,
-    tokenRecord.tenantId,
-    tokenRecord.userId,
-  );
-  const defaultProjectId = defaultProject._id ? String(defaultProject._id) : undefined;
-  const projectId = tokenRecord.projectId || defaultProjectId;
-  if (!projectId) {
-    throw new ApiTokenAuthError('Token project context is missing', 400);
-  }
+    // A token without a project works in the default project, under the same rule.
+    await assertOwnerProjectAccess(resolvedTenant.dbName, user, projectId);
 
-  // A token without a project works in the default project, under the same rule.
-  await assertOwnerProjectAccess(tenant.dbName, user, projectId);
+    // Non-critical last-used timestamp update — fire and forget. Only for
+    // requests that were accepted.
+    fireAndForget('token-last-used', async () => {
+      const bgDb = await getDatabase();
+      await bgDb.updateTokenLastUsedByHash(tokenHash);
+    });
 
-  // Non-critical last-used timestamp update — fire and forget. Only for
-  // requests that were accepted.
-  fireAndForget('token-last-used', async () => {
-    const bgDb = await getDatabase();
-    await bgDb.updateTokenLastUsedByHash(tokenHash);
+    return {
+      token,
+      tokenRecord,
+      tenant: resolvedTenant,
+      tenantId: tokenRecord.tenantId,
+      tenantSlug: resolvedTenant.slug,
+      tenantDbName: resolvedTenant.dbName,
+      projectId,
+      user,
+    };
   });
-
-  return {
-    token,
-    tokenRecord,
-    tenant,
-    tenantId: tokenRecord.tenantId,
-    tenantSlug: tenant.slug,
-    tenantDbName: tenant.dbName,
-    projectId,
-    user,
-  };
 }
 
 export async function requireApiToken(

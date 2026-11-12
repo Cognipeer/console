@@ -17,11 +17,16 @@ let databaseDown = false;
 
 vi.mock('@/lib/database', async () => {
   const actual = await vi.importActual<typeof import('@/lib/database')>('@/lib/database');
+  const getDb = async () => {
+    if (databaseDown) throw new Error('database unavailable');
+    return provider;
+  };
   return {
     ...actual,
-    getDatabase: async () => {
-      if (databaseDown) throw new Error('database unavailable');
-      return provider;
+    getDatabase: getDb,
+    runWithTenantScope: async (tenantDbName: string, fn: (db: SQLiteProvider) => unknown) => {
+      const db = await getDb();
+      return db.runWithTenant(tenantDbName, () => fn(db));
     },
   };
 });

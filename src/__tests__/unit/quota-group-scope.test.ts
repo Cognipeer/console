@@ -19,7 +19,17 @@ const config = {
   rateLimit: { provider: 'mongodb' },
 };
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // Same contract as the real wrapper: bind through the provider's runWithTenant when it has one.
+    runWithTenantScope: vi.fn(async (name: string, fn: (db: unknown) => unknown) => {
+      const db = (await getDatabase()) as { runWithTenant?: (n: string, f: () => unknown) => unknown };
+      return typeof db.runWithTenant === 'function' ? db.runWithTenant(name, () => fn(db)) : fn(db);
+    }),
+  };
+});
 vi.mock('@/lib/core/config', () => ({ getConfig: () => config }));
 vi.mock('@/lib/core/cache', () => ({
   getCache: async () => ({ get: async () => undefined, set: async () => {}, del: async () => {} }),

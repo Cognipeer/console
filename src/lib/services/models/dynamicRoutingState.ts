@@ -19,7 +19,7 @@
 
 import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase, type IModelUsageRouting } from '@/lib/database';
+import { runWithTenantScope, type IModelUsageRouting } from '@/lib/database';
 import type { TokenUsage } from './usageLogger';
 
 const logger = createLogger('dynamic-routing-state');
@@ -184,35 +184,35 @@ async function loadModelProfile(
   projectId: string,
   modelKey: string,
 ): Promise<ModelProfile | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const rows = await db.listUsageDaily({
-    projectId,
-    service: 'models',
-    refKey: modelKey,
-    fromDay: dayString(new Date(Date.now() - PROFILE_LOOKBACK_DAYS * 86_400_000)),
-    limit: 5_000,
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const rows = await db.listUsageDaily({
+      projectId,
+      service: 'models',
+      refKey: modelKey,
+      fromDay: dayString(new Date(Date.now() - PROFILE_LOOKBACK_DAYS * 86_400_000)),
+      limit: 5_000,
+    });
+    let requests = 0;
+    let errors = 0;
+    let input = 0;
+    let output = 0;
+    let cached = 0;
+    for (const row of rows) {
+      requests += row.requests ?? 0;
+      errors += row.errors ?? 0;
+      input += row.inputTokens ?? 0;
+      output += row.outputTokens ?? 0;
+      cached += row.cachedInputTokens ?? 0;
+    }
+    const served = requests - errors;
+    if (served < MIN_PROFILE_REQUESTS || input <= 0) return null;
+    return {
+      requests: served,
+      avgOutputTokens: output / served,
+      ioRatio: output / input,
+      cachedShare: Math.min(1, cached / input),
+    };
   });
-  let requests = 0;
-  let errors = 0;
-  let input = 0;
-  let output = 0;
-  let cached = 0;
-  for (const row of rows) {
-    requests += row.requests ?? 0;
-    errors += row.errors ?? 0;
-    input += row.inputTokens ?? 0;
-    output += row.outputTokens ?? 0;
-    cached += row.cachedInputTokens ?? 0;
-  }
-  const served = requests - errors;
-  if (served < MIN_PROFILE_REQUESTS || input <= 0) return null;
-  return {
-    requests: served,
-    avgOutputTokens: output / served,
-    ioRatio: output / input,
-    cachedShare: Math.min(1, cached / input),
-  };
 }
 
 /** Recent traffic profile of each model (null when there is too little history). */

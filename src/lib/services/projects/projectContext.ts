@@ -1,5 +1,5 @@
 import type { NextRequest } from '@/server/api/http';
-import { getDatabase, type IProject, type IUser, type IUserProject } from '@/lib/database';
+import { runWithTenantScope, type IProject, type IUser, type IUserProject } from '@/lib/database';
 import { getPrincipalContext } from '@/lib/iam/principalCache';
 import type { ProjectAssignmentRow } from '@/lib/iam/projectMembership';
 import { mergeServicePermissions } from '@/lib/security/rbac';
@@ -31,100 +31,99 @@ export async function resolveProjectContext(
     activeProjectId?: string;
   },
 ): Promise<ProjectContext> {
-  const db = await getDatabase();
-  await db.switchToTenant(ctx.tenantDbName);
-
-  const user = await db.findUserById(ctx.userId);
-  if (!user) {
-    throw new ProjectContextError('Unauthorized', 401);
-  }
-
-  const isPrivileged = user.role === 'owner' || user.role === 'admin';
-
-  const defaultProject = await ensureDefaultProject(
-    ctx.tenantDbName,
-    ctx.tenantId,
-    ctx.userId,
-  );
-  const defaultProjectId = defaultProject._id ? String(defaultProject._id) : undefined;
-
-  let projectId = ctx.activeProjectId || defaultProjectId;
-
-  // The projects a member can open: the legacy `projectIds`, the member's own
-  // assignments (read fresh, so a project the member just created or joined is
-  // usable at once) and the assignments of the member's groups. The group part
-  // comes with the cached principal context (at most 15 s old on another node,
-  // dropped at once on every group or assignment change on this node): it costs
-  // no round trip on a warm request, however many groups the member is in.
-  let directRows: IUserProject[] = [];
-  let groupRows: ProjectAssignmentRow[] = [];
-  if (!isPrivileged) {
-    const [direct, principal] = await Promise.all([
-      db.listUserProjectsByUser(ctx.userId),
-      getPrincipalContext({
-        tenantDbName: ctx.tenantDbName,
-        tenantId: ctx.tenantId,
-        userId: ctx.userId,
-        user,
-        withProjects: true,
-      }),
-    ]);
-    directRows = direct;
-    groupRows = principal.groupProjects ?? [];
-
-    const legacyProjectIds = (user.projectIds ?? []).map(String).filter(Boolean);
-    const memberProjectIds = Array.from(new Set([
-      ...legacyProjectIds,
-      ...directRows.map((membership) => String(membership.projectId)),
-      ...groupRows.map((row) => row.projectId),
-    ].filter(Boolean)));
-
-    if (memberProjectIds.length === 0) {
-      throw new ProjectContextError('No project assigned', 403);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const user = await db.findUserById(ctx.userId);
+    if (!user) {
+      throw new ProjectContextError('Unauthorized', 401);
     }
 
-    if (!projectId || !memberProjectIds.includes(projectId)) {
-      projectId = memberProjectIds[0];
-    }
+    const isPrivileged = user.role === 'owner' || user.role === 'admin';
 
-    if (!projectId || !memberProjectIds.includes(projectId)) {
-      throw new ProjectContextError('Forbidden', 403);
-    }
-  }
-
-  if (!projectId) {
-    throw new ProjectContextError('Project context is missing', 400);
-  }
-
-  const project = await db.findProjectById(projectId);
-  if (!project) {
-    throw new ProjectContextError('Project not found', 404);
-  }
-
-  const userProject = isPrivileged
-    ? null
-    : (
-      directRows.find((membership) => String(membership.projectId) === projectId)
-      ?? (
-        (user.projectIds ?? []).map(String).includes(projectId)
-          ? {
-              projectId,
-              role: user.role === 'project_admin' ? 'project_admin' : 'member',
-              servicePermissions: undefined,
-              tenantId: ctx.tenantId,
-              userId: ctx.userId,
-            }
-          : null
-      )
-      ?? groupProjectMembership(groupRows, ctx, projectId)
+    const defaultProject = await ensureDefaultProject(
+      ctx.tenantDbName,
+      ctx.tenantId,
+      ctx.userId,
     );
+    const defaultProjectId = defaultProject._id ? String(defaultProject._id) : undefined;
 
-  return {
-    projectId,
-    project,
-    user,
-    userProject,
-  };
+    let projectId = ctx.activeProjectId || defaultProjectId;
+
+    // The projects a member can open: the legacy `projectIds`, the member's own
+    // assignments (read fresh, so a project the member just created or joined is
+    // usable at once) and the assignments of the member's groups. The group part
+    // comes with the cached principal context (at most 15 s old on another node,
+    // dropped at once on every group or assignment change on this node): it costs
+    // no round trip on a warm request, however many groups the member is in.
+    let directRows: IUserProject[] = [];
+    let groupRows: ProjectAssignmentRow[] = [];
+    if (!isPrivileged) {
+      const [direct, principal] = await Promise.all([
+        db.listUserProjectsByUser(ctx.userId),
+        getPrincipalContext({
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          userId: ctx.userId,
+          user,
+          withProjects: true,
+        }),
+      ]);
+      directRows = direct;
+      groupRows = principal.groupProjects ?? [];
+
+      const legacyProjectIds = (user.projectIds ?? []).map(String).filter(Boolean);
+      const memberProjectIds = Array.from(new Set([
+        ...legacyProjectIds,
+        ...directRows.map((membership) => String(membership.projectId)),
+        ...groupRows.map((row) => row.projectId),
+      ].filter(Boolean)));
+
+      if (memberProjectIds.length === 0) {
+        throw new ProjectContextError('No project assigned', 403);
+      }
+
+      if (!projectId || !memberProjectIds.includes(projectId)) {
+        projectId = memberProjectIds[0];
+      }
+
+      if (!projectId || !memberProjectIds.includes(projectId)) {
+        throw new ProjectContextError('Forbidden', 403);
+      }
+    }
+
+    if (!projectId) {
+      throw new ProjectContextError('Project context is missing', 400);
+    }
+
+    const project = await db.findProjectById(projectId);
+    if (!project) {
+      throw new ProjectContextError('Project not found', 404);
+    }
+
+    const userProject = isPrivileged
+      ? null
+      : (
+        directRows.find((membership) => String(membership.projectId) === projectId)
+        ?? (
+          (user.projectIds ?? []).map(String).includes(projectId)
+            ? {
+                projectId,
+                role: user.role === 'project_admin' ? 'project_admin' : 'member',
+                servicePermissions: undefined,
+                tenantId: ctx.tenantId,
+                userId: ctx.userId,
+              }
+            : null
+        )
+        ?? groupProjectMembership(groupRows, ctx, projectId)
+      );
+
+    return {
+      projectId,
+      project,
+      user,
+      userProject,
+    };
+  });
 }
 
 /** A membership synthesized from the user's group assignments of one project (null when no group of the user is assigned to it). */

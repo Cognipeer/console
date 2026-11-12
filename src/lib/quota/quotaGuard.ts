@@ -1,4 +1,4 @@
-import { getDatabase, type IQuotaPolicy } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type IQuotaPolicy } from '@/lib/database';
 import { getCache } from '@/lib/core/cache';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
@@ -62,23 +62,23 @@ async function fetchPolicies(
   tenantId: string,
   projectId: string,
 ): Promise<IQuotaPolicy[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const projectPolicies = await db.listQuotaPolicies(tenantId, projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const projectPolicies = await db.listQuotaPolicies(tenantId, projectId);
 
-  // Group limits and agent-run limits may be tenant-wide (no project). Rows of
-  // any other kind without a project stay unloaded, exactly as before — see
-  // `isTenantWideKind`.
-  const tenantWide = typeof db.listTenantWideQuotaPolicies === 'function'
-    ? await db.listTenantWideQuotaPolicies(tenantId)
-    : [];
-  // (A context with an empty project id reads every policy of the tenant above,
-  // tenant-wide ones included; do not count those twice.)
-  const known = new Set(projectPolicies.map((policy) => String(policy._id)));
-  const applicable = Array.isArray(tenantWide)
-    ? tenantWide.filter((policy) => isTenantWideKind(policy) && !known.has(String(policy._id)))
-    : [];
-  return applicable.length === 0 ? projectPolicies : [...projectPolicies, ...applicable];
+    // Group limits and agent-run limits may be tenant-wide (no project). Rows of
+    // any other kind without a project stay unloaded, exactly as before — see
+    // `isTenantWideKind`.
+    const tenantWide = typeof db.listTenantWideQuotaPolicies === 'function'
+      ? await db.listTenantWideQuotaPolicies(tenantId)
+      : [];
+    // (A context with an empty project id reads every policy of the tenant above,
+    // tenant-wide ones included; do not count those twice.)
+    const known = new Set(projectPolicies.map((policy) => String(policy._id)));
+    const applicable = Array.isArray(tenantWide)
+      ? tenantWide.filter((policy) => isTenantWideKind(policy) && !known.has(String(policy._id)))
+      : [];
+    return applicable.length === 0 ? projectPolicies : [...projectPolicies, ...applicable];
+  });
 }
 
 function matchesScope(
@@ -365,11 +365,7 @@ export function resetQuotaGroupCacheForTests(): void {
 }
 
 async function loadGroupIds(tenantDbName: string, userId: string): Promise<string[]> {
-  const db = await getDatabase();
-  const read = () => db.listGroupMembersByUser(userId);
-  const memberships = db.runWithTenant
-    ? await db.runWithTenant(tenantDbName, read)
-    : (await db.switchToTenant(tenantDbName), await read());
+  const memberships = await runWithTenantScope(tenantDbName, (db) => db.listGroupMembersByUser(userId));
   return [...new Set((Array.isArray(memberships) ? memberships : []).map((m) => String(m.groupId)))];
 }
 
@@ -418,9 +414,7 @@ async function incrementRateLimitCounter(
   const provider = getConfig().rateLimit.provider;
 
   if (provider === 'mongodb') {
-    const db = await getDatabase();
-    await db.switchToTenant(context.tenantDbName);
-    return db.incrementRateLimit(key, windowSeconds, amount);
+    return runWithTenantScope(context.tenantDbName, (db) => db.incrementRateLimit(key, windowSeconds, amount));
   }
 
   const cache = await getCache();
@@ -1073,75 +1067,75 @@ export async function checkBudget(
   cost: { usd?: number } = {},
 ): Promise<QuotaCheckResult> {
   const { effective: effectiveLimits, buckets } = await resolveLimits(context);
-  const db = await getDatabase();
-  await db.switchToTenant(context.tenantDbName);
 
   if (!buckets.some((bucket) => bucket.limits.budget)) {
     return { allowed: true, effectiveLimits };
   }
 
-  const costMicros = usdToMicros(cost.usd ?? 0);
-  const errors: string[] = [];
+  return runWithTenantScope(context.tenantDbName, async (db) => {
+    const costMicros = usdToMicros(cost.usd ?? 0);
+    const errors: string[] = [];
 
-  const checkWindow = async (
-    bucket: LimitBucket,
-    windowName: 'perDay' | 'perMonth',
-    limitUsd: number | undefined,
-    incrementByMicros: number,
-  ) => {
-    if (limitUsd === undefined || limitUsd === -1) return;
+    const checkWindow = async (
+      bucket: LimitBucket,
+      windowName: 'perDay' | 'perMonth',
+      limitUsd: number | undefined,
+      incrementByMicros: number,
+    ) => {
+      if (limitUsd === undefined || limitUsd === -1) return;
 
-    const limitMicros = usdToMicros(limitUsd);
-    const windowSeconds = windowName === 'perDay' ? 86400 : 2592000;
-    const key = budgetCounterKey(context, windowName, bucket);
+      const limitMicros = usdToMicros(limitUsd);
+      const windowSeconds = windowName === 'perDay' ? 86400 : 2592000;
+      const key = budgetCounterKey(context, windowName, bucket);
 
-    try {
-      // Read current value without incrementing.
-      const current = await db.incrementRateLimit(key, windowSeconds, 0);
-      if (current.count >= limitMicros) {
-        errors.push(budgetExceededMessage(windowName, current.count, limitMicros));
-        return;
-      }
-
-      if (incrementByMicros > 0) {
-        const updated = await db.incrementRateLimit(
-          key,
-          windowSeconds,
-          incrementByMicros,
-        );
-        if (updated.count > limitMicros) {
-          errors.push(budgetExceededMessage(windowName, updated.count, limitMicros));
+      try {
+        // Read current value without incrementing.
+        const current = await db.incrementRateLimit(key, windowSeconds, 0);
+        if (current.count >= limitMicros) {
+          errors.push(budgetExceededMessage(windowName, current.count, limitMicros));
+          return;
         }
+
+        if (incrementByMicros > 0) {
+          const updated = await db.incrementRateLimit(
+            key,
+            windowSeconds,
+            incrementByMicros,
+          );
+          if (updated.count > limitMicros) {
+            errors.push(budgetExceededMessage(windowName, updated.count, limitMicros));
+          }
+        }
+      } catch (error) {
+        logger.error('Budget check failed', { error });
+        // Fail CLOSED, not open: this branch only runs when the tenant has an
+        // actual dailySpendLimit/monthlySpendLimit configured (the early return
+        // above skips it otherwise) — i.e. only for callers who explicitly
+        // opted into a hard cap. Silently letting spend through on a counter
+        // lookup failure made that cap meaningless during exactly the kind of
+        // outage a hard cap exists to survive; it never affects a tenant that
+        // hasn't configured a budget limit at all.
+        errors.push(`Budget check unavailable for ${windowName}; failing closed`);
       }
-    } catch (error) {
-      logger.error('Budget check failed', { error });
-      // Fail CLOSED, not open: this branch only runs when the tenant has an
-      // actual dailySpendLimit/monthlySpendLimit configured (the early return
-      // above skips it otherwise) — i.e. only for callers who explicitly
-      // opted into a hard cap. Silently letting spend through on a counter
-      // lookup failure made that cap meaningless during exactly the kind of
-      // outage a hard cap exists to survive; it never affects a tenant that
-      // hasn't configured a budget limit at all.
-      errors.push(`Budget check unavailable for ${windowName}; failing closed`);
+    };
+
+    await Promise.all(
+      buckets.flatMap((bucket) => {
+        const budget = bucket.limits.budget;
+        if (!budget) return [];
+        return [
+          checkWindow(bucket, 'perDay', budget.dailySpendLimit, costMicros),
+          checkWindow(bucket, 'perMonth', budget.monthlySpendLimit, costMicros),
+        ];
+      }),
+    );
+
+    if (errors.length > 0) {
+      return { allowed: false, reason: errors[0], effectiveLimits };
     }
-  };
 
-  await Promise.all(
-    buckets.flatMap((bucket) => {
-      const budget = bucket.limits.budget;
-      if (!budget) return [];
-      return [
-        checkWindow(bucket, 'perDay', budget.dailySpendLimit, costMicros),
-        checkWindow(bucket, 'perMonth', budget.monthlySpendLimit, costMicros),
-      ];
-    }),
-  );
-
-  if (errors.length > 0) {
-    return { allowed: false, reason: errors[0], effectiveLimits };
-  }
-
-  return { allowed: true, effectiveLimits };
+    return { allowed: true, effectiveLimits };
+  });
 }
 
 // ── Budget usage introspection (read-only) ────────────────────────────────
@@ -1181,43 +1175,43 @@ function budgetCounterKey(
  */
 export async function getBudgetUsage(context: QuotaContext): Promise<BudgetUsage> {
   const effectiveLimits = await resolveEffectiveLimits(context);
-  const db = await getDatabase();
-  await db.switchToTenant(context.tenantDbName);
 
-  const budget = effectiveLimits.budget;
+  return runWithTenantScope(context.tenantDbName, async (db) => {
+    const budget = effectiveLimits.budget;
 
-  const readWindow = async (
-    windowName: 'perDay' | 'perMonth',
-    limitUsd: number | undefined,
-  ): Promise<BudgetWindowUsage> => {
-    const windowSeconds = windowName === 'perDay' ? 86400 : 2592000;
-    let usedUsd = 0;
-    try {
-      const current = await db.incrementRateLimit(
-        budgetCounterKey(context, windowName),
-        windowSeconds,
-        0,
-      );
-      usedUsd = current.count / MICROS_PER_USD;
-    } catch (error) {
-      logger.error('Budget usage read failed', { error });
-    }
-    const hasLimit = limitUsd !== undefined && limitUsd !== -1;
-    return {
-      limitUsd: hasLimit ? limitUsd : null,
-      usedUsd,
-      remainingUsd: hasLimit ? Math.max(0, limitUsd - usedUsd) : null,
+    const readWindow = async (
+      windowName: 'perDay' | 'perMonth',
+      limitUsd: number | undefined,
+    ): Promise<BudgetWindowUsage> => {
+      const windowSeconds = windowName === 'perDay' ? 86400 : 2592000;
+      let usedUsd = 0;
+      try {
+        const current = await db.incrementRateLimit(
+          budgetCounterKey(context, windowName),
+          windowSeconds,
+          0,
+        );
+        usedUsd = current.count / MICROS_PER_USD;
+      } catch (error) {
+        logger.error('Budget usage read failed', { error });
+      }
+      const hasLimit = limitUsd !== undefined && limitUsd !== -1;
+      return {
+        limitUsd: hasLimit ? limitUsd : null,
+        usedUsd,
+        remainingUsd: hasLimit ? Math.max(0, limitUsd - usedUsd) : null,
+      };
     };
-  };
 
-  return {
-    configured: Boolean(
-      budget
-      && ((budget.dailySpendLimit !== undefined && budget.dailySpendLimit !== -1)
-        || (budget.monthlySpendLimit !== undefined && budget.monthlySpendLimit !== -1)),
-    ),
-    perDay: await readWindow('perDay', budget?.dailySpendLimit),
-    perMonth: await readWindow('perMonth', budget?.monthlySpendLimit),
-    alertThresholds: budget?.alertThresholds,
-  };
+    return {
+      configured: Boolean(
+        budget
+        && ((budget.dailySpendLimit !== undefined && budget.dailySpendLimit !== -1)
+          || (budget.monthlySpendLimit !== undefined && budget.monthlySpendLimit !== -1)),
+      ),
+      perDay: await readWindow('perDay', budget?.dailySpendLimit),
+      perMonth: await readWindow('perMonth', budget?.monthlySpendLimit),
+      alertThresholds: budget?.alertThresholds,
+    };
+  });
 }

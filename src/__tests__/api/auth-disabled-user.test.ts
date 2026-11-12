@@ -9,7 +9,22 @@ import { SignJWT } from 'jose';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { createMockDb } from '../helpers/db.mock';
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // Same contract as the real wrapper: bind through the provider's runWithTenant, else switch.
+    runWithTenantScope: vi.fn(async (name: string, fn: (db: unknown) => unknown) => {
+      const db = (await getDatabase()) as {
+        runWithTenant?: (n: string, f: () => unknown) => unknown;
+        switchToTenant: (n: string) => unknown;
+      };
+      if (typeof db.runWithTenant === 'function') return db.runWithTenant(name, () => fn(db));
+      await db.switchToTenant(name);
+      return fn(db);
+    }),
+  };
+});
 vi.mock('@/lib/email/mailer', () => ({ sendEmail: vi.fn().mockResolvedValue(true) }));
 vi.mock('bcryptjs', () => ({
   default: { compare: vi.fn(), hash: vi.fn().mockResolvedValue('$new-hash') },

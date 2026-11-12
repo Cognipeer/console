@@ -7,7 +7,7 @@
  * what was spent, and how close each budget window is to its limit.
  */
 
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import type { IModel, IModelUsageAggregate } from '@/lib/database';
 import { listModels } from '@/lib/services/models/modelService';
 import {
@@ -83,57 +83,56 @@ export async function getSpendReport(
   ctx: SpendContext,
   options?: SpendReportOptions,
 ): Promise<SpendReport> {
-  const db = await getDatabase();
-  await db.switchToTenant(ctx.tenantDbName);
-
-  const groupBy = options?.groupBy ?? 'day';
-  let models = await listModels(ctx.tenantDbName, ctx.projectId ?? '', {});
-  if (options?.modelKey) {
-    models = models.filter((model) => model.key === options.modelKey);
-  }
-
-  const byModel: ModelSpendEntry[] = [];
-  const periods = new Map<string, SpendTimeseriesPoint>();
-
-  for (const model of models) {
-    const aggregate = await db.aggregateModelUsage(
-      model.key,
-      { from: options?.from, to: options?.to, groupBy },
-      ctx.projectId,
-    );
-    if (aggregate.totalCalls === 0) continue;
-    byModel.push(toEntry(model, aggregate));
-
-    for (const point of aggregate.timeseries ?? []) {
-      const existing = periods.get(point.period) ?? {
-        period: point.period,
-        calls: 0,
-        totalTokens: 0,
-        cost: 0,
-      };
-      existing.calls += point.callCount;
-      existing.totalTokens += point.totalTokens;
-      existing.cost += point.totalCost ?? 0;
-      periods.set(point.period, existing);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const groupBy = options?.groupBy ?? 'day';
+    let models = await listModels(ctx.tenantDbName, ctx.projectId ?? '', {});
+    if (options?.modelKey) {
+      models = models.filter((model) => model.key === options.modelKey);
     }
-  }
 
-  byModel.sort((a, b) => b.cost - a.cost);
-  const timeseries = [...periods.values()].sort((a, b) => a.period.localeCompare(b.period));
+    const byModel: ModelSpendEntry[] = [];
+    const periods = new Map<string, SpendTimeseriesPoint>();
 
-  return {
-    from: options?.from,
-    to: options?.to,
-    groupBy,
-    currency: byModel[0]?.currency ?? 'USD',
-    totalCost: byModel.reduce((sum, entry) => sum + entry.cost, 0),
-    totalCalls: byModel.reduce((sum, entry) => sum + entry.calls, 0),
-    totalInputTokens: byModel.reduce((sum, entry) => sum + entry.inputTokens, 0),
-    totalOutputTokens: byModel.reduce((sum, entry) => sum + entry.outputTokens, 0),
-    totalTokens: byModel.reduce((sum, entry) => sum + entry.totalTokens, 0),
-    byModel,
-    timeseries,
-  };
+    for (const model of models) {
+      const aggregate = await db.aggregateModelUsage(
+        model.key,
+        { from: options?.from, to: options?.to, groupBy },
+        ctx.projectId,
+      );
+      if (aggregate.totalCalls === 0) continue;
+      byModel.push(toEntry(model, aggregate));
+
+      for (const point of aggregate.timeseries ?? []) {
+        const existing = periods.get(point.period) ?? {
+          period: point.period,
+          calls: 0,
+          totalTokens: 0,
+          cost: 0,
+        };
+        existing.calls += point.callCount;
+        existing.totalTokens += point.totalTokens;
+        existing.cost += point.totalCost ?? 0;
+        periods.set(point.period, existing);
+      }
+    }
+
+    byModel.sort((a, b) => b.cost - a.cost);
+    const timeseries = [...periods.values()].sort((a, b) => a.period.localeCompare(b.period));
+
+    return {
+      from: options?.from,
+      to: options?.to,
+      groupBy,
+      currency: byModel[0]?.currency ?? 'USD',
+      totalCost: byModel.reduce((sum, entry) => sum + entry.cost, 0),
+      totalCalls: byModel.reduce((sum, entry) => sum + entry.calls, 0),
+      totalInputTokens: byModel.reduce((sum, entry) => sum + entry.inputTokens, 0),
+      totalOutputTokens: byModel.reduce((sum, entry) => sum + entry.outputTokens, 0),
+      totalTokens: byModel.reduce((sum, entry) => sum + entry.totalTokens, 0),
+      byModel,
+      timeseries,
+    };
+  });
 }
 
 /** Client-facing entity names for the per-user / per-agent spend breakdown. */
