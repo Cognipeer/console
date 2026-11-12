@@ -32,6 +32,8 @@ import {
   UnstyledButton,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { errorMessage } from '@/lib/api/client';
+import { useUpdateMcpServer } from '@/lib/api/queries/mcp';
 import FormShell from '@/components/common/ui/FormShell';
 import { IconAdjustments, IconChevronDown, IconChevronRight, IconSearch } from '@tabler/icons-react';
 import type { IMcpToolAnnotations, McpSourceType } from '@/lib/database';
@@ -140,6 +142,7 @@ export default function McpToolsPanel({
   const [descDraft, setDescDraft] = useState('');
   const [nameDraft, setNameDraft] = useState('');
   const [savingAnn, setSavingAnn] = useState(false);
+  const updateServer = useUpdateMcpServer();
 
   const overrides = useMemo(() => toolAnnotations ?? {}, [toolAnnotations]);
   const descOverrides = useMemo(() => toolDescriptions ?? {}, [toolDescriptions]);
@@ -267,17 +270,12 @@ export default function McpToolsPanel({
       const payload = Object.keys(annDraft).length ? annDraft : null;
       const description = descDraft.trim();
       const name = nameDraftTrimmed;
-      const res = await fetch(`/api/mcp/${serverId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          toolAnnotations: { [editingTool.name]: payload },
-          toolDescriptions: { [editingTool.name]: description || null },
-          toolNames: { [editingTool.name]: name || null },
-        }),
+      const data = await updateServer.mutateAsync({
+        id: serverId,
+        toolAnnotations: { [editingTool.name]: payload },
+        toolDescriptions: { [editingTool.name]: description || null },
+        toolNames: { [editingTool.name]: name || null },
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Failed to save tool settings');
       onServerUpdated(data.server);
       setEditingTool(null);
       notifications.show({
@@ -290,7 +288,7 @@ export default function McpToolsPanel({
     } catch (err) {
       notifications.show({
         title: 'Save failed',
-        message: err instanceof Error ? err.message : 'Unknown error',
+        message: errorMessage(err, 'Unknown error'),
         color: 'red',
       });
     } finally {
@@ -301,13 +299,7 @@ export default function McpToolsPanel({
   const handleSave = async () => {
     setSaving(true);
     try {
-      const res = await fetch(`/api/mcp/${serverId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ disabledTools: [...draft] }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Failed to save tool selection');
+      const data = await updateServer.mutateAsync({ id: serverId, disabledTools: [...draft] });
       onServerUpdated(data.server);
       const total = data.server?.tools?.length ?? tools.length;
       const disabled = data.server?.disabledTools?.length ?? 0;
@@ -319,7 +311,7 @@ export default function McpToolsPanel({
     } catch (err) {
       notifications.show({
         title: 'Save failed',
-        message: err instanceof Error ? err.message : 'Unknown error',
+        message: errorMessage(err, 'Unknown error'),
         color: 'red',
       });
     } finally {

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, SegmentedControl, Tooltip } from '@mantine/core';
 import {
@@ -14,44 +14,15 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
-import type { McpServerView } from '@/lib/services/mcp';
+import { useMcpMonitor, type McpAuditRow, type McpMonitorEntry, type McpRequestLogRow } from '@/lib/api/queries/mcp';
 
-interface MonitorEntry {
-  server: McpServerView;
-  aggregate: {
-    totalRequests: number;
-    successCount: number;
-    errorCount: number;
-    avgLatencyMs: number | null;
-  };
-  runtime: {
-    kind: 'openapi' | 'remote' | 'stdio-subprocess' | 'stdio-sandbox';
-    state: 'ready' | 'disabled' | 'degraded' | 'unavailable';
-    detail?: string;
-  };
-}
+type MonitorEntry = McpMonitorEntry;
+type RequestLogRow = McpRequestLogRow;
+type AuditRow = McpAuditRow;
 
-interface RequestLogRow {
-  _id?: string;
-  serverKey: string;
-  toolName: string;
-  status: string;
-  latencyMs?: number;
-  errorMessage?: string;
-  callerType?: string;
-  transport?: string;
-  createdAt?: string;
-}
-
-interface AuditRow {
-  _id?: string;
-  serverKey: string;
-  action: string;
-  performedBy: string;
-  ipAddress?: string;
-  changes?: Record<string, { from?: unknown; to?: unknown }>;
-  createdAt?: string;
-}
+const NO_ENTRIES: MonitorEntry[] = [];
+const NO_LOGS: RequestLogRow[] = [];
+const NO_AUDIT: AuditRow[] = [];
 
 const RUNTIME_LABELS: Record<string, string> = {
   'openapi': 'OpenAPI proxy',
@@ -77,35 +48,16 @@ function formatTime(value?: string): string {
 }
 
 export default function McpMonitorPage() {
-  const [entries, setEntries] = useState<MonitorEntry[]>([]);
-  const [recentLogs, setRecentLogs] = useState<RequestLogRow[]>([]);
-  const [recentAudit, setRecentAudit] = useState<AuditRow[]>([]);
-  const [loading, setLoading] = useState(true);
+  const monitorQuery = useMcpMonitor();
+  const entries = monitorQuery.data?.servers ?? NO_ENTRIES;
+  const recentLogs = monitorQuery.data?.recentLogs ?? NO_LOGS;
+  const recentAudit = monitorQuery.data?.recentAudit ?? NO_AUDIT;
+  const loading = monitorQuery.isPending;
   const [activityView, setActivityView] = useState<'requests' | 'audit'>('requests');
   const router = useRouter();
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/mcp/monitor', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setEntries(data.servers ?? []);
-        setRecentLogs(data.recentLogs ?? []);
-        setRecentAudit(data.recentAudit ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load MCP monitor snapshot', err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-    const interval = setInterval(() => void load(), 30_000);
-    return () => clearInterval(interval);
-  }, [load]);
+  const load = async () => {
+    await monitorQuery.refetch();
+  };
 
   const totals = useMemo(() => {
     const requests = entries.reduce((s, e) => s + e.aggregate.totalRequests, 0);
