@@ -277,6 +277,47 @@ describe('token MCP routes', () => {
     });
   });
 
+  describe('a token limited to some servers', () => {
+    const limitTo = (ids: string[]) => {
+      vi.mocked(requireApiTokenFromHeader).mockResolvedValue({
+        token: 'raw',
+        tokenRecord: { _id: 'tok-1', userId: 'user-1', servicePermissions: null, allowedMcpServerIds: ids },
+        tenant: { licenseType: 'ENTERPRISE' },
+        tenantId: 'tenant-1',
+        tenantSlug: 'acme',
+        tenantDbName: 'tenant_acme',
+        projectId: 'proj-1',
+        user: { _id: 'user-1', role: 'owner', tenantId: 'tenant-1' },
+      } as never);
+    };
+
+    it('cannot call, change, delete or refresh a server outside its list', async () => {
+      limitTo(['srv-other']);
+      expect((await post('/api/client/v1/mcp/crm/execute', { tool: 'lookup', arguments: {} })).statusCode).toBe(404);
+      const patched = await app.inject({ method: 'PATCH', url: '/api/client/v1/mcp/crm', headers, payload: JSON.stringify({ name: 'Renamed' }) });
+      expect(patched.statusCode).toBe(404);
+      expect((await app.inject({ method: 'DELETE', url: '/api/client/v1/mcp/crm', headers })).statusCode).toBe(404);
+      expect((await post('/api/client/v1/mcp/crm/refresh-tools', {})).statusCode).toBe(404);
+      expect(executeMcpTool).not.toHaveBeenCalled();
+      expect(updateMcpServer).not.toHaveBeenCalled();
+    });
+
+    it('still changes a server on its list', async () => {
+      limitTo(['srv-1']);
+      vi.mocked(updateMcpServer).mockResolvedValue({ ...server(), name: 'Renamed' } as IMcpServer);
+      const patched = await app.inject({ method: 'PATCH', url: '/api/client/v1/mcp/crm', headers, payload: JSON.stringify({ name: 'Renamed' }) });
+      expect(patched.statusCode).toBe(200);
+      expect(updateMcpServer).toHaveBeenCalled();
+    });
+
+    it('does not create new servers', async () => {
+      limitTo(['srv-1']);
+      const created = await post('/api/client/v1/mcp', { name: 'New', sourceType: 'remote', remoteConfig: { url: 'https://mcp.example.com/mcp' } });
+      expect(created.statusCode).toBe(403);
+      expect(JSON.parse(created.body).error).toMatch(/limited to specific MCP servers/);
+    });
+  });
+
   describe('a failed call, as the token caller sees it', () => {
     it('keeps the detail of the failure', async () => {
       vi.mocked(executeMcpTool).mockRejectedValueOnce(

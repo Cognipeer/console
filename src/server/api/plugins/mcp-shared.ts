@@ -60,6 +60,26 @@ function isNameList(value: unknown): value is string[] {
   return Array.isArray(value) && value.length <= 1000 && value.every((name) => typeof name === 'string');
 }
 
+type ReviewItem = string | { name: string; hash: string };
+const DEFINITION_HASH = /^[a-f0-9]{64}$/;
+
+/** Tool names, or `{ name, hash }` entries that bind a decision to one definition; null when malformed. */
+function readReviewList(value: unknown): ReviewItem[] | null {
+  if (!Array.isArray(value) || value.length > 1000) return null;
+  const items: ReviewItem[] = [];
+  for (const item of value) {
+    if (typeof item === 'string') {
+      items.push(item);
+      continue;
+    }
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+    const { name, hash } = item as { name?: unknown; hash?: unknown };
+    if (typeof name !== 'string' || typeof hash !== 'string' || !DEFINITION_HASH.test(hash)) return null;
+    items.push({ name, hash });
+  }
+  return items;
+}
+
 /**
  * The security settings an MCP server update may carry, validated (the
  * dashboard and the client API share this parse). Fields absent from the body
@@ -93,14 +113,17 @@ export async function readMcpSecurityUpdate(
   }
   if (body.toolReview !== undefined) {
     const review = body.toolReview as { approve?: unknown; reject?: unknown } | null;
-    if (!review || typeof review !== 'object' || Array.isArray(review)
-      || (review.approve !== undefined && !isNameList(review.approve))
-      || (review.reject !== undefined && !isNameList(review.reject))) {
-      return { error: 'toolReview must be { "approve"?: string[], "reject"?: string[] }' };
+    const shaped = !!review && typeof review === 'object' && !Array.isArray(review);
+    const approve = shaped && review.approve !== undefined ? readReviewList(review.approve) : undefined;
+    const reject = shaped && review.reject !== undefined ? readReviewList(review.reject) : undefined;
+    if (!shaped || approve === null || reject === null) {
+      return {
+        error: 'toolReview must be { "approve"?: [...], "reject"?: [...] } listing tool names or { "name", "hash" } entries',
+      };
     }
     fields.toolReview = {
-      ...(review.approve ? { approve: review.approve as string[] } : {}),
-      ...(review.reject ? { reject: review.reject as string[] } : {}),
+      ...(approve ? { approve } : {}),
+      ...(reject ? { reject } : {}),
     };
   }
   return { fields };

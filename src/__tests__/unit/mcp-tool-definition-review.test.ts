@@ -51,6 +51,18 @@ describe('tool definition scan', () => {
   it('notes a lone zero-width character only lightly', () => {
     expect(rules(tool('g', 'Lists​ files'))).toEqual(['hidden-characters:low']);
   });
+
+  it('holds a tool named like an object property', () => {
+    for (const name of ['__proto__', 'constructor', 'prototype']) {
+      expect(rules(tool(name)), name).toContain('reserved-name:high');
+    }
+  });
+
+  it('says so when a definition is larger than the scan reads', () => {
+    const properties = Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`p${i}`, { type: 'string', description: `field ${i}` }]));
+    expect(rules(tool('wide', 'Wide', { type: 'object', properties }))).toContain('scan-truncated:medium');
+    expect(rules(tool('long', 'x '.repeat(15_000)))).toContain('scan-truncated:medium');
+  });
 });
 
 describe('tool definition pinning', () => {
@@ -153,5 +165,38 @@ describe('tool definition pinning', () => {
     // A rejected definition is not raised again by the next refresh.
     const again = reconcileToolDefinitions({ ...base, metadata: decided.metadata, previousTools: tools, nextTools: tools });
     expect(again.newlyPending).toEqual([]);
+  });
+
+  it('decides only for the definition the reviewer saw', () => {
+    const pending = reconcileToolDefinitions({ ...base, metadata: { toolPins: {} }, previousTools: [], nextTools: [tool('a', 'v2')] });
+    const shown = getToolReview(pending.metadata).a.hash;
+    // The stored definition moved on to v3 while the review entry still describes v2.
+    const moved = applyToolReviewDecision(pending.metadata, [tool('a', 'v3')], { approve: ['a'] });
+    expect(moved).toMatchObject({ approved: [], stale: ['a'] });
+    expect(getToolReview(moved.metadata)).toHaveProperty('a');
+    // A decision carrying another hash is stale too, and one with the shown hash settles.
+    expect(applyToolReviewDecision(pending.metadata, [tool('a', 'v2')], { reject: [{ name: 'a', hash: 'f'.repeat(64) }] }).stale).toEqual(['a']);
+    const settled = applyToolReviewDecision(pending.metadata, [tool('a', 'v2')], { approve: [{ name: 'a', hash: shown }] });
+    expect(settled).toMatchObject({ approved: ['a'], stale: [] });
+    expect(getToolReview(settled.metadata)).toEqual({});
+  });
+
+  it('keeps names like __proto__ as ordinary entries', () => {
+    const result = reconcileToolDefinitions({
+      ...base,
+      metadata: { toolPins: {} },
+      previousTools: [],
+      nextTools: [tool('__proto__'), tool('constructor'), tool('toString')],
+    });
+    const review = getToolReview(result.metadata);
+    expect(Object.keys(review).sort()).toEqual(['__proto__', 'constructor', 'toString']);
+    expect(isToolAwaitingReview(result.metadata, '__proto__')).toBe(true);
+    expect(isToolAwaitingReview(result.metadata, 'hasOwnProperty')).toBe(false);
+    // What is stored survives a JSON round trip with every name intact.
+    const reread = JSON.parse(JSON.stringify(result.metadata)) as Record<string, unknown>;
+    expect(Object.keys(getToolReview(reread)).sort()).toEqual(['__proto__', 'constructor', 'toString']);
+    const decided = applyToolReviewDecision(reread, [tool('__proto__')], { approve: ['__proto__'] });
+    expect(decided.approved).toEqual(['__proto__']);
+    expect(Object.keys(getToolPins(decided.metadata) ?? {})).toContain('__proto__');
   });
 });

@@ -96,6 +96,14 @@ curl -X POST https://gateway.example.com/api/client/v1/pii/detokenize \
 
 Repeated values share one token (a phone number appearing twice yields a single `[TR_PHONE_1]`), and tokens absent from the vault are left untouched on detokenize. The vault is returned to the caller and never persisted server-side — your application holds it for the duration of the round-trip.
 
+### MCP servers
+
+An MCP server with a remote, stdio or OpenAPI source can run the same round trip on its tool calls: choose a policy on
+the server's **Security** tab. The upstream receives tokens in place of the values the policy finds, and the caller
+gets the values back in the result. Tokens are keyed per server, so a value gets the same token on every call to that
+server (and a different one on another server). Tools listed under *Tools that receive the real values* (for example a
+tool that sends mail) get the values. The request log keeps the tokens, never the values.
+
 ## Relationship to Guardrails
 
 The [Guardrails](./guardrails.md) PII type wraps this service. When a guardrail of type `pii` is attached to a model:

@@ -93,19 +93,36 @@ async function sharedServerByKey(tenantDbName: string, serverKey: string, projec
   return server && !server.owner ? server : null;
 }
 
+type TokenContext = Awaited<ReturnType<typeof getApiTokenContextForRequest>>;
+
+/** The servers a token is limited to, or null when it may reach every server of its project. */
+function tokenServerLimit(ctx: TokenContext): string[] | null {
+  const allowedIds = ctx.tokenRecord.allowedMcpServerIds;
+  return Array.isArray(allowedIds) && allowedIds.length > 0 ? allowedIds : null;
+}
+
+/**
+ * A server the token may CHANGE, DELETE or refresh: a token limited to some servers reaches only those, for these
+ * routes as for a call. A server outside the limit answers like an unknown key.
+ */
+async function manageableServerByKey(ctx: TokenContext, serverKey: string): Promise<IMcpServer | null> {
+  const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+  if (!server) return null;
+  const limit = tokenServerLimit(ctx);
+  return !limit || limit.includes(String(server._id)) ? server : null;
+}
+
 /**
  * A server the token may CALL (initialize, tools/list, tools/call, execute, SSE). A token limited to some servers
  * serves only those, and the server's access list decides for the person the call is made for (the token's owner,
  * or the delegated person), as it does for an agent run. A server the caller may not use answers like an unknown key.
  */
 async function callableServerByKey(
-  ctx: Awaited<ReturnType<typeof getApiTokenContextForRequest>>,
+  ctx: TokenContext,
   serverKey: string,
 ): Promise<IMcpServer | null> {
-  const server = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+  const server = await manageableServerByKey(ctx, serverKey);
   if (!server) return null;
-  const allowedIds = ctx.tokenRecord.allowedMcpServerIds;
-  if (Array.isArray(allowedIds) && allowedIds.length > 0 && !allowedIds.includes(String(server._id))) return null;
   const mayUse = await mayUseSharedResource(
     {
       tenantDbName: ctx.tenantDbName,
@@ -119,6 +136,8 @@ async function callableServerByKey(
 }
 
 const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio'] as const;
+
+const SERVER_LIMITED_TOKEN_CREATE_ERROR = 'This token is limited to specific MCP servers and cannot create new ones';
 
 /**
  * Mirrors `requireStdioSubprocessPermission` in the dashboard `mcp.ts` plugin:
@@ -613,6 +632,10 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/client/v1/mcp', withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
+      // A token limited to some servers works with those servers only; it does not add new ones.
+      if (tokenServerLimit(ctx)) {
+        return reply.code(403).send({ error: SERVER_LIMITED_TOKEN_CREATE_ERROR });
+      }
       const body = readJsonBody<Record<string, unknown>>(request);
 
       const head = readMcpCreateHead(body, { allowedSourceTypes: VALID_SOURCE_TYPES });
@@ -677,7 +700,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
-      const existing = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      const existing = await manageableServerByKey(ctx, serverKey);
       if (!existing) {
         return reply.code(404).send({ error: 'MCP server not found' });
       }
@@ -787,7 +810,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
-      const existing = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      const existing = await manageableServerByKey(ctx, serverKey);
       if (!existing) {
         return reply.code(404).send({ error: 'MCP server not found' });
       }
@@ -815,7 +838,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
-      const existing = await sharedServerByKey(ctx.tenantDbName, serverKey, ctx.projectId);
+      const existing = await manageableServerByKey(ctx, serverKey);
       if (!existing) {
         return reply.code(404).send({ error: 'MCP server not found' });
       }

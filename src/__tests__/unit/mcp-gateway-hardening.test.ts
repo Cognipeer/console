@@ -116,6 +116,10 @@ describe('security fields of a server update', () => {
       },
     });
     await expect(readMcpSecurityUpdate({ piiProtection: null }, scope)).resolves.toEqual({ fields: { piiProtection: null } });
+    const hash = 'a'.repeat(64);
+    await expect(readMcpSecurityUpdate({ toolReview: { reject: [{ name: 'b', hash, extra: 1 }, 'c'] } }, scope)).resolves.toEqual({
+      fields: { toolReview: { reject: [{ name: 'b', hash }, 'c'] } },
+    });
   });
 
   it('refuses malformed fields', async () => {
@@ -125,6 +129,9 @@ describe('security fields of a server update', () => {
       { toolChangePolicy: 'never' },
       { toolReview: { approve: 'a' } },
       { toolReview: [] },
+      { toolReview: { approve: [{ name: 'a' }] } },
+      { toolReview: { approve: [{ name: 'a', hash: 'not-a-hash' }] } },
+      { toolReview: { approve: [7] } },
       { piiProtection: { policyKey: '' } },
     ]) {
       expect(await readMcpSecurityUpdate(body, scope), JSON.stringify(body)).toHaveProperty('error');

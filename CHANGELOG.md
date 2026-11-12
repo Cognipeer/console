@@ -108,6 +108,27 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   runs](docs/guide/agent-approvals.md#unattended-runs).
 - The document metadata key `_crawlerKey` is reserved. A crawler stores its key there on the pages it sends to the
   Knowledge Engine, and the key is dropped from the metadata of every other ingest.
+- **MCP servers have stricter defaults** (see [MCP server security](#mcp-server-security)):
+  - On a hosted deployment (`DEPLOYMENT_MODE=saas`) stdio (npx / uvx) servers no longer run as subprocesses unless
+    `MCP_STDIO_ENABLED=true`. Self-hosted installs keep them on, and sandbox execution is unaffected.
+  - A stdio server names an exact package version (`name@1.2.3` for npx, `name==1.2.3` for uvx) when it is created or
+    its package or runtime changes. Servers saved earlier keep running and stay editable.
+  - Stdio packages are installed without npm install scripts and without uv source builds; a package that needs
+    either no longer starts.
+  - A server passes caller headers on by name only: accepting caller headers needs the list of names. A server saved
+    with caller headers accepted and no names passes none on and logs a warning once; list the names on its
+    **Security** tab.
+  - Serving a server at its public URL (making it public, or moving a public one to another address) needs admin-level
+    `mcp` permission.
+  - A token limited to some MCP servers reaches only those on every MCP route (calls, update, delete, tool refresh) and
+    cannot create servers.
+  - Tool definitions of remote, stdio and OpenAPI servers are pinned. A tool refresh that brings a new or changed
+    definition holds it until an operator approves it on the **Security** tab; the policy *Accept changes and record
+    them* keeps the earlier behaviour. A definition the scan rates high always waits. The tools a server holds when it
+    is upgraded count as approved.
+  - In an agent run, MCP tools whose names clash with each other or with another tool are offered as
+    `<serverKey>__<tool>`, and MCP tools come after the agent's other tools. Approval settings still use the tool's own
+    name.
 
 ### Agent runs and run classes
 
@@ -671,6 +692,23 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - Usage rows, request logs, runs and traces record the person as the subject and the application token as the actor, with
   `via: { kind: "delegated", issuer }` where a record has a metadata field. A person's drawer in the IAM center has a new
   **Activity** section.
+
+### MCP server security
+
+- Every MCP server has a **Security** tab, an agent's own servers included: the guardrail on its tool calls, the caller
+  headers it passes on, PII protection of its upstream calls and the review of tool definitions.
+- **PII protection for MCP upstreams.** With a PII policy chosen, a remote, stdio or OpenAPI server receives tokens such
+  as `[EMAIL_ab12cd34]` in place of the values the policy finds, and the caller gets the values back in the result. A
+  value gets the same token on every call to the same server, so the upstream can match records. Tools listed under
+  *Tools that receive the real values* get the values. The request log keeps the tokens.
+- **Tool definition review.** New and changed definitions are scanned for text aimed at the model (hidden characters,
+  instructions that override or conceal, requests for local files) and shown with a line diff against the approved
+  definition. A decision applies to the definition shown: one that changed in the meantime waits for another look.
+- New servers bind the managed **MCP protection** guardrail (`mcp-protection`) in monitor mode: size limits and
+  private-network URLs on arguments and results, credential redaction both ways, and the prompt-shield classifier on
+  results.
+- API tokens can be limited to some MCP servers (`allowedMcpServerIds`; *MCP servers* on the token form).
+- MCP tool calls made by agent runs appear in the server's request log.
 
 ### Console identity for MCP servers and connected agents
 

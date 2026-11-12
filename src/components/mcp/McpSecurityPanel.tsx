@@ -47,9 +47,10 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
+// Keyed by tool names the upstream chose: no prototype, so `__proto__` is an ordinary key.
 function readReview(value: unknown): Record<string, McpToolReviewEntry> {
-  if (!isRecord(value)) return {};
-  const out: Record<string, McpToolReviewEntry> = {};
+  const out = Object.create(null) as Record<string, McpToolReviewEntry>;
+  if (!isRecord(value)) return out;
   for (const [name, entry] of Object.entries(value)) {
     if (isRecord(entry) && typeof entry.hash === 'string') out[name] = entry as unknown as McpToolReviewEntry;
   }
@@ -57,8 +58,8 @@ function readReview(value: unknown): Record<string, McpToolReviewEntry> {
 }
 
 function readScan(value: unknown): Record<string, McpDefinitionFinding[]> {
-  if (!isRecord(value)) return {};
-  const out: Record<string, McpDefinitionFinding[]> = {};
+  const out = Object.create(null) as Record<string, McpDefinitionFinding[]>;
+  if (!isRecord(value)) return out;
   for (const [name, findings] of Object.entries(value)) {
     if (Array.isArray(findings) && findings.length) out[name] = findings as McpDefinitionFinding[];
   }
@@ -85,6 +86,12 @@ export default function McpSecurityPanel({ server, onServerUpdated, guardrailSec
   const tools = server.tools ?? [];
   const [saving, setSaving] = useState<string | null>(null);
 
+  const reloadServer = async () => {
+    const res = await fetch(`/api/mcp/${server.id}`, { cache: 'no-store' }).catch(() => null);
+    const data = res?.ok ? await res.json().catch(() => null) : null;
+    if (data?.server) onServerUpdated(data.server);
+  };
+
   const save = async (section: string, body: Record<string, unknown>, done?: string): Promise<boolean> => {
     setSaving(section);
     try {
@@ -94,7 +101,11 @@ export default function McpSecurityPanel({ server, onServerUpdated, guardrailSec
         body: JSON.stringify(body),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'The change could not be saved');
+      if (!res.ok) {
+        // A review decision fails when a definition changed meanwhile: show what waits now.
+        if (section === 'review') void reloadServer();
+        throw new Error(data.error || 'The change could not be saved');
+      }
       onServerUpdated(data.server);
       if (done) notifications.show({ title: 'Saved', message: done, color: 'teal' });
       return true;
@@ -261,7 +272,11 @@ export default function McpSecurityPanel({ server, onServerUpdated, guardrailSec
                     size="compact-xs"
                     variant="default"
                     loading={saving === 'review'}
-                    onClick={() => void save('review', { toolReview: { approve: bulkApprovable } }, 'Tools approved')}
+                    onClick={() => void save(
+                      'review',
+                      { toolReview: { approve: bulkApprovable.map((name) => ({ name, hash: review[name].hash })) } },
+                      'Tools approved',
+                    )}
                   >
                     Approve {bulkApprovable.length} without high-risk findings
                   </Button>
@@ -277,7 +292,7 @@ export default function McpSecurityPanel({ server, onServerUpdated, guardrailSec
                   busy={saving === 'review'}
                   onDecide={(decision) => void save(
                     'review',
-                    { toolReview: { [decision]: [name] } },
+                    { toolReview: { [decision]: [{ name, hash: review[name].hash }] } },
                     decision === 'approve' ? `“${name}” approved` : `“${name}” rejected and disabled`,
                   )}
                 />

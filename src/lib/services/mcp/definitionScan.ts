@@ -30,6 +30,9 @@ const MAX_FINDINGS_PER_TOOL = 8;
 const MAX_TEXT_CHARS = 20_000;
 const MAX_SCHEMA_STRINGS = 400;
 const OVERSIZED_DESCRIPTION_CHARS = 8_000;
+const MAX_SCHEMA_DEPTH = 12;
+/** Names that mean something to JavaScript objects; a tool named so is held for a person to look at. */
+const RESERVED_NAMES: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
 
 /** Unicode tag characters and bidirectional overrides: no legitimate use in a tool definition. */
 const SMUGGLING_CHARS = /[‪-‮⁦-⁩]|[\u{E0000}-\u{E007F}]/u;
@@ -102,7 +105,13 @@ function excerptAround(text: string, index: number, length: number): string {
   return escaped.length > 200 ? `${escaped.slice(0, 199)}…` : escaped;
 }
 
-function scanText(field: string, value: string, out: McpDefinitionFinding[]): void {
+/** Whether the scan left part of a definition unread because it was larger than the scan reads. */
+interface ScanLimits {
+  hit: boolean;
+}
+
+function scanText(field: string, value: string, out: McpDefinitionFinding[], limits?: ScanLimits): void {
+  if (value.length > MAX_TEXT_CHARS && limits) limits.hit = true;
   const text = value.length > MAX_TEXT_CHARS ? value.slice(0, MAX_TEXT_CHARS) : value;
   const smuggled = SMUGGLING_CHARS.exec(text);
   if (smuggled) {
@@ -129,14 +138,18 @@ function collectSchemaStrings(
   path: string,
   out: Array<{ field: string; value: string }>,
   depth: number,
+  limits: ScanLimits,
 ): void {
-  if (out.length >= MAX_SCHEMA_STRINGS || depth > 12) return;
+  if (out.length >= MAX_SCHEMA_STRINGS || depth > MAX_SCHEMA_DEPTH) {
+    limits.hit = true;
+    return;
+  }
   if (typeof node === 'string') {
     out.push({ field: path, value: node });
     return;
   }
   if (Array.isArray(node)) {
-    node.forEach((item, index) => collectSchemaStrings(item, `${path}[${index}]`, out, depth + 1));
+    node.forEach((item, index) => collectSchemaStrings(item, `${path}[${index}]`, out, depth + 1, limits));
     return;
   }
   if (node && typeof node === 'object') {
@@ -144,7 +157,7 @@ function collectSchemaStrings(
       // Property NAMES reach the model too: check them for hidden characters.
       if (SMUGGLING_CHARS.test(key) || ZERO_WIDTH_CHARS.test(key)) out.push({ field: `${path}.<key>`, value: key });
       ZERO_WIDTH_CHARS.lastIndex = 0;
-      collectSchemaStrings(value, `${path}.${key}`, out, depth + 1);
+      collectSchemaStrings(value, `${path}.${key}`, out, depth + 1, limits);
     }
   }
 }
@@ -152,10 +165,14 @@ function collectSchemaStrings(
 /** Findings of one tool definition (empty when nothing stands out). */
 export function scanToolDefinition(tool: IMcpTool): McpDefinitionFinding[] {
   const findings: McpDefinitionFinding[] = [];
-  scanText('name', tool.name ?? '', findings);
-  if (tool.title) scanText('title', tool.title, findings);
+  const limits: ScanLimits = { hit: false };
+  if (RESERVED_NAMES.has(tool.name)) {
+    findings.push({ rule: 'reserved-name', severity: 'high', field: 'name', excerpt: tool.name });
+  }
+  scanText('name', tool.name ?? '', findings, limits);
+  if (tool.title) scanText('title', tool.title, findings, limits);
   if (tool.description) {
-    scanText('description', tool.description, findings);
+    scanText('description', tool.description, findings, limits);
     if (tool.description.length > OVERSIZED_DESCRIPTION_CHARS) {
       findings.push({
         rule: 'oversized-description',
@@ -165,10 +182,18 @@ export function scanToolDefinition(tool: IMcpTool): McpDefinitionFinding[] {
       });
     }
   }
-  if (tool.annotations?.title) scanText('annotations.title', tool.annotations.title, findings);
+  if (tool.annotations?.title) scanText('annotations.title', tool.annotations.title, findings, limits);
   const schemaStrings: Array<{ field: string; value: string }> = [];
-  collectSchemaStrings(tool.inputSchema, 'inputSchema', schemaStrings, 0);
-  for (const { field, value } of schemaStrings) scanText(field, value, findings);
+  collectSchemaStrings(tool.inputSchema, 'inputSchema', schemaStrings, 0, limits);
+  for (const { field, value } of schemaStrings) scanText(field, value, findings, limits);
+  if (limits.hit) {
+    findings.push({
+      rule: 'scan-truncated',
+      severity: 'medium',
+      field: 'definition',
+      excerpt: 'The definition is larger than the scan reads; part of it was not checked',
+    });
+  }
 
   const order: Record<McpDefinitionSeverity, number> = { high: 0, medium: 1, low: 2 };
   return findings.sort((a, b) => order[a.severity] - order[b.severity]).slice(0, MAX_FINDINGS_PER_TOOL);
@@ -176,7 +201,8 @@ export function scanToolDefinition(tool: IMcpTool): McpDefinitionFinding[] {
 
 /** Findings per tool, keyed by the real tool name; tools without findings are absent. */
 export function scanToolDefinitions(tools: IMcpTool[]): Record<string, McpDefinitionFinding[]> {
-  const out: Record<string, McpDefinitionFinding[]> = {};
+  // Keyed by names the upstream chose: no prototype, so `__proto__` is an ordinary key.
+  const out = Object.create(null) as Record<string, McpDefinitionFinding[]>;
   for (const tool of tools) {
     const findings = scanToolDefinition(tool);
     if (findings.length) out[tool.name] = findings;

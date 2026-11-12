@@ -368,7 +368,9 @@ export function isMcpToolEnabled(server: IMcpServer, toolName: string): boolean 
 export function listEnabledMcpTools(server: IMcpServer): IMcpTool[] {
   const disabled = new Set(getDisabledToolNames(server));
   const pending = getToolReview(server.metadata as Record<string, unknown> | undefined);
-  const enabled = (server.tools ?? []).filter((tool) => !disabled.has(tool.name) && !(tool.name in pending));
+  const enabled = (server.tools ?? []).filter(
+    (tool) => !disabled.has(tool.name) && !Object.prototype.hasOwnProperty.call(pending, tool.name),
+  );
   return applyToolOverrides(server, enabled);
 }
 
@@ -1476,7 +1478,10 @@ export async function updateMcpServer(
   if (input.stdioConfig !== undefined) {
     updateData.stdioConfig = mergeStdioConfigUpdate(existing.stdioConfig, input.stdioConfig);
     const merged = updateData.stdioConfig as IMcpStdioConfig;
-    const specError = pinnedPackageSpecError(merged.packageName ?? '', merged.runtime);
+    // A server saved before exact versions were required stays editable; choosing another package or runtime needs one.
+    const packageChanged = merged.packageName !== existing.stdioConfig?.packageName
+      || merged.runtime !== existing.stdioConfig?.runtime;
+    const specError = packageChanged ? pinnedPackageSpecError(merged.packageName ?? '', merged.runtime) : undefined;
     if (specError) throw new McpServerConfigError(specError);
   }
   // Runtime-header passthrough policy lives in the metadata blob (no schema
@@ -1733,6 +1738,10 @@ export async function updateMcpServer(
   let reviewDecision: { approved: string[]; rejected: string[] } | undefined;
   if (input.toolReview !== undefined) {
     const decided = applyToolReviewDecision(currentMetadata(), currentTools, input.toolReview);
+    if (decided.stale.length) {
+      const names = decided.stale.slice(0, 5).map((name) => `"${name.slice(0, 80)}"`).join(', ');
+      throw new McpServerConfigError(`The definition of ${names} changed since it was shown. Review it again.`);
+    }
     updateData.metadata = decided.metadata;
     reviewDecision = { approved: decided.approved, rejected: decided.rejected };
   }
@@ -1877,6 +1886,12 @@ export async function refreshMcpServerTools(
           serverKey: server.key,
           tools: definitionTrust.newlyPending,
         });
+      }
+      // Composites that include this server list what it offers now (a tool waiting for review is not offered).
+      try {
+        await reconcileCompositesForMember(tenantDbName, serverId);
+      } catch (error) {
+        logger.warn('Composite MCP servers were not updated after a tool refresh', { serverId, error });
       }
     }
     void logMcpAudit(tenantDbName, {

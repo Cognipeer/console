@@ -43,6 +43,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * A map keyed by tool names. Tool names come from the upstream, so the map has
+ * no prototype: a name like `__proto__` or `constructor` is an ordinary key.
+ */
+function nameMap<T>(entries: Iterable<readonly [string, T]> = []): Record<string, T> {
+  const out = Object.create(null) as Record<string, T>;
+  for (const [key, value] of entries) out[key] = value;
+  return out;
+}
+
+/** A name map as stored in metadata: a plain object whose keys are all own data properties. */
+function stored<T>(map: Record<string, T>): Record<string, T> {
+  return Object.fromEntries(Object.entries(map));
+}
+
+function hasName(map: Record<string, unknown>, name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(map, name);
+}
+
 export function isPinnedSource(sourceType: McpSourceType): boolean {
   return PINNED_SOURCES.has(sourceType);
 }
@@ -54,13 +73,13 @@ export function getToolChangePolicy(metadata: Metadata | undefined): McpToolChan
 export function getToolPins(metadata: Metadata | undefined): Record<string, string> | undefined {
   const raw = metadata?.toolPins;
   if (!isRecord(raw)) return undefined;
-  return Object.fromEntries(Object.entries(raw).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+  return nameMap(Object.entries(raw).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
 }
 
 export function getToolReview(metadata: Metadata | undefined): Record<string, McpToolReviewEntry> {
   const raw = metadata?.toolReview;
-  if (!isRecord(raw)) return {};
-  const out: Record<string, McpToolReviewEntry> = {};
+  if (!isRecord(raw)) return nameMap();
+  const out = nameMap<McpToolReviewEntry>();
   for (const [name, entry] of Object.entries(raw)) {
     if (isRecord(entry) && typeof entry.hash === 'string') out[name] = entry as unknown as McpToolReviewEntry;
   }
@@ -69,13 +88,13 @@ export function getToolReview(metadata: Metadata | undefined): Record<string, Mc
 
 export function getToolScan(metadata: Metadata | undefined): Record<string, McpDefinitionFinding[]> {
   const raw = metadata?.toolScan;
-  if (!isRecord(raw)) return {};
-  return Object.fromEntries(Object.entries(raw).filter((entry): entry is [string, McpDefinitionFinding[]] => Array.isArray(entry[1])));
+  if (!isRecord(raw)) return nameMap();
+  return nameMap(Object.entries(raw).filter((entry): entry is [string, McpDefinitionFinding[]] => Array.isArray(entry[1])));
 }
 
 /** True when the tool's current definition waits for an operator's approval. */
 export function isToolAwaitingReview(metadata: Metadata | undefined, realName: string): boolean {
-  return Object.prototype.hasOwnProperty.call(getToolReview(metadata), realName);
+  return hasName(getToolReview(metadata), realName);
 }
 
 function canonical(value: unknown): unknown {
@@ -154,9 +173,9 @@ export function reconcileToolDefinitions(input: ToolDefinitionReconcileInput): T
   const policy = getToolChangePolicy(input.metadata);
   // A server stored before pinning existed: what it holds was in use, so it counts as approved.
   const pins: Record<string, string> = getToolPins(input.metadata)
-    ?? Object.fromEntries(input.previousTools.map((tool) => [tool.name, toolDefinitionHash(tool)]));
+    ?? nameMap(input.previousTools.map((tool) => [tool.name, toolDefinitionHash(tool)] as const));
   const previousReview = getToolReview(input.metadata);
-  const review: Record<string, McpToolReviewEntry> = {};
+  const review = nameMap<McpToolReviewEntry>();
   const newlyPending: string[] = [];
   const flagged: string[] = [];
   const now = (input.now ?? new Date()).toISOString();
@@ -192,56 +211,76 @@ export function reconcileToolDefinitions(input: ToolDefinitionReconcileInput): T
   // A tool that is gone keeps no pin: if it comes back, it is new again.
   for (const name of Object.keys(pins)) if (!nextNames.has(name)) delete pins[name];
 
-  metadata.toolPins = pins;
-  if (Object.keys(review).length) metadata.toolReview = review;
+  metadata.toolPins = stored(pins);
+  if (Object.keys(review).length) metadata.toolReview = stored(review);
   else delete metadata.toolReview;
-  if (Object.keys(scan).length) metadata.toolScan = scan;
+  if (Object.keys(scan).length) metadata.toolScan = stored(scan);
   else delete metadata.toolScan;
   return { metadata, added, removed, changed, newlyPending, flagged };
 }
 
+/**
+ * A tool named in a review decision. With `hash` (the `hash` of its review
+ * entry), the decision holds only for the definition the reviewer saw.
+ */
+export type ToolReviewItem = string | { name: string; hash: string };
+
 export interface ToolReviewDecision {
-  approve?: string[];
-  reject?: string[];
+  approve?: ToolReviewItem[];
+  reject?: ToolReviewItem[];
 }
 
 /**
  * Apply an operator's review decision. Approving pins the tool's current
  * definition. Rejecting pins it too (so the same definition is not raised
  * again) and disables the tool; enabling it later is a separate, explicit act.
- * Names that are not waiting for review are ignored.
+ * Names that are not waiting for review are ignored. A tool whose definition
+ * is no longer the one the decision names is left waiting and listed in
+ * `stale`.
  */
 export function applyToolReviewDecision(
   metadata: Metadata | undefined,
   tools: IMcpTool[],
   decision: ToolReviewDecision,
-): { metadata: Metadata; approved: string[]; rejected: string[] } {
+): { metadata: Metadata; approved: string[]; rejected: string[]; stale: string[] } {
   const next: Metadata = { ...(metadata ?? {}) };
   const review = getToolReview(metadata);
-  const pins = getToolPins(metadata) ?? Object.fromEntries(tools.map((tool) => [tool.name, toolDefinitionHash(tool)]));
+  const pins = getToolPins(metadata)
+    ?? nameMap(tools.map((tool) => [tool.name, toolDefinitionHash(tool)] as const));
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
   const disabled = new Set(Array.isArray(next.disabledTools) ? (next.disabledTools as string[]) : []);
   const approved: string[] = [];
   const rejected: string[] = [];
+  const stale = new Set<string>();
 
-  const settle = (name: string): boolean => {
+  const settle = (item: ToolReviewItem): boolean => {
+    const name = typeof item === 'string' ? item : item.name;
     const tool = byName.get(name);
-    if (!review[name] || !tool) return false;
-    pins[name] = toolDefinitionHash(tool);
+    const entry = hasName(review, name) ? review[name] : undefined;
+    if (!entry || !tool) return false;
+    const current = toolDefinitionHash(tool);
+    if (entry.hash !== current || (typeof item !== 'string' && item.hash !== current)) {
+      stale.add(name);
+      return false;
+    }
+    pins[name] = current;
     delete review[name];
     return true;
   };
-  for (const name of new Set(decision.approve ?? [])) if (settle(name)) approved.push(name);
-  for (const name of new Set(decision.reject ?? [])) {
-    if (settle(name)) {
+  for (const item of decision.approve ?? []) {
+    if (settle(item)) approved.push(typeof item === 'string' ? item : item.name);
+  }
+  for (const item of decision.reject ?? []) {
+    if (settle(item)) {
+      const name = typeof item === 'string' ? item : item.name;
       disabled.add(name);
       rejected.push(name);
     }
   }
 
-  next.toolPins = pins;
-  if (Object.keys(review).length) next.toolReview = review;
+  next.toolPins = stored(pins);
+  if (Object.keys(review).length) next.toolReview = stored(review);
   else delete next.toolReview;
   if (rejected.length) next.disabledTools = [...disabled];
-  return { metadata: next, approved, rejected };
+  return { metadata: next, approved, rejected, stale: [...stale] };
 }

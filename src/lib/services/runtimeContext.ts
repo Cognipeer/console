@@ -22,6 +22,9 @@ export interface RuntimeConnectionOverride {
 }
 
 import { getRequestContext, type RequestVia } from '@/lib/core/requestContext';
+import { createLogger } from '@/lib/core/logger';
+
+const logger = createLogger('runtime-context');
 
 /** Where a flow-started agent turn came from. */
 export interface AgentRuntimeFlowRef {
@@ -256,6 +259,24 @@ export function runtimeHeaderPolicyFromMetadata(
  * target-scoped offering, filtered by the target's opt-in policy. Returns
  * undefined when nothing passes (the common case).
  */
+const warnedHeaderPolicies = new Set<string>();
+
+/**
+ * A server saved before header names were required ("allow" with no list)
+ * passes nothing on now. Say so once per server and process, so an operator
+ * who relied on it finds the reason.
+ */
+function warnUnlistedMcpHeaderPolicy(serverKey: string): void {
+  const tenantId = getRequestContext()?.tenantId;
+  const id = `${tenantId ?? ''}:${serverKey}`;
+  if (warnedHeaderPolicies.has(id) || warnedHeaderPolicies.size >= 1000) return;
+  warnedHeaderPolicies.add(id);
+  logger.warn('MCP server accepts caller headers but lists no header names, so none are passed on; list them on its Security tab', {
+    tenantId,
+    serverKey,
+  });
+}
+
 export function resolveRuntimeHeaders(
   ctx: AgentRuntimeContext | undefined,
   targetKind: RuntimeTargetKind,
@@ -273,7 +294,10 @@ export function resolveRuntimeHeaders(
     : null;
   // An MCP server forwards only the header names it lists: "allow" with no
   // names passes nothing (other target kinds keep their existing behaviour).
-  if (!allowedNames && targetKind === 'mcp') return undefined;
+  if (!allowedNames && targetKind === 'mcp') {
+    warnUnlistedMcpHeaderPolicy(targetKey);
+    return undefined;
+  }
 
   const applied: Record<string, string> = {};
   for (const [name, value] of Object.entries(offered)) {

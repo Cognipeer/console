@@ -194,8 +194,14 @@ export interface UpdateMcpServerInput {
   piiPassthroughTools?: string[];
   /** What an upstream change to a tool definition does: wait for approval, or only notify. */
   toolChangePolicy?: 'approve' | 'notify';
-  /** Approve or reject tool definitions waiting for review (real tool names). */
-  toolReview?: { approve?: string[]; reject?: string[] };
+  /**
+   * Approve or reject tool definitions waiting for review (real tool names). An entry with `hash` holds only for the
+   * definition with that hash (the `hash` of its review entry).
+   */
+  toolReview?: {
+    approve?: Array<string | { name: string; hash: string }>;
+    reject?: Array<string | { name: string; hash: string }>;
+  };
   /** Operator-authored MCP `instructions` (null/empty falls back to what the source supplies). */
   instructions?: string | null;
 }

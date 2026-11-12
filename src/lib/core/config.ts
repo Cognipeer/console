@@ -728,9 +728,9 @@ export interface AppConfig {
     stdio: {
       /**
        * Whether stdio servers may run as subprocesses of this process. Default:
-       * on for every deployment mode (a `saas` deployment logs a one-time notice
-       * that the default becomes off in a later release); `MCP_STDIO_ENABLED`
-       * set to `false`, `0`, `no` or `off` (any case) turns it off.
+       * on for a self-hosted deployment, off for a hosted (`saas`) one;
+       * `MCP_STDIO_ENABLED` set to `false`, `0`, `no` or `off` (any case) turns
+       * it off and any other value turns it on.
        */
       enabled: boolean;
       /** Subprocesses running at once, all tenants together. */
