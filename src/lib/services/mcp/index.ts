@@ -16,6 +16,7 @@ export {
   reconcileCompositesForMember,
   getMcpMonitorSnapshot,
   executeMcpTool,
+  preparePiiLogFor,
   getDisabledToolNames,
   isMcpToolEnabled,
   listEnabledMcpTools,

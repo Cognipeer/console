@@ -25,6 +25,7 @@ import FormShell, {
 import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
 import ConsoleIdentityNote, { type ConsoleIdentityIssuerInfo } from '@/components/iam/ConsoleIdentityNote';
 import type { McpServerView } from '@/lib/services/mcp';
+import { MCP_PROTECTION_GUARDRAIL_KEY, withMcpProtectionOption } from './mcpProtectionOption';
 
 interface CreateMcpModalProps {
   opened: boolean;
@@ -301,8 +302,10 @@ export default function CreateMcpModal({
       protocolSse: true,
       accessMode: 'token',
       endpointSlug: '',
-      guardrailMode: 'off',
-      guardrailKey: DEFAULT_GUARDRAIL_VALUE,
+      // A new server starts with the built-in MCP protection in monitor mode: findings are recorded, nothing is
+      // blocked until the operator switches to enforce.
+      guardrailMode: 'monitor',
+      guardrailKey: MCP_PROTECTION_GUARDRAIL_KEY,
     },
     validate: (values) => {
       const errors: Partial<Record<keyof FormValues, string>> = {};
@@ -814,7 +817,7 @@ export default function CreateMcpModal({
             label="Guardrail"
             value={`${v.guardrailMode} · ${v.guardrailKey === DEFAULT_GUARDRAIL_VALUE
               ? 'default tool guardrail'
-              : v.guardrailKey}`}
+              : v.guardrailKey === MCP_PROTECTION_GUARDRAIL_KEY ? 'MCP protection' : v.guardrailKey}`}
           />
         ) : null}
       </SummaryGroup>
@@ -1331,18 +1334,18 @@ export default function CreateMcpModal({
           </FormField>
           <FormField
             label="Guardrail"
-            hint="The default tool guardrail is the tenant-wide one every unbound tool call already runs through."
+            hint="MCP protection checks call size, private-network addresses, secrets and prompt injection in results. The default tool guardrail is the tenant-wide one every unbound tool call already runs through."
           >
             <Select
               disabled={v.guardrailMode === 'off'}
               allowDeselect={false}
-              data={[
+              data={withMcpProtectionOption([
                 { value: DEFAULT_GUARDRAIL_VALUE, label: 'Default tool guardrail' },
                 ...guardrails.map((g) => ({
                   value: g.key,
                   label: `${g.name}${g.enabled ? '' : ' · disabled'}${g.toolBound ? ' · tool hooks' : ''}`,
                 })),
-              ]}
+              ])}
               value={v.guardrailKey}
               onChange={(val) => form.setFieldValue('guardrailKey', val ?? DEFAULT_GUARDRAIL_VALUE)}
             />

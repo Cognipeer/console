@@ -242,7 +242,14 @@ export function sessionAllowedTools(metadata: Record<string, unknown> | undefine
     return new Set(Array.isArray(raw) ? raw.filter((name): name is string => typeof name === 'string') : []);
 }
 
-type ToolRecord = { name?: string; needsApproval?: unknown; approvalPrompt?: unknown; hitlKind?: unknown };
+type ToolRecord = {
+    name?: string;
+    needsApproval?: unknown;
+    approvalPrompt?: unknown;
+    hitlKind?: unknown;
+    /** The name the tool's approval settings are saved under, when the run exposes it under another one. */
+    hitlPolicyName?: unknown;
+};
 
 /** Whether the tool has exceptions, i.e. is decided per call rather than one way for every call. */
 function hasExceptions(resolved: ResolvedHitlConfig, name: string): boolean {
@@ -317,11 +324,13 @@ export function applyToolApprovals<T extends ToolRecord>(
     return tools.map((tool) => {
         const name = typeof tool.name === 'string' ? tool.name : '';
         if (!name) return tool;
+        // Settings and exceptions are looked up under the saved name; the run's own name names the call.
+        const policyName = typeof tool.hitlPolicyName === 'string' && tool.hitlPolicyName ? tool.hitlPolicyName : name;
         const kind = toolKindOf(tool);
-        const perCall = hasExceptions(resolved, name);
-        if (!perCall && toolApprovalPolicy(resolved, name, kind) !== 'always') return tool;
+        const perCall = hasExceptions(resolved, policyName);
+        if (!perCall && toolApprovalPolicy(resolved, policyName, kind) !== 'always') return tool;
         const asks = (args: unknown) => {
-            const decision = toolCallDecision(resolved, name, args, kind);
+            const decision = toolCallDecision(resolved, policyName, args, kind);
             // A call an exception lets through is recorded, so its step can show the rule.
             if (decision.source === 'exception' && decision.action === 'allow') log?.note(name, args, decision);
             return callAsks(decision, allowedTools, name);
@@ -331,14 +340,14 @@ export function applyToolApprovals<T extends ToolRecord>(
             needsApproval: tool.needsApproval === undefined ? asks : (args: unknown) => priorAsks(tool, args) || asks(args),
             approvalPrompt: (args: unknown) => {
                 if (priorAsks(tool, args)) return promptOf(tool, args);
-                const decision = toolCallDecision(resolved, name, args, kind);
+                const decision = toolCallDecision(resolved, policyName, args, kind);
                 if (decision.action !== 'ask') return promptOf(tool, args);
                 log?.note(name, args, decision);
                 return promptOf(tool, args) ?? approvalReasonOf(name, decision).text;
             },
         };
-        if (!hasDenyException(resolved, name)) return gated;
-        return refuseCalls(gated, (args) => blockedCall(resolved, name, args, log, kind));
+        if (!hasDenyException(resolved, policyName)) return gated;
+        return refuseCalls(gated, (args) => blockedCall(resolved, policyName, args, log, kind));
     });
 }
 

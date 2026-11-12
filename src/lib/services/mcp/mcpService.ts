@@ -50,6 +50,17 @@ import { normalizeMcpInstructions, type McpDiscovery } from './discovery';
 import { isMcpToolInputError, McpServerConfigError, McpUnknownToolError, McpUpstreamError } from './errors';
 import { responseLogSummaryOf, setResponseLogSummary } from './responseLog';
 import {
+  carryPiiArgumentsView,
+  isMcpPiiProtected,
+  markPiiArgumentsView,
+  markPiiLogView,
+  openMcpPiiRoundTrip,
+  piiLogOf,
+  piiLoggedPayloads,
+  preparePiiLogView,
+  type McpPiiLog,
+} from './mcpPii';
+import {
   applyToolReviewDecision,
   getToolReview,
   isPinnedSource,
@@ -2213,6 +2224,8 @@ export async function logMcpRequest(
       latencyMs: entry.latencyMs,
     });
   const toolName = boundedLogToolName(entry.toolName);
+  // A PII-protected call is logged as it crossed to the upstream (tokenized); read now, before any await.
+  const logged = piiLoggedPayloads(entry.requestPayload, entry.responsePayload);
   try {
     const maxBytes = typeof opts?.payloadLimitBytes === 'number' && opts.payloadLimitBytes > 0
       ? opts.payloadLimitBytes
@@ -2224,13 +2237,13 @@ export async function logMcpRequest(
       // Scrub echoed secrets / sensitive keys and cap size before persisting
       // (redactLogPayload passes undefined through).
       requestPayload: withClientInfo(
-        redactLogPayload(entry.requestPayload, { secretValues, maxBytes }),
+        redactLogPayload(logged.requestPayload, { secretValues, maxBytes }),
         opts?.client,
         secretValues,
       ),
       // A result its provider marked is logged as the summary it left (see responseLog.ts).
       responsePayload: redactLogPayload(
-        responseLogSummaryOf(entry.responsePayload) ?? entry.responsePayload,
+        responseLogSummaryOf(entry.responsePayload) ?? logged.responsePayload,
         { secretValues, maxBytes },
       ),
       errorMessage: redactLogString(
@@ -2501,6 +2514,17 @@ export interface McpToolOutcome {
   latencyMs: number;
   /** Set when the request log keeps this summary of `result` instead of the result (see responseLog.ts). */
   logSummary?: Record<string, unknown>;
+  /** Set for a PII-protected call: what the request log keeps instead of the values (see mcpPii.ts). */
+  piiLog?: McpPiiLog;
+}
+
+/**
+ * Marks `args` so that a log row of a PII-protected call holds them withheld
+ * until they are tokenized. `executeMcpTool` does this itself; a caller that
+ * logs another object than it passes in (the public route) marks that one.
+ */
+export function preparePiiLogFor(server: IMcpServer, toolName: string, args: unknown): void {
+  preparePiiLogView(args, isMcpPiiProtected(server, resolveSourceType(server), resolveMcpToolName(server, toolName)));
 }
 
 /**
@@ -2545,6 +2569,8 @@ export async function executeMcpTool(
    */
   caller?: { clientIp?: string },
 ): Promise<McpToolOutcome> {
+  // Before anything can fail: a failure row of a protected call must not hold the values.
+  preparePiiLogFor(server, toolName, args);
   // Refuse before queuing a remote call and before a failure row is logged.
   await assertServiceEnabled({ tenantId: server.tenantId }, 'mcp');
   // One check per call, here: routes, agent tools and flows all arrive through this function.
@@ -2587,6 +2613,7 @@ export async function executeMcpTool(
     }
     // The object the caller logs: a result that came back from another node is a new one.
     if (outcome.logSummary) setResponseLogSummary(outcome.result, outcome.logSummary);
+    if (outcome.piiLog) markPiiLogView(args, outcome.piiLog, outcome.result);
     recordMcpServerMetric(server, 'ok', Date.now() - startedAt);
     return outcome;
   } catch (error) {
@@ -2748,6 +2775,7 @@ export async function executeMcpToolLocal(
   // back to the real, stored name once, up front, so every downstream check
   // and dispatch below operates on the tool's actual identity.
   const realToolName = resolveMcpToolName(server, toolName);
+  preparePiiLogView(args, isMcpPiiProtected(server, sourceType, realToolName));
 
   // A call may only target a tool the server advertises: the stored tool list
   // is exactly what `tools/list` is built from (minus disabled tools, with
@@ -2802,11 +2830,18 @@ export async function executeMcpToolLocal(
     if (verdict.args) effectiveArgs = verdict.args;
   }
 
+  // PII protection: after the guardrail (which judges the real values), personal data in the arguments is
+  // replaced by tokens for the upstream; the caller gets the result with this call's tokens restored.
+  const pii = await openMcpPiiRoundTrip(server, sourceType, realToolName);
+  const upstreamArgs = pii ? await pii.protect(effectiveArgs) : effectiveArgs;
+  if (pii) markPiiArgumentsView(args, upstreamArgs);
+  else preparePiiLogView(args, false);
+
   let result: unknown;
   let logSummary: Record<string, unknown> | undefined;
   try {
     if (sourceType === 'openapi') {
-      result = await executeOpenApiTool(server, realToolName, effectiveArgs, upstreamHeaders);
+      result = await executeOpenApiTool(server, realToolName, upstreamArgs, upstreamHeaders);
     } else if (sourceType === 'remote') {
       result = await remoteCallTool(
         {
@@ -2816,7 +2851,7 @@ export async function executeMcpToolLocal(
           extraHeaders: upstreamHeaders,
         },
         realToolName,
-        effectiveArgs,
+        upstreamArgs,
       );
     } else if (sourceType === 'internal') {
       const internal = (server.metadata as Record<string, unknown> | undefined)?.internal as
@@ -2842,16 +2877,16 @@ export async function executeMcpToolLocal(
         internal.instanceKey,
         internal.config ?? {},
         realToolName,
-        effectiveArgs,
+        upstreamArgs,
       );
     } else if (sourceType === 'composite') {
-      result = await executeCompositeTool(server, realToolName, effectiveArgs, runtimeHeaders, identity);
+      result = await executeCompositeTool(server, realToolName, upstreamArgs, runtimeHeaders, identity);
     } else if (server.stdioConfig?.executionMode === 'sandbox') {
       const { runner, ref, runnerConfig } = await resolveSandboxRunner(server);
       await ensureSandboxInstance(server, runner, ref, runnerConfig);
-      result = await runner.callTool(ref, runnerConfig, realToolName, effectiveArgs);
+      result = await runner.callTool(ref, runnerConfig, realToolName, upstreamArgs);
     } else {
-      result = await stdioCallTool(server.stdioConfig!, realToolName, effectiveArgs, { tenantId: server.tenantId });
+      result = await stdioCallTool(server.stdioConfig!, realToolName, upstreamArgs, { tenantId: server.tenantId });
     }
     // Read before the masking below, which may hand back a copy; a composite's
     // result carries its member's mark.
@@ -2861,6 +2896,8 @@ export async function executeMcpToolLocal(
     // the guardrail, the caller or the log.
     result = maskSecretValues(result, [...upstreamCredentialValues(server), ...identitySecrets]);
   } catch (error) {
+    // A composite's protected member left its view on the arguments it was handed.
+    carryPiiArgumentsView(upstreamArgs, args);
     const secretValues = [...mcpRequestSecretValues(server, upstreamHeaders), ...identitySecrets];
     const safeError = sanitizeExecutionError(error, secretValues);
     // A call the caller got wrong says nothing about the server's health.
@@ -2879,7 +2916,23 @@ export async function executeMcpToolLocal(
     if (verdict.result !== undefined) result = verdict.result;
   }
 
-  return { result, latencyMs: Date.now() - start, ...(logSummary ? { logSummary } : {}) };
+  // The guardrail saw the tokenized result; the caller gets the values back. The log keeps what crossed
+  // (for a composite: what its protected member left on the arguments it was handed).
+  let piiLog: McpPiiLog | undefined;
+  if (pii) {
+    piiLog = { arguments: upstreamArgs, result };
+    result = pii.restore(result);
+  } else {
+    piiLog = piiLogOf(upstreamArgs);
+  }
+  if (piiLog) markPiiLogView(args, piiLog, result);
+
+  return {
+    result,
+    latencyMs: Date.now() - start,
+    ...(logSummary ? { logSummary } : {}),
+    ...(piiLog ? { piiLog } : {}),
+  };
 }
 
 /**

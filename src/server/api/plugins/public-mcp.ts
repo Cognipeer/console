@@ -39,6 +39,7 @@ import {
   listMcpToolDescriptors,
   logMcpRequest,
   mcpRequestSecretValues,
+  preparePiiLogFor,
   reachesTokenOnlyServer,
   resolveExposure,
   resolveMcpInstructions,
@@ -171,12 +172,16 @@ async function runPublicToolCall(
   // Anyone can call these endpoints, so what a call leaves in the log is
   // smaller than for a token caller, and says where it came from.
   const logOptions = { payloadLimitBytes: getConfig().mcp.public.logPayloadLimitBytes, client };
+  // What a failure row logs: the fitted arguments once there are any (the call marks those), else these.
+  let fittedArgs: Record<string, unknown> | undefined;
+  preparePiiLogFor(server, toolName, args);
   try {
     // An anonymous caller's arguments are held to the tool's advertised schema.
     const inputSchema = listMcpToolDescriptors(server).find((tool) => tool.name === toolName)?.inputSchema;
-    const fittedArgs = fitPublicToolArguments(inputSchema, args, getConfig().mcp.public.maxArgumentChars);
+    const fitted = fitPublicToolArguments(inputSchema, args, getConfig().mcp.public.maxArgumentChars);
+    fittedArgs = fitted;
     const { result, latencyMs } = await withTenantDb(db, tenant.dbName, () =>
-      executeMcpTool(server, toolName, fittedArgs, undefined, undefined, { clientIp: authzClientIp }));
+      executeMcpTool(server, toolName, fitted, undefined, undefined, { clientIp: authzClientIp }));
     void logMcpRequest(tenant.dbName, {
       tenantId: server.tenantId,
       projectId: server.projectId,
@@ -185,7 +190,7 @@ async function runPublicToolCall(
       toolName,
       status: 'success',
       latencyMs,
-      requestPayload: { tool: toolName, arguments: fittedArgs },
+      requestPayload: { tool: toolName, arguments: fitted },
       responsePayload: typeof result === 'object' && result !== null
         ? result as Record<string, unknown>
         : { value: result },
@@ -211,7 +216,7 @@ async function runPublicToolCall(
       toolName,
       status: 'error',
       latencyMs: 0,
-      requestPayload: { tool: toolName, arguments: args },
+      requestPayload: { tool: toolName, arguments: fittedArgs ?? args },
       errorMessage,
       callerType: 'public',
       transport,

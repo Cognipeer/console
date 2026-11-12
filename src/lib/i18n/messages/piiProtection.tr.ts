@@ -10,6 +10,10 @@ export const piiProtectionTr = {
     inherited: '{model} modeli her çağrıyı zaten {policy} politikasıyla koruyor. Burada seçilen politika bu agent için onun yerine geçer.',
     replaces: 'Bu agent için {model} modelinin {policy} politikasının yerine geçer.',
   },
+  mcp: {
+    description:
+      'Upstream kişisel veriyi hiç görmez: PII politikasının bir çağrının argümanlarında bulduğu her değer token olarak gider, sonuçtaki token’lar gerçek değerlere döner. Çağıranlar ve ajanlar değerleri eskisi gibi görür.',
+  },
   policy: {
     label: 'PII politikası',
     hint: 'Neyin aranacağı politikada, PII altında ayarlanır. Kapalıyken metin olduğu gibi gider.',
@@ -29,5 +33,8 @@ export const piiProtectionTr = {
     media: 'Koruma açıkken görsel, dosya ve ses reddedilir.',
     logs: 'Kullanım loglarında değerler değil token’lar kalır.',
     session: 'Bir değer oturum boyunca hep aynı token’a dönüşür.',
+    mcpText: 'Yalnız argümanlardaki metin değerlere bakılır. Gerçek değerlere ihtiyaç duyan bir araç aşağıda listelenebilir.',
+    mcpLogs: 'Sunucunun istek loglarında değerler değil token’lar kalır.',
+    mcpStable: 'Bir değer bu sunucuda hep aynı token’a dönüşür; upstream bir kaydı yine onunla bulabilir.',
   },
 };

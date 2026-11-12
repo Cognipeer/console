@@ -589,6 +589,12 @@ function mcpProtectionGuardrailHooks(): GuardrailHooksConfig {
         profile: 'balanced',
       },
     ],
+    bindings: {
+      'tool.pre': { enabled: true, schedule: SYNC_BLOCK },
+      'tool.post': { enabled: true, schedule: SYNC_BLOCK },
+    },
+    stream: { enabled: false },
+    shortCircuit: false,
   };
 }
 

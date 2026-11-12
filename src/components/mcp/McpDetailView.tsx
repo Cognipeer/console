@@ -22,7 +22,6 @@ import {
   Select,
   SimpleGrid,
   Stack,
-  Switch,
   Tabs,
   Text,
   Textarea,
@@ -46,6 +45,7 @@ import {
   IconPlayerPlay,
   IconPlugConnected,
   IconRefresh,
+  IconShieldLock,
   IconStack2,
   IconTrash,
 } from '@tabler/icons-react';
@@ -59,6 +59,8 @@ import { useTranslations } from '@/lib/i18n';
 import McpToolArgsEditor from '@/components/mcp/McpToolArgsEditor';
 import McpToolsPanel from '@/components/mcp/McpToolsPanel';
 import McpMembersPanel from '@/components/mcp/McpMembersPanel';
+import McpSecurityPanel from '@/components/mcp/McpSecurityPanel';
+import { withMcpProtectionOption } from '@/components/mcp/mcpProtectionOption';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
 import ConsoleIdentityNote, { type ConsoleIdentityIssuerInfo } from '@/components/iam/ConsoleIdentityNote';
@@ -289,7 +291,7 @@ export default function McpDetailView({ serverId, embedded }: McpDetailViewProps
   const tNouns = useTranslations('common.confirm.nouns');
   const searchParams = useSearchParams()!;
   const tabParam = embedded ? null : searchParams.get('tab');
-  const initialTab = ['overview', 'usage', 'members', 'tools', 'playground', 'logs', 'audit'].includes(tabParam ?? '')
+  const initialTab = ['overview', 'usage', 'members', 'tools', 'security', 'playground', 'logs', 'audit'].includes(tabParam ?? '')
     ? (tabParam as string)
     : 'overview';
 
@@ -922,6 +924,11 @@ export default function McpDetailView({ serverId, embedded }: McpDetailViewProps
     ?? 'off';
   const guardrailKeyValue = server.guardrail?.guardrailKey ?? DEFAULT_GUARDRAIL_VALUE;
   const boundGuardrail = guardrails.find((g) => g.key === server.guardrail?.guardrailKey);
+  const securityMetadata = (server.metadata ?? {}) as Record<string, unknown>;
+  const piiProtected = Boolean((securityMetadata.piiProtection as { policyKey?: unknown } | undefined)?.policyKey);
+  const pendingReview = securityMetadata.toolReview && typeof securityMetadata.toolReview === 'object'
+    ? Object.keys(securityMetadata.toolReview).length
+    : 0;
   // Rendered read-only for one release so an operator can still see what a
   // server was bound to before the rename. Only worth showing when it says
   // something — an `{ mode: 'off' }` leftover does not.
@@ -1067,6 +1074,15 @@ export default function McpDetailView({ serverId, embedded }: McpDetailViewProps
               ? `Tools (${(server.tools?.length ?? 0) - server.disabledTools.length}/${server.tools?.length ?? 0})`
               : `Tools (${server.tools?.length ?? 0})`}
           </Tabs.Tab>
+          <Tabs.Tab
+            value="security"
+            leftSection={<IconShieldLock size={14} />}
+            rightSection={pendingReview > 0 ? (
+              <Badge size="xs" variant="filled" color="orange" circle>{pendingReview}</Badge>
+            ) : null}
+          >
+            Security
+          </Tabs.Tab>
           <Tabs.Tab value="playground" leftSection={<IconPlayerPlay size={14} />}>
             Playground
           </Tabs.Tab>
@@ -1201,131 +1217,19 @@ export default function McpDetailView({ serverId, embedded }: McpDetailViewProps
             </Paper>
             ) : null}
             <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Guardrail</Text>
+              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Security</Text>
               <Group gap="xs" mt="xs">
                 <Badge size="sm" variant="light" color={GUARDRAIL_MODE_COLORS[guardrailMode]}>
-                  {guardrailMode}
+                  guardrail: {guardrailMode}
                 </Badge>
-                {guardrailMode !== 'off' ? (
-                  <Text size="xs" c="dimmed">
-                    {server.guardrail?.guardrailKey
-                      ? boundGuardrail?.name ?? server.guardrail.guardrailKey
-                      : 'Default tool guardrail'}
-                  </Text>
+                {piiProtected ? <Badge size="sm" variant="light" color="teal">PII protected</Badge> : null}
+                {pendingReview > 0 ? (
+                  <Badge size="sm" variant="light" color="orange">{pendingReview} awaiting review</Badge>
                 ) : null}
               </Group>
-              <Stack gap={6} mt="sm">
-                <Select
-                  size="xs"
-                  aria-label="Guardrail mode"
-                  data={[
-                    { value: 'off', label: 'Off' },
-                    { value: 'monitor', label: 'Monitor — log only' },
-                    { value: 'enforce', label: 'Enforce — block tool calls' },
-                  ]}
-                  value={guardrailMode}
-                  disabled={savingGuardrail}
-                  allowDeselect={false}
-                  onChange={(val) => {
-                    if (!val || val === guardrailMode) return;
-                    void handleSaveGuardrail({
-                      mode: val as GuardrailBindingMode,
-                      guardrailKey: server.guardrail?.guardrailKey,
-                    });
-                  }}
-                />
-                <Select
-                  size="xs"
-                  aria-label="Bound guardrail"
-                  data={[
-                    { value: DEFAULT_GUARDRAIL_VALUE, label: 'Default tool guardrail' },
-                    ...guardrails.map((g) => ({
-                      value: g.key,
-                      label: `${g.name}${g.enabled ? '' : ' · disabled'}${g.toolBound ? ' · tool hooks' : ''}`,
-                    })),
-                  ]}
-                  value={guardrailKeyValue}
-                  disabled={guardrailMode === 'off' || savingGuardrail}
-                  allowDeselect={false}
-                  onChange={(val) => {
-                    if (!val || val === guardrailKeyValue) return;
-                    void handleSaveGuardrail({
-                      mode: guardrailMode,
-                      guardrailKey: val === DEFAULT_GUARDRAIL_VALUE ? undefined : val,
-                    });
-                  }}
-                />
-              </Stack>
-              {guardrailMode !== 'off' && boundGuardrail && !boundGuardrail.toolBound ? (
-                <Text size="xs" c="orange" mt={6}>
-                  “{boundGuardrail.name}” has no tool.pre or tool.post hook enabled, so this binding
-                  enforces nothing yet.
-                </Text>
-              ) : null}
-              {legacyAegis ? (
-                <Box
-                  mt="sm"
-                  pt="sm"
-                  style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}
-                >
-                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Legacy binding</Text>
-                  <Group gap="xs" mt={4}>
-                    <Badge size="xs" variant="light" color="gray">aegis: {legacyAegis.mode}</Badge>
-                    {legacyAegis.shieldId ? (
-                      <Code style={{ fontSize: 11 }}>{legacyAegis.shieldId}</Code>
-                    ) : null}
-                  </Group>
-                  <Text size="xs" c="dimmed" mt={4}>
-                    {server.guardrail
-                      ? 'Kept read-only for one release — the guardrail above is what enforces.'
-                      : 'This is what still enforces this server, through the default tool guardrail: shield IDs are dead references. Migrating keeps the mode and makes the binding explicit.'}
-                  </Text>
-                  {!server.guardrail ? (
-                    <Button
-                      mt={6}
-                      size="compact-xs"
-                      variant="default"
-                      loading={savingGuardrail}
-                      onClick={() => void handleSaveGuardrail({ mode: legacyAegis.mode })}
-                    >
-                      Migrate
-                    </Button>
-                  ) : null}
-                </Box>
-              ) : null}
-            </Paper>
-            <Paper withBorder p="md" radius="md">
-              <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Runtime Headers</Text>
-              <Switch
-                mt="xs"
-                size="sm"
-                label="Accept caller headers"
-                checked={
-                  (server.metadata?.runtimeHeaders as { allow?: boolean } | undefined)?.allow === true
-                }
-                onChange={async (event) => {
-                  const allow = event.currentTarget.checked;
-                  try {
-                    const res = await fetch(`/api/mcp/${server.id}`, {
-                      method: 'PATCH',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ runtimeHeaders: allow ? { allow: true } : null }),
-                    });
-                    if (!res.ok) throw new Error('update failed');
-                    const data = await res.json();
-                    setServer(data.server);
-                  } catch {
-                    notifications.show({
-                      title: 'Error',
-                      message: 'Failed to update runtime header policy',
-                      color: 'red',
-                    });
-                  }
-                }}
-              />
-              <Text size="xs" c="dimmed" mt={6}>
-                Allow API/A2A/realtime callers to pass per-request headers to the upstream.
-              </Text>
+              <Anchor component="button" type="button" size="xs" mt={6} onClick={() => setActiveTab('security')}>
+                Security settings
+              </Anchor>
             </Paper>
           </SimpleGrid>
 
@@ -1845,6 +1749,15 @@ async with sse_client(
               </Button>
             ) : null}
           </Group>
+          {pendingReview > 0 ? (
+            <Alert color="orange" variant="light" mb="sm" icon={<IconAlertTriangle size={16} />}>
+              {pendingReview === 1 ? '1 tool is' : `${pendingReview} tools are`} waiting for approval and cannot be
+              called until then.{' '}
+              <Anchor component="button" type="button" size="sm" onClick={() => setActiveTab('security')}>
+                Review under Security
+              </Anchor>
+            </Alert>
+          ) : null}
           <McpToolsPanel
             serverId={serverId}
             tools={server.tools ?? []}
@@ -1854,6 +1767,110 @@ async with sse_client(
             toolDescriptions={server.toolDescriptions ?? {}}
             toolNames={server.toolNames ?? {}}
             onServerUpdated={(s) => setServer(s as McpServerView & { openApiSpec?: string })}
+          />
+        </Tabs.Panel>
+
+        {/* ── Security Tab ── */}
+        <Tabs.Panel value="security">
+          <McpSecurityPanel
+            server={server}
+            onServerUpdated={(s) => setServer(s as McpServerView & { openApiSpec?: string })}
+            guardrailSection={(
+                <Paper withBorder p="md" radius="md">
+                  <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Guardrail</Text>
+                  <Group gap="xs" mt="xs">
+                    <Badge size="sm" variant="light" color={GUARDRAIL_MODE_COLORS[guardrailMode]}>
+                      {guardrailMode}
+                    </Badge>
+                    {guardrailMode !== 'off' ? (
+                      <Text size="xs" c="dimmed">
+                        {server.guardrail?.guardrailKey
+                          ? boundGuardrail?.name ?? server.guardrail.guardrailKey
+                          : 'Default tool guardrail'}
+                      </Text>
+                    ) : null}
+                  </Group>
+                  <Stack gap={6} mt="sm">
+                    <Select
+                      size="xs"
+                      aria-label="Guardrail mode"
+                      data={[
+                        { value: 'off', label: 'Off' },
+                        { value: 'monitor', label: 'Monitor — log only' },
+                        { value: 'enforce', label: 'Enforce — block tool calls' },
+                      ]}
+                      value={guardrailMode}
+                      disabled={savingGuardrail}
+                      allowDeselect={false}
+                      onChange={(val) => {
+                        if (!val || val === guardrailMode) return;
+                        void handleSaveGuardrail({
+                          mode: val as GuardrailBindingMode,
+                          guardrailKey: server.guardrail?.guardrailKey,
+                        });
+                      }}
+                    />
+                    <Select
+                      size="xs"
+                      aria-label="Bound guardrail"
+                      data={withMcpProtectionOption([
+                        { value: DEFAULT_GUARDRAIL_VALUE, label: 'Default tool guardrail' },
+                        ...guardrails.map((g) => ({
+                          value: g.key,
+                          label: `${g.name}${g.enabled ? '' : ' · disabled'}${g.toolBound ? ' · tool hooks' : ''}`,
+                        })),
+                      ])}
+                      value={guardrailKeyValue}
+                      disabled={guardrailMode === 'off' || savingGuardrail}
+                      allowDeselect={false}
+                      onChange={(val) => {
+                        if (!val || val === guardrailKeyValue) return;
+                        void handleSaveGuardrail({
+                          mode: guardrailMode,
+                          guardrailKey: val === DEFAULT_GUARDRAIL_VALUE ? undefined : val,
+                        });
+                      }}
+                    />
+                  </Stack>
+                  {guardrailMode !== 'off' && boundGuardrail && !boundGuardrail.toolBound ? (
+                    <Text size="xs" c="orange" mt={6}>
+                      “{boundGuardrail.name}” has no tool.pre or tool.post hook enabled, so this binding
+                      enforces nothing yet.
+                    </Text>
+                  ) : null}
+                  {legacyAegis ? (
+                    <Box
+                      mt="sm"
+                      pt="sm"
+                      style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}
+                    >
+                      <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Legacy binding</Text>
+                      <Group gap="xs" mt={4}>
+                        <Badge size="xs" variant="light" color="gray">aegis: {legacyAegis.mode}</Badge>
+                        {legacyAegis.shieldId ? (
+                          <Code style={{ fontSize: 11 }}>{legacyAegis.shieldId}</Code>
+                        ) : null}
+                      </Group>
+                      <Text size="xs" c="dimmed" mt={4}>
+                        {server.guardrail
+                          ? 'Kept read-only for one release — the guardrail above is what enforces.'
+                          : 'This is what still enforces this server, through the default tool guardrail: shield IDs are dead references. Migrating keeps the mode and makes the binding explicit.'}
+                      </Text>
+                      {!server.guardrail ? (
+                        <Button
+                          mt={6}
+                          size="compact-xs"
+                          variant="default"
+                          loading={savingGuardrail}
+                          onClick={() => void handleSaveGuardrail({ mode: legacyAegis.mode })}
+                        >
+                          Migrate
+                        </Button>
+                      ) : null}
+                    </Box>
+                  ) : null}
+                </Paper>
+            )}
           />
         </Tabs.Panel>
 
