@@ -8,11 +8,10 @@ import { QueryClient } from '@tanstack/react-query';
 import type { FileBucketView, FileRecordView } from '@/lib/services/files';
 import type { FileLimits } from '@/components/files/filesApi';
 import { wait } from './iamCenterUi';
+import { newTestQueryClient } from './renderWithQuery';
 
 /** A query client that does not retry and answers an error at once. */
-export function newQueryClient(): QueryClient {
-  return new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0, gcTime: 0 } } });
-}
+export const newQueryClient: () => QueryClient = newTestQueryClient;
 
 /** Waits (really) until `check` holds. */
 export async function until(check: () => boolean, label: string, ms = 4000): Promise<void> {

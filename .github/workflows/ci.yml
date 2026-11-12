@@ -136,6 +136,9 @@ jobs:
       - name: OpenAPI route gate
         run: npm run test:openapi
 
+      - name: Raw fetch ratchet (dashboard UI)
+        run: npm run check:raw-fetch
+
   docs:
     runs-on: cognipeer-azure-runners
     steps:
