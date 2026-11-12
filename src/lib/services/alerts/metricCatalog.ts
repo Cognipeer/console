@@ -103,7 +103,7 @@ export const ALERT_METRIC_CATALOG: AlertMetricDef[] = [
   legacy('gpu_cache_usage', 'inference', 'GPU Cache Usage', '%', 'down'),
   legacy('request_queue_depth', 'inference', 'Request Queue Depth', '', 'down'),
 
-  // ── guardrails (+ the deprecated aegis spellings stored rules may carry) ──
+  // ── guardrails ────────────────────────────────────────────────────────
   legacy('guardrail_fail_rate', 'guardrails', 'Guardrail Fail Rate', '%', 'down'),
   legacy('guardrail_avg_latency_ms', 'guardrails', 'Guardrail Avg Latency', 'ms', 'down'),
   legacy('guardrail_total_evaluations', 'guardrails', 'Guardrail Total Evaluations', '', 'up'),
@@ -111,10 +111,6 @@ export const ALERT_METRIC_CATALOG: AlertMetricDef[] = [
   legacy('guardrail_approval_rate', 'guardrails', 'Guardrail Approval Rate', '%', 'down'),
   legacy('guardrail_avg_risk_score', 'guardrails', 'Guardrail Avg Risk Score', '', 'down'),
   legacy('guardrail_total_decisions', 'guardrails', 'Guardrail Total Decisions', '', 'up'),
-  legacy('aegis_block_rate', 'guardrails', 'Guardrail Block Rate', '%', 'down', { hiddenForNewRules: true }),
-  legacy('aegis_approval_rate', 'guardrails', 'Guardrail Approval Rate', '%', 'down', { hiddenForNewRules: true }),
-  legacy('aegis_avg_risk_score', 'guardrails', 'Guardrail Avg Risk Score', '', 'down', { hiddenForNewRules: true }),
-  legacy('aegis_total_decisions', 'guardrails', 'Guardrail Total Decisions', '', 'up', { hiddenForNewRules: true }),
 
   // ── rag ───────────────────────────────────────────────────────────────
   legacy('rag_avg_latency_ms', 'rag', 'Knowledge Engine Avg Query Latency', 'ms', 'down', { hiddenForNewRules: true }),
@@ -186,10 +182,7 @@ export function getMetricDef(id: AlertMetric | string): AlertMetricDef | undefin
   return BY_ID.get(id as AlertMetric);
 }
 
-/**
- * Module to metric ids. The deprecated `aegis` module points at the same list
- * as `guardrails` so a stored rule filed under it still resolves its metric.
- */
+/** Module to metric ids. */
 export const ALERT_MODULE_METRICS: Record<AlertModule, AlertMetric[]> = (() => {
   const table: Record<AlertModule, AlertMetric[]> = {
     models: [],
@@ -200,12 +193,10 @@ export const ALERT_MODULE_METRICS: Record<AlertModule, AlertMetric[]> = (() => {
     analysis: [],
     evaluation: [],
     redteam: [],
-    aegis: [],
     'ai-app-gateway': [],
     agents: [],
     tools: [],
   };
   for (const def of ALERT_METRIC_CATALOG) table[def.module].push(def.id);
-  table.aegis = table.guardrails;
   return table;
 })();

@@ -1105,7 +1105,7 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.externalModelPricing, 'versions', 'versions TEXT');
 
     // MCP Hub: multi-source servers (remote URL / stdio packages), exposure
-    // config, Aegis binding and richer request logs. Safe to ensure on boot
+    // config, guardrail binding and richer request logs. Safe to ensure on boot
     // for tenants created before the feature. NOTE: legacy DBs keep the
     // NOT NULL constraint on openApiSpec/upstreamBaseUrl — the mixin writes
     // '' for non-openapi sources and maps '' back to undefined on read.
@@ -1119,10 +1119,7 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.mcpServers, 'stdioConfig', 'stdioConfig TEXT');
     this.ensureTableColumn(db, TABLES.mcpServers, 'toolsDiscoveredAt', 'toolsDiscoveredAt TEXT');
     this.ensureTableColumn(db, TABLES.mcpServers, 'exposure', 'exposure TEXT');
-    this.ensureTableColumn(db, TABLES.mcpServers, 'aegis', 'aegis TEXT');
-    // Guardrail binding, successor to `aegis`. Both columns are written for
-    // one release: every stored row still carries `aegis` and the read-time
-    // normaliser needs it to keep an existing binding armed.
+    // Guardrail binding (tool.pre / tool.post).
     this.ensureTableColumn(db, TABLES.mcpServers, 'guardrail', 'guardrail TEXT');
     this.ensureTableColumn(db, TABLES.mcpServers, 'lastError', 'lastError TEXT');
     // Who may use the server's tools in an agent run (IResourceAccessList, JSON); NULL = everyone who can run the agent.

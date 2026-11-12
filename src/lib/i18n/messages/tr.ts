@@ -1199,7 +1199,6 @@ export const tr: typeof en = {
       audit: 'Denetim Günlüğü',
       'gpu-fleet': 'GPU Fleet',
       sandbox: 'Sandbox',
-      aegis: 'Aegis (eski)',
       abacus: 'Abacus',
       cluster: 'Küme',
       'ai-app-gateway': 'AI App Gateway',

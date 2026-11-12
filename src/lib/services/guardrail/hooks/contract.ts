@@ -1477,4 +1477,3 @@ export class GuardrailEnforcementError extends Error {
   }
 }
 
-export { GuardrailEnforcementError as AegisEnforcementError };

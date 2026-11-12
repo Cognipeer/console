@@ -3,10 +3,9 @@
  *
  * Every tool call that goes through this function is evaluated twice — its
  * arguments at `tool.pre` and its result at `tool.post` — and there is no
- * executor path that skips it. It replaces the enforcement plane's
- * `aegis/interceptor.ts` byte-for-byte at the call site: THREE POSITIONAL
- * arguments and a THREE-ARG sandbox adapter, verified against the live caller
- * `console-ee/overlay/src/server/api/plugins/client-sandbox-toolbox.ts:72-79`,
+ * executor path that skips it. The call site takes THREE POSITIONAL
+ * arguments and a THREE-ARG sandbox adapter, as used by the sandbox toolbox
+ * (`console-ee/overlay/src/server/api/plugins/client-sandbox-toolbox.ts`),
  * which passes
  *
  *     executeEnforcedTool(
@@ -18,19 +17,16 @@
  *     )
  *
  * and then reads `enforced.pre.traceId`, `enforced.pre.decision`,
- * `enforced.post?.decision` and `enforced.result`. The ONLY edit that file
- * needs is its import line.
+ * `enforced.post?.decision` and `enforced.result`.
  *
  * ── NO `enforced` GUARD, DELIBERATELY ──────────────────────────────────────
  * `HookVerdict.decision` is the EFFECTIVE decision, already neutralised to
- * 'allow' when the guardrail is not in `enforce` mode (engine.ts, mirroring
- * aegis/engine.ts:289). Branching on `verdict.enforced` here as well would
- * hard-403 every monitor-mode tenant — the enforcement plane this replaces had
- * no such guard precisely because it relied on the same property.
+ * 'allow' when the guardrail is not in `enforce` mode (engine.ts). Branching on
+ * `verdict.enforced` here as well would hard-403 every monitor-mode tenant.
  *
  * ── WHAT IS GONE FROM THE LADDER ───────────────────────────────────────────
- * `require_approval` and `sandbox` were decisions in the plane this replaces.
- * Neither survives: there is no approval store and no approval UI, and the one
+ * `require_approval` and `sandbox` are not decisions here: there is no
+ * approval store and no approval UI, and the one
  * sandbox adapter in the tree is a pass-through. `GuardrailEnforcementError`
  * still carries both codes so the caller's `code === 'approval_required' ? 202
  * : 403` keeps compiling and keeps meaning what it meant; nothing emits
@@ -55,17 +51,16 @@ import { resolveTenantDbName } from './recordCache';
 /**
  * RE-EXPORTED, never redeclared. Two `class` declarations compile perfectly
  * well and produce two distinct constructors, so a second copy here would make
- * `error instanceof AegisEnforcementError` at the sandbox toolbox false for
+ * `error instanceof GuardrailEnforcementError` at the sandbox toolbox false for
  * every error this module actually throws — a silent downgrade from 403 to the
  * generic 400 branch.
  */
-export { GuardrailEnforcementError, AegisEnforcementError } from './contract';
+export { GuardrailEnforcementError } from './contract';
 
 const logger = createLogger('guardrail-enforce');
 
 /**
- * The evaluation request, shaped exactly like the enforcement plane's
- * `AegisEvaluationRequest` in the fields the live caller sets.
+ * The evaluation request, in the fields the live caller sets.
  *
  * `tenantDbName` is optional because the plane it replaces made it optional
  * ("falls back to in-memory when absent"); here an absent value is resolved

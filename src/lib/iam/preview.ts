@@ -265,7 +265,7 @@ function actionsOf(spec: PolicySpec | null, cedar: string, catalog: readonly Act
   }
   if (out.size === 0) {
     // A policy that does not name an action applies to all of them: probe the service-level ones.
-    for (const a of catalog) if (a.kind === 'service' && !a.id.startsWith('aegis.')) add(a);
+    for (const a of catalog) if (a.kind === 'service') add(a);
   }
   return [...out.values()];
 }

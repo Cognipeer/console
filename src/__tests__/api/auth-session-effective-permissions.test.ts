@@ -145,7 +145,6 @@ describeForEachProvider('GET /api/auth/session: effective permissions', (getDb) 
     expect(status).toBe(200);
     expect(body).toMatchObject({ authenticated: true, role: 'user', servicePermissions: {} });
     expect(Object.keys(body.effectivePermissions ?? {}).sort()).toEqual(LIVE_SERVICES.map((d) => d.id).sort());
-    expect(body.effectivePermissions).not.toHaveProperty('aegis'); // retired services are not listed
     for (const level of Object.values(body.effectivePermissions ?? {})) expect(['none', 'read', 'write', 'admin']).toContain(level);
   });
 

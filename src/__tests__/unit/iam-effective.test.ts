@@ -71,7 +71,6 @@ const ADMIN_SERVICES = RBAC_SERVICE_DEFINITIONS.filter((d) => d.adminService && 
 describe('the services a level is reported for', () => {
   it('are all but the retired ones', () => {
     expect(EFFECTIVE_SERVICES).toEqual(RBAC_SERVICE_DEFINITIONS.filter((d) => !d.deprecated).map((d) => d.id));
-    expect(EFFECTIVE_SERVICES).not.toContain('aegis');
     expect(EFFECTIVE_SERVICES).toContain('iam');
   });
 });

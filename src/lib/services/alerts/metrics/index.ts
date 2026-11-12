@@ -20,7 +20,7 @@ import { EvaluationCollector } from './evaluationCollector';
 import { RedTeamCollector } from './redTeamCollector';
 import { EntityMetricsCollector } from './entityMetricsCollector';
 // Hook-plane decisions (block rate, approval rate, risk score, total). Serves
-// the four `guardrail_*` decision metrics and their persisted `aegis_*` aliases
+// the four `guardrail_*` decision metrics
 // from `guardrail_evaluation_logs`, which every edition writes. The enterprise
 // overlay's copy of this file lists it too — that file REPLACES this one, so
 // both must register it or one edition silently loses the four metrics

@@ -7,6 +7,12 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 
 ### Incompatible changes
 
+- **The Aegis compatibility layer is removed.** `/client/v1/aegis/*` no longer answers `410` (it is a plain `404`),
+  and the `aegis` service, the `aegis` alert module and the `aegis_*` alert metrics (use `guardrail_*`) are gone, so a
+  stored rule or grant that still names them stops resolving. MCP servers no longer read or write an `aegis` binding:
+  set `guardrail` (`guardrailKey`, `mode`); a server bound only through `aegis` is unguarded until it is saved with a
+  `guardrail`. A blocked MCP tool call now says `Blocked by guardrail` / `Response blocked by guardrail`. The
+  `x-aegis-*` response headers stay for now (see `visibility.aegisCompatHeaders`).
 - **Plan limits have no shadow mode.** A hosted deployment (`DEPLOYMENT_MODE=saas`) always enforces the plan limits of
   every organization; a self-hosted one (`onprem`) never measures or refuses them. `PLAN_LIMITS_MODE` and
   `PLAN_LIMITS_DEFAULT_ENFORCEMENT` are no longer read, a license `plan.enforcement` is ignored, and limit events of

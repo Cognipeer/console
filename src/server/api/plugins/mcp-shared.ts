@@ -64,24 +64,11 @@ export function parseExposure(raw: unknown): IMcpExposureConfig | undefined {
   };
 }
 
-/** @deprecated Legacy shield binding. Still parsed so an un-deployed UI keeps
- *  saving; `guardrail` wins wherever both are sent.
- *  A legacy-only body is projected onto `guardrail` (mode only) by the service.
- *  `shieldId` is DROPPED here: its values are ids from the removed
- *  `aegis_shields` table, so persisting a fresh one would only re-arm the
- *  "bound to a removed Aegis shield" warning on the server's first tool call. */
-export function parseAegis(raw: unknown): { mode: 'off' | 'monitor' | 'enforce' } | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const value = raw as { mode?: unknown };
-  const mode = value.mode === 'monitor' || value.mode === 'enforce' ? value.mode : 'off';
-  return { mode };
-}
-
 /**
- * The guardrail binding that replaces `aegis`. Same shape of parse, one real
- * difference: `guardrailKey` is a guardrail KEY (the tenant-scoped slug), not
- * an id, and omitting it is meaningful — it selects the tenant's default tool
- * guardrail rather than leaving the server unguarded.
+ * The guardrail binding of an MCP server. `guardrailKey` is a guardrail KEY
+ * (the tenant-scoped slug), not an id, and omitting it is meaningful — it
+ * selects the tenant's default tool guardrail rather than leaving the server
+ * unguarded.
  */
 export function parseGuardrail(raw: unknown): IMcpGuardrailConfig | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
@@ -281,7 +268,6 @@ export function readMcpCommonCreateFields(
     remoteConfig: head.remoteConfig,
     stdioConfig: head.stdioConfig,
     exposure: parseExposure(body.exposure),
-    aegis: parseAegis(body.aegis),
     guardrail: parseGuardrail(body.guardrail),
   };
 }

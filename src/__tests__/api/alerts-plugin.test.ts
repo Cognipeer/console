@@ -244,7 +244,6 @@ describe('GET /alerts/rules (meta + list)', () => {
 
     expect(meta.validWindows).toEqual([5, 15, 30, 60, 120, 240, 1440]);
     expect(meta.validModules).toEqual(expect.arrayContaining(['models', 'agents', 'tools']));
-    expect(meta.validModules).not.toContain('aegis');
     expect(meta.moduleMetrics.agents).toContain('agent_error_rate');
     expect(meta.validMetrics).toContain('agent_error_rate');
     expect(Array.isArray(meta.catalog)).toBe(true);

@@ -1,12 +1,8 @@
 /**
- * `tool_access` — the port of the enterprise enforcement plane's engine test
- * (`console-ee/.../__tests__/unit/aegis-engine.test.ts`), rewritten against the
- * community family that replaced it.
+ * `tool_access` — the tool-policy family's allow / deny lists and egress checks.
  *
- * The old test drove a whole engine (shield store, audit sink, approval store,
- * LLM judge) to assert what were, underneath, tool-policy rules. This one calls
- * `runToolAccessPolicy` directly: it is pure, synchronous apart from the SSRF
- * lookup, and needs no database, so every assertion below is about the rule
+ * This test calls `runToolAccessPolicy` directly: it is pure, synchronous apart
+ * from the SSRF lookup, and needs no database, so every assertion below is about the rule
  * rather than about the plumbing that used to surround it.
  *
  * ── WHAT MOVED, RATHER THAN DISAPPEARED ────────────────────────────────────
@@ -111,9 +107,8 @@ async function evaluate(
 
 describe('tool_access: allow / deny lists and egress', () => {
   it('denies cross-tenant egress to a host outside the allow list', async () => {
-    // The original: "Aegis blocks denied cross-tenant egress and redacts
-    // secrets". The redaction half now belongs to the `secrets` family — this
-    // family emits no mutations at all, which the assertion below pins.
+    // Redaction belongs to the `secrets` family — this family emits no
+    // mutations at all, which the assertion below pins.
     const outcome = await runToolAccessPolicy({
       policy: policy({
         allow: ['repo.write'],

@@ -1305,7 +1305,6 @@ export const en = {
       audit: 'Audit Log',
       'gpu-fleet': 'GPU Fleet',
       sandbox: 'Sandbox',
-      aegis: 'Aegis (legacy)',
       abacus: 'Abacus',
       cluster: 'Cluster',
       'ai-app-gateway': 'AI App Gateway',

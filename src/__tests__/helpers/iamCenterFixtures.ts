@@ -9,13 +9,13 @@ export const CATALOG = {
     { id: 'tools', labelKey: 'iamApi.services.tools', adminService: false, label: 'Agent Tools', category: 'build' },
     { id: 'config', labelKey: 'iamApi.services.config', adminService: true, label: 'Config Management', category: 'admin' },
     { id: 'iam', labelKey: 'iamApi.services.iam', adminService: true, label: 'Authorization Engine', category: 'admin' },
-    { id: 'aegis', labelKey: 'iamApi.services.aegis', adminService: false, label: 'Aegis (legacy)', category: 'operate', deprecated: true },
+    { id: 'retired', labelKey: 'iamApi.services.retired', adminService: false, label: 'Retired service', category: 'operate', deprecated: true },
   ],
   actions: [
     { id: 'Read', kind: 'group', level: 'read', labelKey: 'iamApi.action.group.read', labelParams: {} },
     { id: 'Write', kind: 'group', level: 'write', labelKey: 'iamApi.action.group.write', labelParams: {} },
     { id: 'Admin', kind: 'group', level: 'admin', labelKey: 'iamApi.action.group.admin', labelParams: {} },
-    ...['models', 'agents', 'tools', 'config', 'iam', 'aegis'].flatMap((service) =>
+    ...['models', 'agents', 'tools', 'config', 'iam', 'retired'].flatMap((service) =>
       (['read', 'write', 'admin'] as const).map((level) => ({
         id: `${service}.${level}`,
         kind: 'service',

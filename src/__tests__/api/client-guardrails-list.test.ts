@@ -77,7 +77,7 @@ vi.mock('@/lib/services/guardrail', () => ({
 
 import { requireApiTokenFromHeader, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
-import { createGuardrail, evaluateGuardrail, listGuardrails } from '@/lib/services/guardrail';
+import { createGuardrail, listGuardrails } from '@/lib/services/guardrail';
 import { clientGuardrailsApiPlugin } from '@/server/api/plugins/client-guardrails';
 import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -531,118 +531,5 @@ describe('POST /api/client/v1/guardrails — regex rule diagnostics', () => {
     const response = await create('(?i)secret', undefined, false);
 
     expect(response.statusCode).toBe(201);
-  });
-});
-
-/**
- * The retired Aegis client surface. `@cognipeer/console-sdk` ≤ 1.7.x still
- * calls these three paths; a bare Fastify 404 there is indistinguishable from
- * a typo, and a consumer whose catch block treats transport errors as an
- * outage fails OPEN on the call that was meant to gate a tool. The routes
- * answer 410 with the replacement path instead — behind the same auth and
- * RBAC as every other route on this surface.
- */
-describe('retired /api/client/v1/aegis/* surface answers 410 Gone', () => {
-  let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
-
-  beforeEach(async () => {
-    vi.clearAllMocks();
-    mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
-    mockFn(getDatabase).mockResolvedValue(createMockDb());
-    app = await createFastifyApiTestApp(clientGuardrailsApiPlugin);
-  });
-
-  afterEach(async () => {
-    await app.close();
-  });
-
-  const CASES = [
-    {
-      method: 'POST' as const,
-      url: '/api/client/v1/aegis/evaluate',
-      replacement: '/api/client/v1/guardrails/hooks/evaluate',
-    },
-    {
-      method: 'GET' as const,
-      url: '/api/client/v1/aegis/shields',
-      replacement: '/api/client/v1/guardrails',
-    },
-    {
-      method: 'GET' as const,
-      url: '/api/client/v1/aegis/shields/shield_123/audit',
-      replacement: null,
-    },
-  ];
-
-  type GoneBody = {
-    error: { type: string; code: string; message: string; replacement: string | null };
-  };
-
-  function call(
-    method: 'GET' | 'POST',
-    url: string,
-    headers: Record<string, string> = { authorization: 'Bearer tok_abc' },
-  ) {
-    return app.inject({
-      method,
-      url,
-      headers: method === 'POST' ? { ...headers, 'content-type': 'application/json' } : headers,
-      // What a 1.7.x `client.aegis.evaluate()` sends. It must not be evaluated.
-      ...(method === 'POST' ? { payload: { shieldId: 'shield_123', input: 'rm -rf /' } } : {}),
-    });
-  }
-
-  it.each(CASES)('$method $url → 410 naming the replacement', async ({ method, url, replacement }) => {
-    const response = await call(method, url);
-    const body = parseJsonBody<GoneBody>(response.body);
-
-    expect(response.statusCode).toBe(410);
-    expect(body.error).toMatchObject({ type: 'gone', code: 'aegis_removed', replacement });
-    expect(body.error.message.length).toBeGreaterThan(0);
-    expect(response.headers.deprecation).toBe('true');
-    if (replacement) {
-      expect(response.headers.link).toBe(`<${replacement}>; rel="successor-version"`);
-      expect(body.error.message).toContain(replacement);
-    } else {
-      expect(response.headers.link).toBeUndefined();
-    }
-    // A retired path evaluates and lists nothing.
-    expect(evaluateGuardrail).not.toHaveBeenCalled();
-    expect(listGuardrails).not.toHaveBeenCalled();
-  });
-
-  it('points the audit caller at the evaluation-log surface and the trace id, with no token-facing replacement', async () => {
-    const body = parseJsonBody<GoneBody>(
-      (await call('GET', '/api/client/v1/aegis/shields/shield_123/audit')).body,
-    );
-
-    expect(body.error.replacement).toBeNull();
-    expect(body.error.message).toContain('/api/guardrails/:id/evaluations');
-    expect(body.error.message).toContain('traceId');
-  });
-
-  it.each(CASES)('$method $url still answers 401, not 410, without a valid token', async ({ method, url }) => {
-    mockFn(requireApiTokenFromHeader).mockRejectedValue(new ApiTokenAuthError('Invalid token', 401));
-
-    const response = await call(method, url, { authorization: 'Bearer nope' });
-
-    expect(response.statusCode).toBe(401);
-  });
-
-  it('applies guardrail RBAC first — the /aegis prefix maps to the guardrails service', async () => {
-    mockFn(requireApiTokenFromHeader).mockResolvedValue({
-      ...AUTH_CTX,
-      user: {
-        _id: 'user-2',
-        role: 'user',
-        tenantId: 'tenant-1',
-        servicePermissions: { guardrails: 'none' },
-      },
-    });
-
-    const response = await call('GET', '/api/client/v1/aegis/shields');
-
-    expect(response.statusCode).toBe(403);
-    expect(parseJsonBody<{ error: string }>(response.body).error).toContain('guardrails');
   });
 });
