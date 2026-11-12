@@ -6,7 +6,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import type { IAgent, IAgentSandboxSeedFile } from '@/lib/database';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import { deleteFile, generateFileRelativeKey, uploadFile } from '@/lib/services/files';
 import { AgentAttachmentError } from './agentErrors';
 import { inspectFileBucket, storageNotConfiguredError, storageUnavailableError } from './sessionFilesBucket';
@@ -45,30 +45,30 @@ export async function uploadSeedFile(input: {
     }
     const bucketKey = agent.config?.attachments?.bucketKey?.trim();
     if (!bucketKey) throw storageNotConfiguredError();
-    const db = await getDatabase();
-    await db.switchToTenant(scope.tenantDbName);
-    const inspection = await inspectFileBucket(db, scope.tenantId, scope.projectId, bucketKey);
-    if (!inspection.usable) throw storageUnavailableError(inspection);
+    return runWithTenantScope(scope.tenantDbName, async (db) => {
+        const inspection = await inspectFileBucket(db, scope.tenantId, scope.projectId, bucketKey);
+        if (!inspection.usable) throw storageUnavailableError(inspection);
 
-    const contentType = input.contentType && input.contentType !== 'application/json' ? input.contentType : 'application/octet-stream';
-    const result = await uploadFile(scope.tenantDbName, scope.tenantId, scope.projectId, {
-        bucketKey,
-        fileName: input.fileName,
-        contentType,
-        data,
-        createdBy: input.userId,
-        convertToMarkdown: false,
-        keyHint: `${seedObjectPrefix(agent.key)}${generateFileRelativeKey(input.fileName)}`,
+        const contentType = input.contentType && input.contentType !== 'application/json' ? input.contentType : 'application/octet-stream';
+        const result = await uploadFile(scope.tenantDbName, scope.tenantId, scope.projectId, {
+            bucketKey,
+            fileName: input.fileName,
+            contentType,
+            data,
+            createdBy: input.userId,
+            convertToMarkdown: false,
+            keyHint: `${seedObjectPrefix(agent.key)}${generateFileRelativeKey(input.fileName)}`,
+        });
+        return {
+            id: randomUUID(),
+            name: input.fileName,
+            path: defaultSeedPath(input.fileName),
+            fileRef: { bucketKey, objectKey: result.record.key },
+            size: data.length,
+            mimeType: contentType,
+            sha256: sha256Hex(data),
+        };
     });
-    return {
-        id: randomUUID(),
-        name: input.fileName,
-        path: defaultSeedPath(input.fileName),
-        fileRef: { bucketKey, objectKey: result.record.key },
-        size: data.length,
-        mimeType: contentType,
-        sha256: sha256Hex(data),
-    };
 }
 
 /** Deletes an uploaded seed file. Only objects under this agent's `agent-assets/` prefix are touched. */

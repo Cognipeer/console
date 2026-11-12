@@ -3,10 +3,10 @@
  * sessions and runs out: those belong to the flow run that started them and are
  * reached through the flow (and through tracing), not through the agent lists.
  */
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 
 export async function listOwnedAgentKeys(tenantDbName: string, projectId: string): Promise<string[]> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db.listOwnedAgentKeys(projectId);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        return db.listOwnedAgentKeys(projectId);
+    });
 }

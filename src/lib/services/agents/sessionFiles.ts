@@ -39,7 +39,7 @@
 import { Buffer } from 'node:buffer';
 import type { createTool as CreateSdkTool, ToolInterface as AgentSdkToolInterface } from '@cognipeer/agent-sdk';
 import {
-    getDatabase,
+    runWithTenantScope,
     type DatabaseProvider,
     type IAgentConfig,
     type IAgentConversation,
@@ -241,12 +241,6 @@ export function estimateTokens(chars: number): number {
 
 // ── Storage ─────────────────────────────────────────────────────────────────
 
-async function tenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db;
-}
-
 /**
  * The bucket new session files go to: the agent's own `attachments.bucketKey`,
  * checked to be usable now (it exists in the project, is active, and its
@@ -258,11 +252,13 @@ export async function resolveSessionFilesBucket(
     scope: SessionFileScope,
     cfg: ResolvedAttachmentsConfig,
 ): Promise<string> {
-    if (!cfg.bucketKey) throw storageNotConfiguredError();
-    const db = await tenantDb(scope.tenantDbName);
-    const inspection = await inspectFileBucket(db, scope.tenantId, scope.projectId, cfg.bucketKey);
-    if (!inspection.usable) throw storageUnavailableError(inspection);
-    return cfg.bucketKey;
+    const bucketKey = cfg.bucketKey;
+    if (!bucketKey) throw storageNotConfiguredError();
+    return runWithTenantScope(scope.tenantDbName, async (db) => {
+        const inspection = await inspectFileBucket(db, scope.tenantId, scope.projectId, bucketKey);
+        if (!inspection.usable) throw storageUnavailableError(inspection);
+        return bucketKey;
+    });
 }
 
 function decodeBase64(data: string): Buffer {
@@ -386,53 +382,54 @@ export async function uploadSessionFile(input: UploadSessionFileInput): Promise<
     }
 
     const conversationId = String(conversation._id);
-    const db = await tenantDb(scope.tenantDbName);
-    // What the agent wrote itself is not what a person attached: it does not use up the person's file count.
-    const held = (await db.listFileRecordsByConversation(conversationId)).filter((record) => record.origin !== 'agent_output');
-    if (held.length >= cfg.maxFiles) {
-        throw new AgentAttachmentError(409, 'too_many_files', `A session holds at most ${cfg.maxFiles} files. Delete one to attach another.`);
-    }
+    return runWithTenantScope(scope.tenantDbName, async (db) => {
+        // What the agent wrote itself is not what a person attached: it does not use up the person's file count.
+        const held = (await db.listFileRecordsByConversation(conversationId)).filter((record) => record.origin !== 'agent_output');
+        if (held.length >= cfg.maxFiles) {
+            throw new AgentAttachmentError(409, 'too_many_files', `A session holds at most ${cfg.maxFiles} files. Delete one to attach another.`);
+        }
 
-    const bucketKey = await resolveSessionFilesBucket(scope, cfg);
-    await assertFileQuotas(db, { scope, bucketKey, bytes: declaredBytes, addedBytes: declaredBytes, newFile: true, actor });
+        const bucketKey = await resolveSessionFilesBucket(scope, cfg);
+        await assertFileQuotas(db, { scope, bucketKey, bytes: declaredBytes, addedBytes: declaredBytes, newFile: true, actor });
 
-    const buffer = typeof input.data === 'string' ? decodeBase64(input.data) : input.data;
-    // The estimate above is for a string; the decoded size is what is stored.
-    if (buffer.length > maxBytes) {
-        throw new AgentAttachmentError(413, 'file_too_large', fileTooLargeMessage(cfg, mimeType));
-    }
+        const buffer = typeof input.data === 'string' ? decodeBase64(input.data) : input.data;
+        // The estimate above is for a string; the decoded size is what is stored.
+        if (buffer.length > maxBytes) {
+            throw new AgentAttachmentError(413, 'file_too_large', fileTooLargeMessage(cfg, mimeType));
+        }
 
-    const result = await uploadFile(scope.tenantDbName, scope.tenantId, scope.projectId, {
-        bucketKey,
-        fileName: input.fileName,
-        contentType: mimeType,
-        data: buffer,
-        createdBy: actor.userId,
-        ...(input.signal ? { signal: input.signal } : {}),
-        // An image has no text to convert; the model reads the original. With OCR on pictures it is also read as
-        // text (a model without vision, or a format no provider takes, then has something to work from).
-        convertToMarkdown: !isImageMime(mimeType) || (attachmentsOcrReadsImages(cfg) && isImageFile(input.fileName, mimeType)),
-        // The text goes to a model: pictures inside documents become placeholders, not base64. OCR only when the agent asked.
-        extraction: {
-            ...(attachmentsOcrActive(cfg) ? { ocr: cfg.ocr! } : {}),
-            images: 'placeholder',
-        },
-        // <folder>/<agentKey>/<sessionId>/<unique name>; the file service puts the bucket's own prefix in front.
-        keyHint: sessionFileObjectKey({
-            folder: cfg.folder,
-            agentKey: conversation.agentKey,
-            conversationId,
-            uniqueName: generateFileRelativeKey(input.fileName),
-        }),
-        recordExtras: {
-            purpose: 'conversation',
-            conversationId,
-            agentKey: conversation.agentKey,
-            expiresAt: new Date(Date.now() + cfg.retentionDays * 86_400_000),
-            uploadedBy: actor.userId,
-        },
+        const result = await uploadFile(scope.tenantDbName, scope.tenantId, scope.projectId, {
+            bucketKey,
+            fileName: input.fileName,
+            contentType: mimeType,
+            data: buffer,
+            createdBy: actor.userId,
+            ...(input.signal ? { signal: input.signal } : {}),
+            // An image has no text to convert; the model reads the original. With OCR on pictures it is also read as
+            // text (a model without vision, or a format no provider takes, then has something to work from).
+            convertToMarkdown: !isImageMime(mimeType) || (attachmentsOcrReadsImages(cfg) && isImageFile(input.fileName, mimeType)),
+            // The text goes to a model: pictures inside documents become placeholders, not base64. OCR only when the agent asked.
+            extraction: {
+                ...(attachmentsOcrActive(cfg) ? { ocr: cfg.ocr! } : {}),
+                images: 'placeholder',
+            },
+            // <folder>/<agentKey>/<sessionId>/<unique name>; the file service puts the bucket's own prefix in front.
+            keyHint: sessionFileObjectKey({
+                folder: cfg.folder,
+                agentKey: conversation.agentKey,
+                conversationId,
+                uniqueName: generateFileRelativeKey(input.fileName),
+            }),
+            recordExtras: {
+                purpose: 'conversation',
+                conversationId,
+                agentKey: conversation.agentKey,
+                expiresAt: new Date(Date.now() + cfg.retentionDays * 86_400_000),
+                uploadedBy: actor.userId,
+            },
+        });
+        return toSessionFileView(result.record);
     });
-    return toSessionFileView(result.record);
 }
 
 const formatMb = (bytes: number) => `${Number((bytes / (1024 * 1024)).toFixed(2))} MB`;
@@ -474,41 +471,42 @@ export async function saveAgentOutputFile(input: {
     if (input.turn && input.turn.saved >= input.turn.maxFiles) {
         throw new AgentAttachmentError(409, 'too_many_files', `At most ${input.turn.maxFiles} files can be created in one turn.`);
     }
-    const db = await tenantDb(input.scope.tenantDbName);
-    await assertFileQuotas(db, {
-        scope: input.scope,
-        bucketKey,
-        bytes: input.data.length,
-        addedBytes: input.data.length,
-        newFile: true,
-        actor: { userId: input.actorId, ...(input.tokenId ? { tokenId: input.tokenId } : {}) },
+    return runWithTenantScope(input.scope.tenantDbName, async (db) => {
+        await assertFileQuotas(db, {
+            scope: input.scope,
+            bucketKey,
+            bytes: input.data.length,
+            addedBytes: input.data.length,
+            newFile: true,
+            actor: { userId: input.actorId, ...(input.tokenId ? { tokenId: input.tokenId } : {}) },
+        });
+        const conversationId = String(input.conversation._id);
+        const result = await uploadFile(input.scope.tenantDbName, input.scope.tenantId, input.scope.projectId, {
+            bucketKey,
+            fileName: input.fileName,
+            contentType: input.contentType,
+            data: input.data,
+            createdBy: input.actorId,
+            // What the agent wrote is stored byte for byte, with no text copy: its own text is already text.
+            convertToMarkdown: false,
+            keyHint: sessionFileObjectKey({
+                folder: cfg.folder,
+                agentKey: input.conversation.agentKey,
+                conversationId,
+                uniqueName: generateFileRelativeKey(input.fileName),
+            }),
+            recordExtras: {
+                purpose: 'conversation',
+                conversationId,
+                agentKey: input.conversation.agentKey,
+                expiresAt: new Date(Date.now() + cfg.retentionDays * 86_400_000),
+                uploadedBy: input.actorId,
+                origin: 'agent_output',
+            },
+        });
+        if (input.turn) input.turn.saved += 1;
+        return { ...toMessageAttachment(result.record), origin: 'agent_output' };
     });
-    const conversationId = String(input.conversation._id);
-    const result = await uploadFile(input.scope.tenantDbName, input.scope.tenantId, input.scope.projectId, {
-        bucketKey,
-        fileName: input.fileName,
-        contentType: input.contentType,
-        data: input.data,
-        createdBy: input.actorId,
-        // What the agent wrote is stored byte for byte, with no text copy: its own text is already text.
-        convertToMarkdown: false,
-        keyHint: sessionFileObjectKey({
-            folder: cfg.folder,
-            agentKey: input.conversation.agentKey,
-            conversationId,
-            uniqueName: generateFileRelativeKey(input.fileName),
-        }),
-        recordExtras: {
-            purpose: 'conversation',
-            conversationId,
-            agentKey: input.conversation.agentKey,
-            expiresAt: new Date(Date.now() + cfg.retentionDays * 86_400_000),
-            uploadedBy: input.actorId,
-            origin: 'agent_output',
-        },
-    });
-    if (input.turn) input.turn.saved += 1;
-    return { ...toMessageAttachment(result.record), origin: 'agent_output' };
 }
 
 /**
@@ -539,22 +537,23 @@ export async function appendAgentOutputFile(input: {
     if (grown > input.maxFileBytes) {
         throw new AgentAttachmentError(413, 'file_too_large', `The file would exceed the ${formatMb(input.maxFileBytes)} limit for files an agent writes.`);
     }
-    const db = await tenantDb(input.scope.tenantDbName);
-    await assertFileQuotas(db, {
-        scope: input.scope,
-        bucketKey: record.bucketKey,
-        bytes: grown,
-        addedBytes: input.data.length,
-        newFile: false,
-        actor: { userId: input.actorId, ...(input.tokenId ? { tokenId: input.tokenId } : {}) },
+    return runWithTenantScope(input.scope.tenantDbName, async (db) => {
+        await assertFileQuotas(db, {
+            scope: input.scope,
+            bucketKey: record.bucketKey,
+            bytes: grown,
+            addedBytes: input.data.length,
+            newFile: false,
+            actor: { userId: input.actorId, ...(input.tokenId ? { tokenId: input.tokenId } : {}) },
+        });
+        const current = await downloadFile(input.scope.tenantDbName, input.scope.tenantId, input.scope.projectId, record.bucketKey, record.key);
+        const updated = await replaceFileContent(input.scope.tenantDbName, input.scope.tenantId, input.scope.projectId, record.bucketKey, record.key, {
+            data: Buffer.concat([current.data, input.data]),
+            updatedBy: input.actorId,
+            convertToMarkdown: false,
+        });
+        return { ...toMessageAttachment(updated), origin: 'agent_output' };
     });
-    const current = await downloadFile(input.scope.tenantDbName, input.scope.tenantId, input.scope.projectId, record.bucketKey, record.key);
-    const updated = await replaceFileContent(input.scope.tenantDbName, input.scope.tenantId, input.scope.projectId, record.bucketKey, record.key, {
-        data: Buffer.concat([current.data, input.data]),
-        updatedBy: input.actorId,
-        convertToMarkdown: false,
-    });
-    return { ...toMessageAttachment(updated), origin: 'agent_output' };
 }
 
 /**
@@ -566,10 +565,11 @@ export async function listSessionFiles(
     conversationId: string,
     options: { withNames?: boolean } = {},
 ): Promise<SessionFileView[]> {
-    const db = await tenantDb(scope.tenantDbName);
-    const records = await db.listFileRecordsByConversation(conversationId);
-    const views = records.filter((record) => record.projectId === scope.projectId).map(toSessionFileView);
-    return options.withNames ? withUploaderNames(scope.tenantDbName, views, { db }) : views;
+    return runWithTenantScope(scope.tenantDbName, async (db) => {
+        const records = await db.listFileRecordsByConversation(conversationId);
+        const views = records.filter((record) => record.projectId === scope.projectId).map(toSessionFileView);
+        return options.withNames ? withUploaderNames(scope.tenantDbName, views, { db }) : views;
+    });
 }
 
 /** The record of a file that belongs to this conversation, else null. */
@@ -578,17 +578,18 @@ export async function findSessionFileRecord(
     conversationId: string,
     fileId: string,
 ): Promise<IFileRecord | null> {
-    const db = await tenantDb(scope.tenantDbName);
-    let record: IFileRecord | null = null;
-    try {
-        record = await db.findFileRecordById(fileId);
-    } catch {
-        record = null; // a malformed id
-    }
-    if (!record || record.purpose !== 'conversation' || record.conversationId !== conversationId || record.projectId !== scope.projectId) {
-        return null;
-    }
-    return record;
+    return runWithTenantScope(scope.tenantDbName, async (db) => {
+        let record: IFileRecord | null = null;
+        try {
+            record = await db.findFileRecordById(fileId);
+        } catch {
+            record = null; // a malformed id
+        }
+        if (!record || record.purpose !== 'conversation' || record.conversationId !== conversationId || record.projectId !== scope.projectId) {
+            return null;
+        }
+        return record;
+    });
 }
 
 /**
@@ -610,30 +611,31 @@ async function removeFileRecord(
     deletedBy: string,
     mode: 'strict' | 'sweep' = 'strict',
 ): Promise<boolean> {
-    const db = await tenantDb(scope.tenantDbName);
-    const inspection = await inspectFileBucket(db, scope.tenantId, scope.projectId, record.bucketKey);
-    if (!inspection.usable) {
-        const gone = inspection.issue === 'bucket_missing' || inspection.issue === 'provider_missing';
-        if (!gone && mode === 'strict') throw storageUnavailableError(inspection);
-        logger.warn('Dropped a session file whose storage is unavailable; its object is left behind', {
-            code: 'session_file_orphaned',
-            fileId: String(record._id),
-            bucketKey: record.bucketKey,
-            providerKey: record.providerKey,
-            objectKey: record.key,
-            reason: inspection.issue,
-        });
-        return db.deleteFileRecord(String(record._id));
-    }
-    try {
-        return await deleteFile(scope.tenantDbName, scope.tenantId, scope.projectId, record.bucketKey, record.key, deletedBy);
-    } catch (error) {
-        // The record or its object is already gone: nothing left to delete.
-        if (error instanceof Error && /not found/i.test(error.message)) {
+    return runWithTenantScope(scope.tenantDbName, async (db) => {
+        const inspection = await inspectFileBucket(db, scope.tenantId, scope.projectId, record.bucketKey);
+        if (!inspection.usable) {
+            const gone = inspection.issue === 'bucket_missing' || inspection.issue === 'provider_missing';
+            if (!gone && mode === 'strict') throw storageUnavailableError(inspection);
+            logger.warn('Dropped a session file whose storage is unavailable; its object is left behind', {
+                code: 'session_file_orphaned',
+                fileId: String(record._id),
+                bucketKey: record.bucketKey,
+                providerKey: record.providerKey,
+                objectKey: record.key,
+                reason: inspection.issue,
+            });
             return db.deleteFileRecord(String(record._id));
         }
-        throw error;
-    }
+        try {
+            return await deleteFile(scope.tenantDbName, scope.tenantId, scope.projectId, record.bucketKey, record.key, deletedBy);
+        } catch (error) {
+            // The record or its object is already gone: nothing left to delete.
+            if (error instanceof Error && /not found/i.test(error.message)) {
+                return db.deleteFileRecord(String(record._id));
+            }
+            throw error;
+        }
+    });
 }
 
 /** Deletes one session file (object, markdown and row). False when it is not on this session. */
@@ -657,27 +659,28 @@ export async function deleteConversationFiles(
     tenantDbName: string,
     conversation: Pick<IAgentConversation, '_id' | 'tenantId' | 'projectId'>,
 ): Promise<number> {
-    const db = await tenantDb(tenantDbName);
-    let records: IFileRecord[];
-    try {
-        records = await db.listFileRecordsByConversation(String(conversation._id));
-    } catch (error) {
-        logger.warn('Could not list the files of a deleted session', { error: error instanceof Error ? error.message : String(error) });
-        return 0;
-    }
-    const scope = { tenantDbName, tenantId: conversation.tenantId, projectId: conversation.projectId };
-    let deleted = 0;
-    for (const record of records) {
+    return runWithTenantScope(tenantDbName, async (db) => {
+        let records: IFileRecord[];
         try {
-            if (await removeFileRecord(scope, record, 'system')) deleted += 1;
+            records = await db.listFileRecordsByConversation(String(conversation._id));
         } catch (error) {
-            logger.warn('Could not delete a session file with its session', {
-                fileId: String(record._id),
-                error: error instanceof Error ? error.message : String(error),
-            });
+            logger.warn('Could not list the files of a deleted session', { error: error instanceof Error ? error.message : String(error) });
+            return 0;
         }
-    }
-    return deleted;
+        const scope = { tenantDbName, tenantId: conversation.tenantId, projectId: conversation.projectId };
+        let deleted = 0;
+        for (const record of records) {
+            try {
+                if (await removeFileRecord(scope, record, 'system')) deleted += 1;
+            } catch (error) {
+                logger.warn('Could not delete a session file with its session', {
+                    fileId: String(record._id),
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+        }
+        return deleted;
+    });
 }
 
 /**
@@ -733,20 +736,21 @@ export async function findUnsentSessionFiles(
     scope: SessionFileScope,
     conversation: Pick<IAgentConversation, '_id' | 'messages'> & Partial<Pick<IAgentConversation, 'metadata'>>,
 ): Promise<IFileRecord[]> {
-    const db = await tenantDb(scope.tenantDbName);
-    const carried = new Set<string>();
-    for (const message of conversation.messages ?? []) {
-        for (const attachment of message.attachments ?? []) carried.add(attachment.fileId);
-    }
-    // Files of messages that were cut from the transcript (truncate / regenerate / edit) were sent already.
-    const sent = conversation.metadata?.sentFileIds;
-    if (Array.isArray(sent)) for (const fileId of sent) if (typeof fileId === 'string') carried.add(fileId);
-    const files = await db.listFileRecordsByConversation(String(conversation._id));
-    // A file the agent wrote reaches the person on the answer that carries it; it never rides on their next message.
-    return files.filter((record) => record.purpose === 'conversation'
-        && record.origin !== 'agent_output'
-        && record.projectId === scope.projectId
-        && !carried.has(String(record._id)));
+    return runWithTenantScope(scope.tenantDbName, async (db) => {
+        const carried = new Set<string>();
+        for (const message of conversation.messages ?? []) {
+            for (const attachment of message.attachments ?? []) carried.add(attachment.fileId);
+        }
+        // Files of messages that were cut from the transcript (truncate / regenerate / edit) were sent already.
+        const sent = conversation.metadata?.sentFileIds;
+        if (Array.isArray(sent)) for (const fileId of sent) if (typeof fileId === 'string') carried.add(fileId);
+        const files = await db.listFileRecordsByConversation(String(conversation._id));
+        // A file the agent wrote reaches the person on the answer that carries it; it never rides on their next message.
+        return files.filter((record) => record.purpose === 'conversation'
+            && record.origin !== 'agent_output'
+            && record.projectId === scope.projectId
+            && !carried.has(String(record._id)));
+    });
 }
 
 /** What a conversation holds, for deciding which read tools are offered. */

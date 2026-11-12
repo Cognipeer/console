@@ -13,7 +13,13 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 const hoisted = vi.hoisted(() => ({ getDatabase: vi.fn() }));
-vi.mock('@/lib/database', () => ({ getDatabase: hoisted.getDatabase }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: hoisted.getDatabase,
+  runWithTenantScope: async (tenantDbName: string, fn: (d: unknown) => unknown) => {
+    const provider = (await hoisted.getDatabase()) as { runWithTenant: (n: string, work: () => unknown) => Promise<unknown> };
+    return provider.runWithTenant(tenantDbName, () => fn(provider));
+  },
+}));
 
 import type { IAgentConfig } from '@/lib/database';
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';

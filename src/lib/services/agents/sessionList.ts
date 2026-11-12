@@ -10,7 +10,7 @@
  */
 
 import { Buffer } from 'node:buffer';
-import { getDatabase, type AgentSessionRuntimeStatus, type IAgentConversationActivityRow, type IAgentConversationListItem } from '@/lib/database';
+import { runWithTenantScope, type AgentSessionRuntimeStatus, type IAgentConversationActivityRow, type IAgentConversationListItem } from '@/lib/database';
 import { normalizeStaleRunningStatus, normalizeStaleRunningStatuses } from './sessionRuntime';
 
 export const SESSION_LIST_DEFAULT_LIMIT = 20;
@@ -57,26 +57,26 @@ export interface SessionListPage {
 }
 
 export async function listSessionPage(tenantDbName: string, filters: SessionListFilters): Promise<SessionListPage> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    // The sessions of a flow's hidden agents are not agent sessions.
-    const excludeAgentKeys = await db.listOwnedAgentKeys(filters.projectId);
-    // One more than asked, to know whether there is a next page.
-    const rows = await db.listAgentConversationPage({
-        projectId: filters.projectId,
-        ...(excludeAgentKeys.length > 0 ? { excludeAgentKeys } : {}),
-        ...(filters.agentKey ? { agentKey: filters.agentKey } : {}),
-        ...(filters.status ? { runtimeStatus: filters.status } : {}),
-        limit: filters.limit + 1,
-        ...(filters.after ? { after: filters.after } : {}),
-        ...(filters.ownOnly ? { ownOnly: filters.ownOnly } : {}),
+    return runWithTenantScope(tenantDbName, async (db) => {
+        // The sessions of a flow's hidden agents are not agent sessions.
+        const excludeAgentKeys = await db.listOwnedAgentKeys(filters.projectId);
+        // One more than asked, to know whether there is a next page.
+        const rows = await db.listAgentConversationPage({
+            projectId: filters.projectId,
+            ...(excludeAgentKeys.length > 0 ? { excludeAgentKeys } : {}),
+            ...(filters.agentKey ? { agentKey: filters.agentKey } : {}),
+            ...(filters.status ? { runtimeStatus: filters.status } : {}),
+            limit: filters.limit + 1,
+            ...(filters.after ? { after: filters.after } : {}),
+            ...(filters.ownOnly ? { ownOnly: filters.ownOnly } : {}),
+        });
+        const hasMore = rows.length > filters.limit;
+        const page = rows.slice(0, filters.limit);
+        // A "running" row whose turn died reads as ended, like everywhere else a session's state is read.
+        const sessions = await normalizeStaleRunningStatuses(db, page);
+        const last = page[page.length - 1];
+        return { sessions, hasMore, ...(hasMore && last ? { nextCursor: encodeSessionCursor(last) } : {}) };
     });
-    const hasMore = rows.length > filters.limit;
-    const page = rows.slice(0, filters.limit);
-    // A "running" row whose turn died reads as ended, like everywhere else a session's state is read.
-    const sessions = await normalizeStaleRunningStatuses(db, page);
-    const last = page[page.length - 1];
-    return { sessions, hasMore, ...(hasMore && last ? { nextCursor: encodeSessionCursor(last) } : {}) };
 }
 
 /**
@@ -113,25 +113,25 @@ export async function listProjectSessions(
     tenantDbName: string,
     filters: ProjectSessionFilters,
 ): Promise<{ sessions: IAgentConversationActivityRow[]; hasMore: boolean; nextCursor?: string }> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    // Not a provider filter.
-    const { knownInFlight, ...query } = filters;
-    // One more than asked, to know whether there is a next page.
-    // The sessions of a flow's hidden agents are not agent sessions.
-    const excludeAgentKeys = await db.listOwnedAgentKeys(filters.projectId);
-    const rows = await db.listProjectAgentConversations({
-        ...query,
-        ...(excludeAgentKeys.length > 0 ? { excludeAgentKeys } : {}),
-        limit: filters.limit + 1,
+    return runWithTenantScope(tenantDbName, async (db) => {
+        // Not a provider filter.
+        const { knownInFlight, ...query } = filters;
+        // One more than asked, to know whether there is a next page.
+        // The sessions of a flow's hidden agents are not agent sessions.
+        const excludeAgentKeys = await db.listOwnedAgentKeys(filters.projectId);
+        const rows = await db.listProjectAgentConversations({
+            ...query,
+            ...(excludeAgentKeys.length > 0 ? { excludeAgentKeys } : {}),
+            limit: filters.limit + 1,
+        });
+        const hasMore = rows.length > filters.limit;
+        const page = rows.slice(0, filters.limit);
+        // A "running" row whose turn died reads as ended, like everywhere else a session's state is read - except one
+        // the caller knows has a run in flight, which needs no lookup.
+        const sessions = await Promise.all(page.map((row) => (
+            knownInFlight?.has(String(row._id)) ? row : normalizeStaleRunningStatus(db, row)
+        )));
+        const last = page[page.length - 1];
+        return { sessions, hasMore, ...(hasMore && last ? { nextCursor: encodeActivityCursor(last) } : {}) };
     });
-    const hasMore = rows.length > filters.limit;
-    const page = rows.slice(0, filters.limit);
-    // A "running" row whose turn died reads as ended, like everywhere else a session's state is read - except one
-    // the caller knows has a run in flight, which needs no lookup.
-    const sessions = await Promise.all(page.map((row) => (
-        knownInFlight?.has(String(row._id)) ? row : normalizeStaleRunningStatus(db, row)
-    )));
-    const last = page[page.length - 1];
-    return { sessions, hasMore, ...(hasMore && last ? { nextCursor: encodeActivityCursor(last) } : {}) };
 }

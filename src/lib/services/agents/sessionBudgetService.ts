@@ -15,7 +15,7 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase, type DatabaseProvider, type IAgentConversation } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider, type IAgentConversation } from '@/lib/database';
 import { loadConversationState } from './agentTurnState';
 import {
   endsInAnswer,
@@ -49,50 +49,50 @@ export async function updateSessionBudget(input: {
   /** `{ maxCostUsd, onReach }`, or `null` to remove the budget. */
   budget: unknown;
 }): Promise<UpdateSessionBudgetOutcome> {
-  const db = await getDatabase();
-  await db.switchToTenant(input.tenantDbName);
-  const conversation = await db.findAgentConversationById(input.conversationId);
-  if (!conversation || conversation.projectId !== input.projectId) return { kind: 'not_found' };
+  return runWithTenantScope(input.tenantDbName, async (db) => {
+    const conversation = await db.findAgentConversationById(input.conversationId);
+    if (!conversation || conversation.projectId !== input.projectId) return { kind: 'not_found' };
 
-  let next: IAgentConversation['budget'] = null;
-  if (input.budget !== null) {
-    const parsed = parseSessionBudget(input.budget);
-    if (!parsed.ok) return { kind: 'invalid', message: parsed.message };
-    const spent = sessionSpentUsd(conversation);
-    if (parsed.budget.maxCostUsd <= spent) {
-      return {
-        kind: 'invalid',
-        message: `budget.maxCostUsd must be greater than what the session has already spent ($${spent}).`,
-      };
+    let next: IAgentConversation['budget'] = null;
+    if (input.budget !== null) {
+      const parsed = parseSessionBudget(input.budget);
+      if (!parsed.ok) return { kind: 'invalid', message: parsed.message };
+      const spent = sessionSpentUsd(conversation);
+      if (parsed.budget.maxCostUsd <= spent) {
+        return {
+          kind: 'invalid',
+          message: `budget.maxCostUsd must be greater than what the session has already spent ($${spent}).`,
+        };
+      }
+      next = parsed.budget;
     }
-    next = parsed.budget;
-  }
 
-  await db.updateAgentConversationRuntime(input.conversationId, { budget: next });
-  // Keep the running total the budget is measured against from here on — raised
-  // atomically, never set: a turn that is spending right now must not lose its
-  // cost to this write.
-  if (next) await db.addAgentConversationSpend(input.conversationId, { atLeastUsd: sessionSpentUsd(conversation) });
+    await db.updateAgentConversationRuntime(input.conversationId, { budget: next });
+    // Keep the running total the budget is measured against from here on — raised
+    // atomically, never set: a turn that is spending right now must not lose its
+    // cost to this write.
+    if (next) await db.addAgentConversationSpend(input.conversationId, { atLeastUsd: sessionSpentUsd(conversation) });
 
-  // A turn that crossed the budget and finished normally left the session
-  // `budget_paused` with its answer delivered. There is nothing to carry on, so
-  // the raise (or removal) is all it needed: it is idle again, and a client that
-  // asked to resume does not get a continuation that would only be refused.
-  let wasBudgetPaused = conversation.runtimeStatus === 'budget_paused';
-  const stoppedOnBudget = wasBudgetPaused || (
-    conversation.stopReason === 'budget_reached' && conversation.runtimeStatus !== 'running' && conversation.runtimeStatus !== 'requires_action'
-  );
-  if (stoppedOnBudget && endsInAnswer(await loadConversationState(db, conversation))) {
-    await db.updateAgentConversationRuntime(input.conversationId, { runtimeStatus: 'idle', stopReason: 'end_turn' });
-    wasBudgetPaused = false;
-  }
+    // A turn that crossed the budget and finished normally left the session
+    // `budget_paused` with its answer delivered. There is nothing to carry on, so
+    // the raise (or removal) is all it needed: it is idle again, and a client that
+    // asked to resume does not get a continuation that would only be refused.
+    let wasBudgetPaused = conversation.runtimeStatus === 'budget_paused';
+    const stoppedOnBudget = wasBudgetPaused || (
+      conversation.stopReason === 'budget_reached' && conversation.runtimeStatus !== 'running' && conversation.runtimeStatus !== 'requires_action'
+    );
+    if (stoppedOnBudget && endsInAnswer(await loadConversationState(db, conversation))) {
+      await db.updateAgentConversationRuntime(input.conversationId, { runtimeStatus: 'idle', stopReason: 'end_turn' });
+      wasBudgetPaused = false;
+    }
 
-  const updated = await db.findAgentConversationById(input.conversationId);
-  return {
-    kind: 'ok',
-    conversation: withSessionSpend(updated ?? { ...conversation, budget: next }),
-    wasBudgetPaused,
-  };
+    const updated = await db.findAgentConversationById(input.conversationId);
+    return {
+      kind: 'ok',
+      conversation: withSessionSpend(updated ?? { ...conversation, budget: next }),
+      wasBudgetPaused,
+    };
+  });
 }
 
 /**
