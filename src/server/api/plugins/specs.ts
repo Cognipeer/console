@@ -8,6 +8,10 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "tools" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('tools') } as const;
 
 const logger = createLogger('api:specs');
 
@@ -26,7 +30,7 @@ export const specsApiPlugin: FastifyPluginAsync = async (app) => {
    * Body: { url: string, format?: 'auto' | 'openapi' | 'postman' }
    * Returns: { content, contentType, detectedFormat }
    */
-  app.post('/specs/fetch', withApiRequestContext(async (request, reply) => {
+  app.post('/specs/fetch', GATE, withApiRequestContext(async (request, reply) => {
     try {
       // Auth + tenant/project binding (import is a project-scoped action).
       await requireProjectContextForRequest(request);

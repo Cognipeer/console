@@ -15,6 +15,10 @@ import {
   setSessionCookies,
   withApiRequestContext,
 } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "license" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('license') } as const;
 
 const logger = createLogger('api:license');
 
@@ -23,7 +27,7 @@ function canManageLicense(role: string): boolean {
 }
 
 export const licenseApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get('/license', withApiRequestContext(async (request, reply) => {
+  app.get('/license', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const db = await getDatabase();
@@ -60,7 +64,7 @@ export const licenseApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/license', withApiRequestContext(async (request, reply) => {
+  app.post('/license', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canManageLicense(session.userRole)) {
@@ -138,7 +142,7 @@ export const licenseApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/license', withApiRequestContext(async (request, reply) => {
+  app.delete('/license', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canManageLicense(session.userRole)) {

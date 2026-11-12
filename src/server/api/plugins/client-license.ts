@@ -25,6 +25,10 @@ import { getDatabase } from '@/lib/database';
 import { type EffectiveLicense, LicenseManager } from '@/lib/license/license-manager';
 import { invalidateTenantLicenseState } from '@/lib/limits/invalidate';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "license" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('license') } as const;
 
 const logger = createLogger('api:client-license');
 
@@ -41,7 +45,7 @@ function sanitizeLicense(license: EffectiveLicense): Omit<EffectiveLicense, 'pay
 }
 
 export const clientLicenseApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get('/client/v1/license', withClientApiRequestContext(async (_request, reply, auth) => {
+  app.get('/client/v1/license', GATE, withClientApiRequestContext(async (_request, reply, auth) => {
     try {
       const db = await getDatabase();
       const tenant = await db.findTenantById(auth.tenantId);
@@ -64,7 +68,7 @@ export const clientLicenseApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/client/v1/license', withClientApiRequestContext(async (request, reply, auth) => {
+  app.post('/client/v1/license', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       const body = readJsonBody<{ licenseKey?: string }>(request);
       if (!body.licenseKey || body.licenseKey.trim().length < 20) {
@@ -112,7 +116,7 @@ export const clientLicenseApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/client/v1/license', withClientApiRequestContext(async (_request, reply, auth) => {
+  app.delete('/client/v1/license', GATE, withClientApiRequestContext(async (_request, reply, auth) => {
     try {
       const db = await getDatabase();
       const tenant = await db.findTenantById(auth.tenantId);
