@@ -42,6 +42,17 @@ async function renderHook<T>(client: QueryClient, hook: () => T): Promise<{ curr
   return result;
 }
 
+/**
+ * `newTestQueryClient` drops an unobserved entry at once (gcTime 0). The detail entry that `update` writes has no
+ * observer here, so under a slow runner it can be dropped while the mutation still awaits its refetches; keep it
+ * for the length of the test, since what is pinned is that `update` writes it.
+ */
+function clientKeepingEntries(): QueryClient {
+  const client = newTestQueryClient();
+  client.setDefaultOptions({ ...client.getDefaultOptions(), queries: { ...client.getDefaultOptions().queries, gcTime: 60_000 } });
+  return client;
+}
+
 const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 20)); });
 
 afterEach(async () => {
@@ -92,7 +103,7 @@ describe('Prompt Studio hooks', () => {
   });
 
   it('create refreshes the list; update puts the saved prompt in the cache; delete drops it', async () => {
-    const client = newTestQueryClient();
+    const client = clientKeepingEntries();
     const probe = await renderHook(client, () => ({
       list: usePromptList(),
       create: useCreatePrompt(),
