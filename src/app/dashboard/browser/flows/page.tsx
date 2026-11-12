@@ -8,13 +8,22 @@
  * inputs, run history) lives on the detail page.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, Select, Textarea, TextInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useBrowserFlows,
+  useBrowserSessions,
+  useBrowsers,
+  useCreateBrowserFlow,
+  useDeleteBrowserFlow,
+  useRecordBrowserFlow,
+} from '@/lib/api/queries/browser';
 import {
   IconPlayerPlay,
   IconPlus,
@@ -26,7 +35,7 @@ import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
-import type { BrowserFlowView, BrowserSessionView, BrowserView } from '@/lib/services/browser';
+import type { BrowserFlowView } from '@/lib/services/browser';
 
 interface CreateForm {
   name: string;
@@ -48,15 +57,21 @@ export default function BrowserFlowsPage() {
   const router = useRouter();
   const deleteResource = useDeleteResource();
   const tSafe = useTranslations('common.confirm.dataSafety');
-  const [flows, setFlows] = useState<BrowserFlowView[]>([]);
-  const [browsers, setBrowsers] = useState<BrowserView[]>([]);
-  const [sessions, setSessions] = useState<BrowserSessionView[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  // A failed flow list is told in a notification; the browsers and sessions only feed the names and the create form.
+  const flowsQuery = useBrowserFlows({ notifyOnError: 'Error' });
+  const browsersQuery = useBrowsers({ status: 'active' });
+  const sessionsQuery = useBrowserSessions();
+  const flows = useMemo(() => flowsQuery.data ?? [], [flowsQuery.data]);
+  const browsers = useMemo(() => browsersQuery.data ?? [], [browsersQuery.data]);
+  const sessions = useMemo(() => sessionsQuery.data ?? [], [sessionsQuery.data]);
+  const loading = flowsQuery.isPending || browsersQuery.isPending || sessionsQuery.isPending;
+  const refreshing = flowsQuery.isFetching || browsersQuery.isFetching || sessionsQuery.isFetching;
+  const createFlow = useCreateBrowserFlow();
+  const recordFlow = useRecordBrowserFlow();
+  const deleteFlow = useDeleteBrowserFlow();
   const [statusFilter, setStatusFilter] = useState('all');
   const [query, setQuery] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
 
   const form = useForm<CreateForm>({
     initialValues: { name: '', description: '', browserId: '', sessionId: '' },
@@ -69,34 +84,7 @@ export default function BrowserFlowsPage() {
     },
   });
 
-  const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const [flowsRes, browsersRes, sessionsRes] = await Promise.all([
-        fetch('/api/browser/flows', { cache: 'no-store' }),
-        fetch('/api/browser/browsers?status=active', { cache: 'no-store' }),
-        fetch('/api/browser/sessions', { cache: 'no-store' }),
-      ]);
-      if (!flowsRes.ok) throw new Error('Failed to load flows');
-      const flowsData = await flowsRes.json();
-      setFlows(flowsData.flows ?? []);
-      setBrowsers(browsersRes.ok ? (await browsersRes.json()).browsers ?? [] : []);
-      setSessions(sessionsRes.ok ? (await sessionsRes.json()).sessions ?? [] : []);
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed to load flows',
-      });
-    } finally {
-      setRefreshing(false);
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const load = () => Promise.all([flowsQuery.refetch(), browsersQuery.refetch(), sessionsQuery.refetch()]);
 
   /**
    * Sessions worth recording: ones that actually did something.
@@ -136,50 +124,38 @@ export default function BrowserFlowsPage() {
   );
 
   async function handleCreate(values: CreateForm) {
-    setCreating(true);
     try {
       // Two ways in, one dialog: record an existing session, or start empty
       // and add steps by hand on the detail page.
-      const endpoint = values.sessionId ? '/api/browser/flows/record' : '/api/browser/flows';
-      const body = values.sessionId
-        ? {
+      const { flow } = values.sessionId
+        ? await recordFlow.mutateAsync({
             sessionId: values.sessionId,
             name: values.name.trim(),
             description: values.description.trim() || undefined,
-          }
-        : {
+          })
+        : await createFlow.mutateAsync({
             name: values.name.trim(),
             description: values.description.trim() || undefined,
             browserId: values.browserId,
             steps: [],
-          };
-
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Failed to create flow');
+          });
 
       notifications.show({
         color: 'teal',
         title: values.sessionId ? 'Recorded' : 'Created',
         message: values.sessionId
-          ? `${data.flow.steps.length} step(s) captured from the session`
+          ? `${flow.steps.length} step(s) captured from the session`
           : 'Flow created — add steps to it next',
       });
       setCreateOpen(false);
       form.reset();
-      router.push(`/dashboard/browser/flows/${data.flow.id}`);
+      router.push(`/dashboard/browser/flows/${flow.id}`);
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
-    } finally {
-      setCreating(false);
     }
   }
 
@@ -191,10 +167,8 @@ export default function BrowserFlowsPage() {
       id: target.id,
       extraWarning: tSafe('browserFlowExtra', { steps: target.steps.length }),
       action: async () => {
-        const res = await fetch(`/api/browser/flows/${target.id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error(await res.text());
+        await deleteFlow.mutateAsync(target.id);
         notifications.show({ color: 'teal', title: 'Deleted', message: 'Flow removed' });
-        await load();
       },
     });
   }
@@ -302,7 +276,7 @@ export default function BrowserFlowsPage() {
             { value: 'disabled', label: 'Disabled' },
           ],
         }]}
-        onRefresh={load}
+        onRefresh={() => void load()}
         refreshing={refreshing}
         rowActions={(flow) => [
           {
@@ -339,7 +313,7 @@ export default function BrowserFlowsPage() {
         primaryAction={{
           label: form.values.sessionId ? 'Record flow' : 'Create flow',
           color: 'teal',
-          loading: creating,
+          loading: createFlow.isPending || recordFlow.isPending,
           onClick: () => form.onSubmit(handleCreate)(),
         }}
         secondaryAction={{ label: 'Cancel', onClick: () => setCreateOpen(false) }}

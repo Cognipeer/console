@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Alert, Button, Text, Tooltip, VisuallyHidden } from '@mantine/core';
@@ -51,6 +51,7 @@ import { formatRelative } from '@/components/iam/timeFormat';
 import { buildDashboardDateSearchParams } from '@/lib/utils/dashboardDateFilter';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { useTracingAgentDirectory, useTracingAgentsHealth } from '@/lib/api/queries/tracing';
 
 interface HealthResponse {
   range: { fromMs: number; toMs: number; bucketMs: number; sparkFromMs?: number };
@@ -68,11 +69,6 @@ interface DirectoryResponse {
 // Both endpoints are a "top N" list (the sub-nav and pickers use the directory too), not a paginated
 // one: a generous cap covers realistic per-tenant agent counts without server-side pagination.
 const LIST_LIMIT = 200;
-
-type HealthState =
-  | { status: 'loading'; data: HealthResponse | null }
-  | { status: 'error'; message: string | null }
-  | { status: 'ready'; data: HealthResponse };
 
 function SortHeader({
   label,
@@ -140,11 +136,6 @@ export default function TracingAgentsPage() {
   const locale = useLocale();
   const { openDocs } = useDocsDrawer();
   const [dateFilter, setDateFilter] = useHealthDateFilter('last_day');
-  const [health, setHealth] = useState<HealthState>({ status: 'loading', data: null });
-  const [directory, setDirectory] = useState<AgentDirectoryApiRow[] | null>(null);
-  const [directoryLoading, setDirectoryLoading] = useState(true);
-  const [directoryError, setDirectoryError] = useState(false);
-  const [attempt, setAttempt] = useState(0);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [healthFilter, setHealthFilter] = useState<AgentHealthFilter>('all');
@@ -157,61 +148,31 @@ export default function TracingAgentsPage() {
     return params.toString();
   }, [dateFilter]);
 
-  // The health overview follows the selected period.
-  useEffect(() => {
-    const controller = new AbortController();
-    setHealth((previous) => ({ status: 'loading', data: previous.status === 'error' ? null : previous.data }));
-    const load = async () => {
-      try {
-        const response = await fetch(`/api/tracing/agents/health?${periodQuery}`, {
-          signal: controller.signal,
-          cache: 'no-store',
-        });
-        if (!response.ok) {
-          const body = (await response.json().catch(() => ({}))) as { error?: unknown };
-          throw new Error(typeof body.error === 'string' ? body.error : '');
-        }
-        const data = (await response.json()) as HealthResponse;
-        if (!controller.signal.aborted) setHealth({ status: 'ready', data });
-      } catch (error) {
-        if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) return;
-        setHealth({ status: 'error', message: error instanceof Error && error.message ? error.message : null });
-      }
-    };
-    void load();
-    return () => controller.abort();
-  }, [periodQuery, attempt]);
+  // The health overview follows the selected period; rows stay while the next period loads.
+  const healthQuery = useTracingAgentsHealth<HealthResponse>(periodQuery);
+  const healthFailed = healthQuery.isError;
+  const healthData = healthFailed ? null : (healthQuery.data ?? null);
+  // An error is hidden while the retry runs, and then shows the skeleton like a first load.
+  const loading = healthQuery.isFetching && healthData === null;
+  const refreshing = healthQuery.isFetching && healthData !== null;
+  const healthError = healthFailed && !healthQuery.isFetching;
+  const healthErrorMessage = healthQuery.error instanceof Error && healthQuery.error.message ? healthQuery.error.message : null;
 
   // The directory only adds each agent's latest status (and agents the rollup has nothing for): it is
   // independent of the period, and the list does not wait for it.
-  useEffect(() => {
-    const controller = new AbortController();
-    setDirectoryLoading(true);
-    setDirectoryError(false);
-    const load = async () => {
-      try {
-        const response = await fetch(`/api/tracing/agents?limit=${LIST_LIMIT}`, {
-          signal: controller.signal,
-          cache: 'no-store',
-        });
-        if (!response.ok) throw new Error('directory');
-        const data = (await response.json()) as DirectoryResponse;
-        if (!controller.signal.aborted) {
-          setDirectory(Array.isArray(data.agents) ? data.agents : []);
-          setDirectoryLoading(false);
-        }
-      } catch (error) {
-        if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) return;
-        setDirectory(null);
-        setDirectoryError(true);
-        setDirectoryLoading(false);
-      }
-    };
-    void load();
-    return () => controller.abort();
-  }, [attempt]);
+  const directoryQuery = useTracingAgentDirectory<DirectoryResponse>(LIST_LIMIT);
+  const directoryError = directoryQuery.isError && !directoryQuery.isFetching;
+  const directoryLoading = directoryQuery.isFetching;
+  const directory = useMemo(
+    () => (directoryQuery.isError || !directoryQuery.data ? null : Array.isArray(directoryQuery.data.agents) ? directoryQuery.data.agents : []),
+    [directoryQuery.isError, directoryQuery.data],
+  );
 
-  const healthData = health.status === 'error' ? null : health.data;
+  const reload = () => {
+    void healthQuery.refetch();
+    void directoryQuery.refetch();
+  };
+
   const range = healthData?.range ?? null;
 
   const rows = useMemo(
@@ -477,9 +438,6 @@ export default function TracingAgentsPage() {
     },
   ];
 
-  const loading = health.status === 'loading' && health.data === null;
-  const refreshing = health.status === 'loading' && health.data !== null;
-
   return (
     <PageContainer>
       <PageHeader
@@ -501,11 +459,11 @@ export default function TracingAgentsPage() {
         }
       />
 
-      {health.status === 'error' ? (
+      {healthError ? (
         <Alert color="red" variant="light" icon={<IconAlertCircle size={16} />} title={t('agents.loadError')}>
           <div className="ds-row-between" style={{ gap: 12 }}>
-            <span style={{ fontSize: 13 }}>{health.message}</span>
-            <Button size="xs" variant="default" onClick={() => setAttempt((n) => n + 1)}>
+            <span style={{ fontSize: 13 }}>{healthErrorMessage}</span>
+            <Button size="xs" variant="default" onClick={() => reload()}>
               {t('common.retry')}
             </Button>
           </div>
@@ -522,7 +480,7 @@ export default function TracingAgentsPage() {
         <Alert color="yellow" variant="light" icon={<IconAlertCircle size={16} />} data-testid="agents-directory-error">
           <div className="ds-row-between" style={{ gap: 12 }}>
             <span style={{ fontSize: 13 }}>{t('agents.directoryUnavailable')}</span>
-            <Button size="xs" variant="default" onClick={() => setAttempt((n) => n + 1)}>
+            <Button size="xs" variant="default" onClick={() => reload()}>
               {t('common.retry')}
             </Button>
           </div>
@@ -569,7 +527,7 @@ export default function TracingAgentsPage() {
                 },
               ]),
         ]}
-        onRefresh={() => setAttempt((n) => n + 1)}
+        onRefresh={() => reload()}
         refreshing={refreshing}
         empty={{
           icon: <IconRobot size={26} stroke={1.7} />,

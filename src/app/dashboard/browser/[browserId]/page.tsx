@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import {
@@ -33,6 +33,19 @@ import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { ResourceUsageSection, useConfirm, useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useBrowser,
+  useBrowserSessions,
+  useCloseBrowserSession,
+  useCreateBrowserSession,
+  useDeleteBrowserSession,
+  useRecordBrowserFlow,
+  useSaveSessionProfile,
+  useSessionAction,
+  useSetBrowserData,
+  useUpdateBrowser,
+} from '@/lib/api/queries/browser';
 import {
   IconAlertCircle,
   IconCamera,
@@ -114,10 +127,22 @@ export default function BrowserDetailPage() {
   const { confirmAction } = useConfirm();
   const tSafe = useTranslations('common.confirm.dataSafety');
 
-  const [browser, setBrowser] = useState<BrowserView | null>(null);
-  const [sessions, setSessions] = useState<BrowserSessionView[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  // A failed browser read is told in a notification and the page says the browser was not found;
+  // a failed session read just shows no sessions.
+  const browserQuery = useBrowser(browserId, { notifyOnError: 'Error' });
+  const sessionsQuery = useBrowserSessions(`browserId=${encodeURIComponent(browserId)}`, { enabled: Boolean(browserId) });
+  const browser = browserQuery.data ?? null;
+  const sessions = useMemo(() => sessionsQuery.data ?? [], [sessionsQuery.data]);
+  const loading = browserQuery.isPending || sessionsQuery.isPending;
+  const refreshing = browserQuery.isFetching || sessionsQuery.isFetching;
+  const setBrowser = useSetBrowserData();
+  const updateBrowser = useUpdateBrowser();
+  const deleteSession = useDeleteBrowserSession();
+  const closeSession = useCloseBrowserSession();
+  const createSession = useCreateBrowserSession();
+  const sessionAction = useSessionAction();
+  const recordFlow = useRecordBrowserFlow();
+  const saveSessionProfile = useSaveSessionProfile();
 
   const [activeTab, setActiveTab] = useState<string>('overview');
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -127,11 +152,8 @@ export default function BrowserDetailPage() {
   /** Session queued for recording into a flow, and the name being given to it. */
   const [recordTarget, setRecordTarget] = useState<BrowserSessionView | null>(null);
   const [recordName, setRecordName] = useState('');
-  const [recording, setRecording] = useState(false);
-  const [saving, setSaving] = useState(false);
 
   const [createOpened, createHandlers] = useDisclosure(false);
-  const [creating, setCreating] = useState(false);
   const [drawerSession, setDrawerSession] = useState<BrowserSessionView | null>(null);
   const [drawerOpened, drawerHandlers] = useDisclosure(false);
 
@@ -146,40 +168,7 @@ export default function BrowserDetailPage() {
     },
   });
 
-  const loadAll = useCallback(async () => {
-    if (!browserId) return;
-    setRefreshing(true);
-    try {
-      const [browserRes, sessionsRes] = await Promise.all([
-        fetch(`/api/browser/browsers/${encodeURIComponent(browserId)}`, { cache: 'no-store' }),
-        fetch(`/api/browser/sessions?browserId=${encodeURIComponent(browserId)}`, { cache: 'no-store' }),
-      ]);
-
-      if (!browserRes.ok) {
-        const body = await browserRes.json().catch(() => ({}));
-        throw new Error(body.error || 'Failed to load browser');
-      }
-
-      const browserData = await browserRes.json();
-      const sessionsData = sessionsRes.ok ? await sessionsRes.json() : { sessions: [] };
-
-      setBrowser(browserData.browser ?? null);
-      setSessions(sessionsData.sessions ?? []);
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed to load',
-      });
-    } finally {
-      setRefreshing(false);
-      setLoading(false);
-    }
-  }, [browserId]);
-
-  useEffect(() => {
-    loadAll();
-  }, [loadAll]);
+  const loadAll = () => Promise.all([browserQuery.refetch(), sessionsQuery.refetch()]);
 
   useEffect(() => {
     if (browser) {
@@ -210,18 +199,11 @@ export default function BrowserDetailPage() {
    */
   async function handleRecordFlow() {
     if (!recordTarget) return;
-    setRecording(true);
     try {
-      const res = await fetch('/api/browser/flows/record', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          sessionId: recordTarget.id,
-          name: recordName.trim() || `Flow from ${recordTarget.name || recordTarget.sessionKey}`,
-        }),
+      const data = await recordFlow.mutateAsync({
+        sessionId: recordTarget.id,
+        name: recordName.trim() || `Flow from ${recordTarget.name || recordTarget.sessionKey}`,
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Recording failed');
       notifications.show({
         color: 'teal',
         title: 'Flow recorded',
@@ -234,10 +216,8 @@ export default function BrowserDetailPage() {
       notifications.show({
         color: 'red',
         title: 'Could not record',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
-    } finally {
-      setRecording(false);
     }
   }
 
@@ -250,35 +230,17 @@ export default function BrowserDetailPage() {
    */
   async function handleSaveProfile(session: BrowserSessionView) {
     try {
-      const exported = await fetch(
-        `/api/browser/sessions/${encodeURIComponent(session.sessionKey)}/profile`,
-        { cache: 'no-store' },
-      );
-      const exportedData = await exported.json().catch(() => ({}));
-      if (!exported.ok) throw new Error(exportedData.error || 'Could not export the session');
-
-      const saved = await fetch(`/api/browser/browsers/${browserId}/profile`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          storageState: exportedData.storageState,
-          fileName: `session-${session.sessionKey}.json`,
-        }),
-      });
-      const savedData = await saved.json().catch(() => ({}));
-      if (!saved.ok) throw new Error(savedData.error || 'Could not attach the profile');
-
+      const saved = await saveSessionProfile.mutateAsync({ browserId, sessionKey: session.sessionKey });
       notifications.show({
         color: 'teal',
         title: 'Profile saved',
-        message: `${savedData.profile.cookieCount} cookie(s) stored. New sessions start signed in.`,
+        message: `${saved.profile.cookieCount} cookie(s) stored. New sessions start signed in.`,
       });
-      await loadAll();
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
     }
   }
@@ -298,63 +260,42 @@ export default function BrowserDetailPage() {
 
   const handleEditSubmit = async (values: EditBrowserForm) => {
     if (!browser) return;
-    setSaving(true);
     try {
-      const res = await fetch(`/api/browser/browsers/${browser.id}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          name: values.name.trim(),
-          description: values.description.trim() || undefined,
-          defaultModelKey: values.defaultModelKey.trim() || undefined,
-          artifactBucketKey: values.artifactBucketKey.trim() || undefined,
-          status: values.status,
-        }),
+      await updateBrowser.mutateAsync({
+        id: browser.id,
+        name: values.name.trim(),
+        description: values.description.trim() || undefined,
+        defaultModelKey: values.defaultModelKey.trim() || undefined,
+        artifactBucketKey: values.artifactBucketKey.trim() || undefined,
+        status: values.status,
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || 'Failed to update');
-      }
       notifications.show({ color: 'teal', title: 'Updated', message: 'Browser updated' });
       editHandlers.close();
-      await loadAll();
     } catch (err) {
-      notifications.show({ color: 'red', title: 'Error', message: err instanceof Error ? err.message : 'Failed' });
-    } finally {
-      setSaving(false);
+      notifications.show({ color: 'red', title: 'Error', message: errorMessage(err, 'Failed') });
     }
   };
 
   const handleCreateSession = async () => {
     if (!browser) return;
-    setCreating(true);
     try {
       const allowList = sessionForm.values.allowList.split(',').map((s) => s.trim()).filter(Boolean);
       const blockList = sessionForm.values.blockList.split(',').map((s) => s.trim()).filter(Boolean);
-      const res = await fetch('/api/browser/sessions', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          browserId: browser.id,
-          name: sessionForm.values.name || undefined,
-          artifactBucketKey: sessionForm.values.artifactBucketKey || undefined,
-          config: {
-            access: {
-              allowList: allowList.length > 0 ? allowList : undefined,
-              blockList: blockList.length > 0 ? blockList : undefined,
-            },
+      const created = await createSession.mutateAsync({
+        browserId: browser.id,
+        name: sessionForm.values.name || undefined,
+        artifactBucketKey: sessionForm.values.artifactBucketKey || undefined,
+        config: {
+          access: {
+            allowList: allowList.length > 0 ? allowList : undefined,
+            blockList: blockList.length > 0 ? blockList : undefined,
           },
-        }),
+        },
       });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error || 'Failed');
-      const created: BrowserSessionView = body.session;
       if (sessionForm.values.url.trim()) {
-        await fetch(`/api/browser/sessions/${created.sessionKey}/actions`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ type: 'goto', url: sessionForm.values.url.trim() }),
-        }).catch(() => undefined);
+        await sessionAction
+          .mutateAsync({ sessionKey: created.sessionKey, action: { type: 'goto', url: sessionForm.values.url.trim() } })
+          .catch(() => undefined);
       }
       notifications.show({ color: 'teal', title: 'Created', message: `Session ${created.sessionKey}` });
       createHandlers.close();
@@ -363,9 +304,7 @@ export default function BrowserDetailPage() {
       setDrawerSession(created);
       drawerHandlers.open();
     } catch (err) {
-      notifications.show({ color: 'red', title: 'Error', message: err instanceof Error ? err.message : 'Failed' });
-    } finally {
-      setCreating(false);
+      notifications.show({ color: 'red', title: 'Error', message: errorMessage(err, 'Failed') });
     }
   };
 
@@ -376,9 +315,7 @@ export default function BrowserDetailPage() {
       confirmLabel: tSafe('closeSession.confirm'),
       tone: 'warning',
       action: async () => {
-        const res = await fetch(`/api/browser/sessions/${s.sessionKey}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error((await res.text()) || 'Failed to close session');
-        await loadAll();
+        await closeSession.mutateAsync(s.sessionKey);
       },
     });
   };
@@ -388,9 +325,7 @@ export default function BrowserDetailPage() {
       noun: tSafe('nouns.browserSession'),
       name: s.name || s.sessionKey,
       action: async () => {
-        const res = await fetch(`/api/browser/sessions/by-id/${s.id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error((await res.text()) || 'Failed to delete session');
-        await loadAll();
+        await deleteSession.mutateAsync(s.id);
       },
     });
   };
@@ -424,7 +359,7 @@ export default function BrowserDetailPage() {
         size="sm"
         leftSection={<IconRefresh size={14} stroke={1.7} />}
         loading={refreshing}
-        onClick={loadAll}
+        onClick={() => void loadAll()}
       >
         Refresh
       </Button>
@@ -639,7 +574,7 @@ export default function BrowserDetailPage() {
         primaryAction={{
           label: 'Record flow',
           color: 'teal',
-          loading: recording,
+          loading: recordFlow.isPending,
           onClick: handleRecordFlow,
         }}
         secondaryAction={{ label: 'Cancel', onClick: () => setRecordTarget(null) }}
@@ -674,7 +609,7 @@ export default function BrowserDetailPage() {
         primaryAction={{
           label: 'Save changes',
           color: 'teal',
-          loading: saving,
+          loading: updateBrowser.isPending,
           onClick: () => editForm.onSubmit(handleEditSubmit)(),
         }}
         secondaryAction={{ label: 'Cancel', onClick: editHandlers.close }}
@@ -730,7 +665,7 @@ export default function BrowserDetailPage() {
         primaryAction={{
           label: 'Start session',
           color: 'teal',
-          loading: creating,
+          loading: createSession.isPending,
           onClick: handleCreateSession,
         }}
         secondaryAction={{ label: 'Cancel', onClick: createHandlers.close }}
@@ -830,6 +765,7 @@ function SessionPreviewDrawer({
     let cancelled = false;
     const tick = async () => {
       try {
+        // Raw on purpose: the live screenshot is an image (a blob), not JSON.
         const res = await fetch(`/api/browser/sessions/${session.sessionKey}/screenshot/live`, { cache: 'no-store' });
         if (!res.ok) return;
         const blob = await res.blob();

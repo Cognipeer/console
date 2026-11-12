@@ -16,7 +16,7 @@
  * fills the composer with that element's target.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   ActionIcon,
@@ -41,7 +41,7 @@ import {
   IconX,
 } from '@tabler/icons-react';
 import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
-import type { BrowserSessionView, BrowserView } from '@/lib/services/browser';
+import type { BrowserSessionView } from '@/lib/services/browser';
 import ActionComposer from '../_workbench/ActionComposer';
 import StagePanel from '../_workbench/StagePanel';
 import {
@@ -57,6 +57,8 @@ import { useDriveSession, useFillMain, useWorkbenchStage } from '../_workbench/u
 import classes from '../_workbench/workbench.module.css';
 import { useConfirm } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useBrowsers, useRecordBrowserFlow } from '@/lib/api/queries/browser';
 
 interface LogEntry {
   id: number;
@@ -72,7 +74,9 @@ export default function BrowserPlaygroundPage() {
   const router = useRouter();
   const shell = useFillMain();
 
-  const [browsers, setBrowsers] = useState<BrowserView[]>([]);
+  const browsersQuery = useBrowsers({ status: 'active' });
+  const browsers = useMemo(() => browsersQuery.data ?? [], [browsersQuery.data]);
+  const recordFlowMutation = useRecordBrowserFlow();
   const [browserId, setBrowserId] = useState('');
   const [sessionKey, setSessionKey] = useState<string | undefined>(undefined);
 
@@ -82,7 +86,6 @@ export default function BrowserPlaygroundPage() {
 
   const [recordOpen, setRecordOpen] = useState(false);
   const [recordName, setRecordName] = useState('');
-  const [recording, setRecording] = useState(false);
 
   const stage = useWorkbenchStage(sessionKey);
   const drive = useDriveSession({
@@ -92,21 +95,15 @@ export default function BrowserPlaygroundPage() {
     onStarted: () => setLog([]),
   });
 
+  // The overview links here with the profile you clicked from. Read it off
+  // the URL rather than through `useSearchParams`, which would need a
+  // Suspense boundary to survive `next build`.
   useEffect(() => {
-    void (async () => {
-      const res = await fetch('/api/browser/browsers?status=active', { cache: 'no-store' });
-      if (!res.ok) return;
-      const list: BrowserView[] = (await res.json()).browsers ?? [];
-      setBrowsers(list);
-      if (list.length === 0) return;
-      // The overview links here with the profile you clicked from. Read it off
-      // the URL rather than through `useSearchParams`, which would need a
-      // Suspense boundary to survive `next build`.
-      const wanted = new URLSearchParams(window.location.search).get('browserId');
-      const preselected = wanted && list.some((item) => item.id === wanted) ? wanted : list[0].id;
-      setBrowserId((current) => current || preselected);
-    })();
-  }, []);
+    if (browsers.length === 0) return;
+    const wanted = new URLSearchParams(window.location.search).get('browserId');
+    const preselected = wanted && browsers.some((item) => item.id === wanted) ? wanted : browsers[0].id;
+    setBrowserId((current) => current || preselected);
+  }, [browsers]);
 
   async function startSession() {
     const session = await drive.start();
@@ -166,18 +163,11 @@ export default function BrowserPlaygroundPage() {
   async function recordFlow() {
     const session: BrowserSessionView | null = drive.session;
     if (!session) return;
-    setRecording(true);
     try {
-      const res = await fetch('/api/browser/flows/record', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          sessionId: session.id,
-          name: recordName.trim() || 'Playground flow',
-        }),
+      const data = await recordFlowMutation.mutateAsync({
+        sessionId: session.id,
+        name: recordName.trim() || 'Playground flow',
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Recording failed');
       notifications.show({
         color: 'teal',
         title: 'Flow recorded',
@@ -188,10 +178,8 @@ export default function BrowserPlaygroundPage() {
       notifications.show({
         color: 'red',
         title: 'Could not record',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
-    } finally {
-      setRecording(false);
     }
   }
 
@@ -342,7 +330,7 @@ export default function BrowserPlaygroundPage() {
         primaryAction={{
           label: 'Record flow',
           color: 'teal',
-          loading: recording,
+          loading: recordFlowMutation.isPending,
           onClick: recordFlow,
         }}
         secondaryAction={{ label: 'Cancel', onClick: () => setRecordOpen(false) }}

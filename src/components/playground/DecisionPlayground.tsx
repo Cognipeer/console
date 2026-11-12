@@ -18,6 +18,7 @@ import {
   Textarea,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { playgroundErrorMessage, useDecisionPlayground } from '@/lib/api/queries/playground';
 import {
   IconAlertTriangle,
   IconPlayerPlay,
@@ -205,7 +206,8 @@ export default function DecisionPlayground({ modelKey }: DecisionPlaygroundProps
   const [input, setInput] = useState(SAMPLE_INPUT);
   const [questions, setQuestions] = useState<QuestionDraft[]>(sampleQuestions);
   const [includeRationale, setIncludeRationale] = useState(false);
-  const [running, setRunning] = useState(false);
+  const decision = useDecisionPlayground<DecisionResponse>();
+  const running = decision.isPending;
   const [response, setResponse] = useState<DecisionResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -232,23 +234,13 @@ export default function DecisionPlayground({ modelKey }: DecisionPlaygroundProps
       return;
     }
 
-    setRunning(true);
     setResponse(null);
     try {
-      const res = await fetch('/api/dashboard/playground/decisions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(payload.error || `Request failed (${res.status})`);
-      setResponse(payload as DecisionResponse);
+      setResponse(await decision.mutateAsync(body));
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Decision failed';
+      const message = playgroundErrorMessage(err, 'Decision failed');
       setError(message);
       notifications.show({ color: 'red', title: 'Decision failed', message });
-    } finally {
-      setRunning(false);
     }
   };
 

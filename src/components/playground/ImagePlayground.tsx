@@ -16,6 +16,7 @@ import {
   Textarea,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { playgroundErrorMessage, useImagePlayground } from '@/lib/api/queries/playground';
 import {
   IconAlertTriangle,
   IconDownload,
@@ -51,7 +52,12 @@ export default function ImagePlayground({ modelKey, sizes }: ImagePlaygroundProp
   const [size, setSize] = useState<string>(sizeOptions[0] ?? '1024x1024');
   const [quality, setQuality] = useState<string>('');
   const [count, setCount] = useState<number | ''>(1);
-  const [running, setRunning] = useState(false);
+  const imageRequest = useImagePlayground<{
+    data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+    latencyMs?: number;
+    usage?: Record<string, number> | null;
+  }>();
+  const running = imageRequest.isPending;
   const [images, setImages] = useState<GeneratedEntry[]>([]);
   const [latency, setLatency] = useState<number | null>(null);
   const [usage, setUsage] = useState<Record<string, number> | null>(null);
@@ -76,7 +82,6 @@ export default function ImagePlayground({ modelKey, sizes }: ImagePlaygroundProp
       });
       return;
     }
-    setRunning(true);
     setError(null);
     for (const image of images) {
       if (image.b64) URL.revokeObjectURL(image.url);
@@ -86,24 +91,16 @@ export default function ImagePlayground({ modelKey, sizes }: ImagePlaygroundProp
     setUsage(null);
 
     try {
-      const response = await fetch('/api/dashboard/playground/images', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: modelKey,
-          prompt: prompt.trim(),
-          ...(typeof count === 'number' ? { n: count } : {}),
-          ...(size && size !== 'auto' ? { size } : {}),
-          ...(quality ? { quality } : {}),
-        }),
+      const payload = await imageRequest.mutateAsync({
+        model: modelKey,
+        prompt: prompt.trim(),
+        ...(typeof count === 'number' ? { n: count } : {}),
+        ...(size && size !== 'auto' ? { size } : {}),
+        ...(quality ? { quality } : {}),
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload.error || `Request failed (${response.status})`);
-      }
 
       const entries: GeneratedEntry[] = (payload.data ?? []).map(
-        (entry: { b64_json?: string; url?: string; revised_prompt?: string }) => {
+        (entry) => {
           if (entry.b64_json) {
             const bytes = Uint8Array.from(atob(entry.b64_json), (c) => c.charCodeAt(0));
             const blob = new Blob([bytes], { type: 'image/png' });
@@ -121,11 +118,9 @@ export default function ImagePlayground({ modelKey, sizes }: ImagePlaygroundProp
       setLatency(typeof payload.latencyMs === 'number' ? payload.latencyMs : null);
       setUsage(payload.usage ?? null);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Image generation failed';
+      const message = playgroundErrorMessage(err, 'Image generation failed');
       setError(message);
       notifications.show({ color: 'red', title: 'Image generation failed', message });
-    } finally {
-      setRunning(false);
     }
   };
 

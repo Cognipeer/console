@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ActionIcon, Button, Group, Text, TextInput, Tooltip } from '@mantine/core';
 import {
@@ -25,7 +25,8 @@ import {
   formatRelativeTime,
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
-import { SkipTrail, type OffsetPageInfo } from '@/lib/shared/offsetPaging';
+import { type OffsetPageInfo } from '@/lib/shared/offsetPaging';
+import { useRememberPageStart, useSkipTrail, useTracingThreads } from '@/lib/api/queries/tracing';
 
 dayjs.extend(relativeTime);
 
@@ -62,13 +63,6 @@ export default function TracingThreadsPage() {
   const searchParams = useSearchParams()!;
   const th = useTranslations('tracingHealth');
   const { openDocs } = useDocsDrawer();
-  const [threads, setThreads] = useState<ThreadRecord[]>([]);
-  const [totalThreads, setTotalThreads] = useState(0);
-  // Where each page starts, and whether a list without a total has a next page (null: it has a total).
-  const skipTrail = useRef(new SkipTrail());
-  const [moreAfter, setMoreAfter] = useState<boolean | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize] = useState(DEFAULT_PAGE_SIZE);
   const [query, setQuery] = useState('');
@@ -80,18 +74,21 @@ export default function TracingThreadsPage() {
     () => searchParams.get('metadataValue')?.trim() || '',
   );
 
-  const buildQueryParams = useCallback(() => {
+  // Where each page starts: another search is another list, so the trail starts over with the filters.
+  const skipTrail = useSkipTrail(JSON.stringify([query, statusFilter, metadataKey, metadataValue]));
+
+  const queryString = (() => {
     const params = new URLSearchParams();
     params.set('limit', pageSize.toString());
-    params.set('skip', skipTrail.current.skipFor(page, pageSize).toString());
+    params.set('skip', skipTrail.skipFor(page, pageSize).toString());
     if (query) params.set('threadId', query.trim());
     if (statusFilter !== 'all') params.set('status', statusFilter);
     if (metadataKey.trim() && metadataValue.trim()) {
       params.set('metadataKey', metadataKey.trim());
       params.set('metadataValue', metadataValue.trim());
     }
-    return params;
-  }, [page, pageSize, query, statusFilter, metadataKey, metadataValue]);
+    return params.toString();
+  })();
 
   useEffect(() => {
     const statusFromUrl = statusParam(searchParams.get('status'));
@@ -102,52 +99,26 @@ export default function TracingThreadsPage() {
     setMetadataValue((current) => (current === metadataValueParam ? current : metadataValueParam));
   }, [searchParams]);
 
-  const fetchThreads = useCallback(
-    async (isRefresh = false, signal?: AbortSignal) => {
-      try {
-        if (isRefresh) setRefreshing(true);
-        else setLoading(true);
-
-        const params = buildQueryParams();
-        const response = await fetch(
-          `/api/tracing/threads?${params.toString()}`,
-          { signal },
-        );
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.error || 'Failed to fetch threads');
-        }
-        const data: ThreadsResponse = await response.json();
-        setThreads(data.threads || []);
-        skipTrail.current.remember(page, data);
-        setTotalThreads(data.total ?? 0);
-        setMoreAfter(typeof data.total === 'number' ? null : data.hasMore === true);
-      } catch (error) {
-        if (error instanceof DOMException && error.name === 'AbortError') return;
-        console.error('Failed to load threads:', error);
-        setThreads([]);
-        setTotalThreads(0);
-        setMoreAfter(null);
-      } finally {
-        if (!signal?.aborted) {
-          setLoading(false);
-          setRefreshing(false);
-        }
-      }
-    },
-    [buildQueryParams, page],
-  );
-
-  // Another search is another list: the pages of the last one no longer say where this one's start.
-  useEffect(() => {
-    skipTrail.current.reset();
-  }, [query, statusFilter, metadataKey, metadataValue]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void fetchThreads(false, controller.signal);
-    return () => controller.abort();
-  }, [fetchThreads]);
+  const threadsQuery = useTracingThreads<ThreadsResponse>(queryString);
+  useRememberPageStart(skipTrail, page, threadsQuery.data, threadsQuery.isPlaceholderData);
+  // A failed read shows an empty list, as an empty one does.
+  const threadsData = threadsQuery.isError ? undefined : threadsQuery.data;
+  const threads = threadsData?.threads ?? [];
+  const totalThreads = threadsData?.total ?? 0;
+  // Whether a list without a total has a next page (null: it has a total).
+  const moreAfter = threadsData && typeof threadsData.total !== 'number' ? threadsData.hasMore === true : null;
+  // The refresh button has its own spinner; a page or filter change shows the grid's loading state.
+  const [refreshRequested, setRefreshRequested] = useState(false);
+  const loading = threadsQuery.isFetching && !refreshRequested;
+  const refreshing = threadsQuery.isFetching && refreshRequested;
+  const refresh = async () => {
+    setRefreshRequested(true);
+    try {
+      await threadsQuery.refetch();
+    } finally {
+      setRefreshRequested(false);
+    }
+  };
 
   const totalPages = useMemo(
     () => Math.max(1, Math.ceil(totalThreads / pageSize)),
@@ -329,7 +300,7 @@ export default function TracingThreadsPage() {
             )}
           </Group>
         }
-        onRefresh={() => void fetchThreads(true)}
+        onRefresh={() => void refresh()}
         refreshing={refreshing}
         empty={{
           icon: <IconTimeline size={26} stroke={1.7} />,

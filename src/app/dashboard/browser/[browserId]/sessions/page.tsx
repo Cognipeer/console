@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import {
@@ -42,7 +42,18 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
 import ArtifactBucketSelect from '@/components/browser/ArtifactBucketSelect';
-import type { BrowserSessionEventView, BrowserSessionView } from '@/lib/services/browser';
+import type { BrowserSessionView } from '@/lib/services/browser';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useBrowserSessions,
+  useCloseBrowserSession,
+  useCreateBrowserSession,
+  useDeleteBrowserSession,
+  useExportSessionPdf,
+  usePersistSessionScreenshot,
+  useSessionAction,
+  useSessionEvents,
+} from '@/lib/api/queries/browser';
 
 interface CreateForm {
   name: string;
@@ -76,11 +87,19 @@ export default function BrowserSessionsPage() {
   const tSafe = useTranslations('common.confirm.dataSafety');
   const params = useParams<{ browserId: string }>();
   const browserId = params?.browserId ?? '';
-  const [sessions, setSessions] = useState<BrowserSessionView[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  // A failed read is told in a notification.
+  const sessionsQuery = useBrowserSessions(`browserId=${encodeURIComponent(browserId)}`, {
+    enabled: Boolean(browserId),
+    notifyOnError: 'Error',
+  });
+  const sessions = sessionsQuery.data ?? [];
+  const loading = sessionsQuery.isPending;
+  const refreshing = sessionsQuery.isFetching;
+  const createSession = useCreateBrowserSession();
+  const sessionAction = useSessionAction();
+  const closeSession = useCloseBrowserSession();
+  const deleteSession = useDeleteBrowserSession();
   const [createOpened, createHandlers] = useDisclosure(false);
-  const [creating, setCreating] = useState(false);
   const [drawerSession, setDrawerSession] = useState<BrowserSessionView | null>(null);
   const [drawerOpened, drawerHandlers] = useDisclosure(false);
 
@@ -94,67 +113,32 @@ export default function BrowserSessionsPage() {
     },
   });
 
-  const loadSessions = useCallback(async () => {
-    if (!browserId) return;
-    setRefreshing(true);
-    try {
-      const res = await fetch(`/api/browser/sessions?browserId=${encodeURIComponent(browserId)}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error('Failed to load sessions');
-      const data = await res.json();
-      setSessions(data.sessions ?? []);
-    } catch (err) {
-      notifications.show({ color: 'red', title: 'Error', message: err instanceof Error ? err.message : 'Failed' });
-    } finally {
-      setRefreshing(false);
-      setLoading(false);
-    }
-  }, [browserId]);
-
-  useEffect(() => {
-    loadSessions();
-  }, [loadSessions]);
+  const loadSessions = () => sessionsQuery.refetch();
 
   const handleCreate = async () => {
-    setCreating(true);
     try {
       const allowList = form.values.allowList.split(',').map((s) => s.trim()).filter(Boolean);
       const blockList = form.values.blockList.split(',').map((s) => s.trim()).filter(Boolean);
-      const res = await fetch('/api/browser/sessions', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          browserId,
-          name: form.values.name || undefined,
-          artifactBucketKey: form.values.artifactBucketKey || undefined,
-          config: {
-            access: allowList.length || blockList.length ? { allowList, blockList } : undefined,
-          },
-        }),
+      const session = await createSession.mutateAsync({
+        browserId,
+        name: form.values.name || undefined,
+        artifactBucketKey: form.values.artifactBucketKey || undefined,
+        config: {
+          access: allowList.length || blockList.length ? { allowList, blockList } : undefined,
+        },
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || 'Failed to create session');
-      }
-      const data = await res.json();
-      const session: BrowserSessionView = data.session;
       // Optionally navigate immediately
       if (form.values.url) {
-        await fetch(`/api/browser/sessions/${session.sessionKey}/actions`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ type: 'goto', url: form.values.url }),
-        });
+        await sessionAction.mutateAsync({ sessionKey: session.sessionKey, action: { type: 'goto', url: form.values.url } });
+        await loadSessions();
       }
       notifications.show({ color: 'teal', title: 'Created', message: `Session ${session.sessionKey}` });
       createHandlers.close();
       form.reset();
-      await loadSessions();
       setDrawerSession(session);
       drawerHandlers.open();
     } catch (err) {
-      notifications.show({ color: 'red', title: 'Error', message: err instanceof Error ? err.message : 'Failed' });
-    } finally {
-      setCreating(false);
+      notifications.show({ color: 'red', title: 'Error', message: errorMessage(err, 'Failed') });
     }
   };
 
@@ -165,9 +149,7 @@ export default function BrowserSessionsPage() {
       confirmLabel: tSafe('closeSession.confirm'),
       tone: 'warning',
       action: async () => {
-        const res = await fetch(`/api/browser/sessions/${session.sessionKey}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error((await res.text()) || 'Failed to close session');
-        await loadSessions();
+        await closeSession.mutateAsync(session.sessionKey);
       },
     });
   };
@@ -177,9 +159,7 @@ export default function BrowserSessionsPage() {
       noun: tSafe('nouns.browserSession'),
       name: session.name || session.sessionKey,
       action: async () => {
-        const res = await fetch(`/api/browser/sessions/by-id/${session.id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error((await res.text()) || 'Failed to delete session');
-        await loadSessions();
+        await deleteSession.mutateAsync(session.id);
       },
     });
   };
@@ -247,7 +227,7 @@ export default function BrowserSessionsPage() {
         subtitle="Live headless browser sessions powered by Playwright"
         actions={
           <Group gap="xs">
-            <Button leftSection={<IconRefresh size={16} />} variant="light" onClick={loadSessions} loading={refreshing}>
+            <Button leftSection={<IconRefresh size={16} />} variant="light" onClick={() => void loadSessions()} loading={refreshing}>
               Refresh
             </Button>
             <Button leftSection={<IconPlus size={16} />} onClick={createHandlers.open}>
@@ -279,7 +259,7 @@ export default function BrowserSessionsPage() {
         primaryAction={{
           label: 'Start session',
           color: 'teal',
-          loading: creating,
+          loading: createSession.isPending,
           onClick: handleCreate,
         }}
         secondaryAction={{ label: 'Cancel', onClick: createHandlers.close }}
@@ -349,7 +329,12 @@ function SessionDrawer({
   onMutated: () => void;
 }) {
   const [imgUrl, setImgUrl] = useState<string | null>(null);
-  const [events, setEvents] = useState<BrowserSessionEventView[]>([]);
+  // The latest events; a failed read shows none.
+  const eventsQuery = useSessionEvents(session?.id, opened);
+  const events = eventsQuery.isError ? [] : (eventsQuery.data ?? []);
+  const sessionAction = useSessionAction();
+  const persistScreenshotMutation = usePersistSessionScreenshot();
+  const exportPdfMutation = useExportSessionPdf();
   const [polling, setPolling] = useState(true);
   const [navigateUrl, setNavigateUrl] = useState('');
   const [waitUntil, setWaitUntil] = useState<'domcontentloaded' | 'load' | 'networkidle'>('domcontentloaded');
@@ -361,6 +346,7 @@ function SessionDrawer({
     let cancelled = false;
     const tick = async () => {
       try {
+        // Raw on purpose: the live screenshot is an image (a blob), not JSON.
         const res = await fetch(`/api/browser/sessions/${session.sessionKey}/screenshot/live`, { cache: 'no-store' });
         if (!res.ok) return;
         const blob = await res.blob();
@@ -384,48 +370,16 @@ function SessionDrawer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened, session?.sessionKey, polling]);
 
-  useEffect(() => {
-    if (!opened || !session?.id) return;
-    let cancelled = false;
-
-    const loadEvents = async () => {
-      try {
-        const res = await fetch(`/api/browser/sessions/${session.id}/events?limit=25`, {
-          cache: 'no-store',
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        if (!cancelled) {
-          setEvents(data.events ?? []);
-        }
-      } catch {
-        if (!cancelled) {
-          setEvents([]);
-        }
-      }
-    };
-
-    void loadEvents();
-    return () => {
-      cancelled = true;
-    };
-  }, [opened, session?.id]);
-
   const runNavigate = async () => {
     if (!session || !navigateUrl) return;
     setActionLoading(true);
     try {
-      await fetch(`/api/browser/sessions/${session.sessionKey}/actions`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ type: 'goto', url: navigateUrl, waitUntil }),
-      });
+      // The action's own failure is not shown (the page and the events say what happened).
+      await sessionAction
+        .mutateAsync({ sessionKey: session.sessionKey, action: { type: 'goto', url: navigateUrl, waitUntil } })
+        .catch(() => undefined);
       onMutated();
-      const eventsRes = await fetch(`/api/browser/sessions/${session.id}/events?limit=25`, { cache: 'no-store' }).catch(() => null);
-      if (eventsRes?.ok) {
-        const data = await eventsRes.json();
-        setEvents(data.events ?? []);
-      }
+      await eventsQuery.refetch();
     } finally {
       setActionLoading(false);
     }
@@ -433,30 +387,20 @@ function SessionDrawer({
 
   const persistScreenshot = async () => {
     if (!session) return;
-    const res = await fetch(`/api/browser/sessions/${session.sessionKey}/screenshot`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ fullPage: true }),
-    });
-    if (res.ok) {
-      const data = await res.json();
+    try {
+      const data = await persistScreenshotMutation.mutateAsync(session.sessionKey);
       notifications.show({ color: 'teal', title: 'Saved', message: `Screenshot stored: ${data.artifact?.objectKey ?? ''}` });
-    } else {
+    } catch {
       notifications.show({ color: 'red', title: 'Error', message: 'Failed to persist screenshot' });
     }
   };
 
   const exportPdf = async () => {
     if (!session) return;
-    const res = await fetch(`/api/browser/sessions/${session.sessionKey}/pdf`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({}),
-    });
-    if (res.ok) {
-      const data = await res.json();
+    try {
+      const data = await exportPdfMutation.mutateAsync(session.sessionKey);
       notifications.show({ color: 'teal', title: 'PDF', message: `Stored: ${data.artifact?.objectKey ?? ''}` });
-    } else {
+    } catch {
       notifications.show({ color: 'red', title: 'Error', message: 'Failed to export PDF' });
     }
   };

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Button,
@@ -16,6 +16,8 @@ import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useBrowsers, useBrowserSessions, useCreateBrowser, useDeleteBrowser } from '@/lib/api/queries/browser';
 import {
   IconEye,
   IconPlus,
@@ -29,10 +31,7 @@ import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
 import ArtifactBucketSelect from '@/components/browser/ArtifactBucketSelect';
-import type {
-  BrowserSessionView,
-  BrowserView,
-} from '@/lib/services/browser';
+import type { BrowserView } from '@/lib/services/browser';
 
 interface CreateForm {
   name: string;
@@ -69,14 +68,18 @@ export default function BrowsersListPage() {
   const deleteResource = useDeleteResource();
   const tSafe = useTranslations('common.confirm.dataSafety');
   const router = useRouter();
-  const [browsers, setBrowsers] = useState<BrowserView[]>([]);
-  const [sessions, setSessions] = useState<BrowserSessionView[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  // A failed browser list is told in a notification; sessions only add the live counts.
+  const browsersQuery = useBrowsers({ notifyOnError: 'Error' });
+  const sessionsQuery = useBrowserSessions();
+  const browsers = useMemo(() => browsersQuery.data ?? [], [browsersQuery.data]);
+  const sessions = useMemo(() => sessionsQuery.data ?? [], [sessionsQuery.data]);
+  const loading = browsersQuery.isPending || sessionsQuery.isPending;
+  const refreshing = browsersQuery.isFetching || sessionsQuery.isFetching;
+  const createBrowser = useCreateBrowser();
+  const deleteBrowser = useDeleteBrowser();
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [query, setQuery] = useState('');
   const [createOpened, createHandlers] = useDisclosure(false);
-  const [creating, setCreating] = useState(false);
 
   const form = useForm<CreateForm>({
     initialValues: {
@@ -108,35 +111,7 @@ export default function BrowsersListPage() {
     validate: { name: (v) => (v.trim().length < 2 ? 'Name is required' : null) },
   });
 
-  const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const [browsersRes, sessionsRes] = await Promise.all([
-        fetch('/api/browser/browsers', { cache: 'no-store' }),
-        fetch('/api/browser/sessions', { cache: 'no-store' }),
-      ]);
-      if (!browsersRes.ok) throw new Error('Failed to load browsers');
-      const browsersData = await browsersRes.json();
-      const sessionsData = sessionsRes.ok
-        ? await sessionsRes.json()
-        : { sessions: [] };
-      setBrowsers(browsersData.browsers ?? []);
-      setSessions(sessionsData.sessions ?? []);
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
-      });
-    } finally {
-      setRefreshing(false);
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const load = () => Promise.all([browsersQuery.refetch(), sessionsQuery.refetch()]);
 
   const metricsById = useMemo(() => {
     const map = new Map<string, RowMetrics>();
@@ -183,38 +158,29 @@ export default function BrowsersListPage() {
   }, [browsers, statusFilter, query]);
 
   async function handleCreate(values: CreateForm) {
-    setCreating(true);
     try {
-      const res = await fetch('/api/browser/browsers', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          name: values.name.trim(),
-          description: values.description.trim() || undefined,
-          artifactBucketKey: values.artifactBucketKey.trim() || undefined,
-          defaultModelKey: values.defaultModelKey.trim() || undefined,
-          defaultSessionConfig: {
-            headless: values.headless,
-            viewport: { width: values.viewportWidth, height: values.viewportHeight },
-            locale: values.locale.trim() || undefined,
-            timezoneId: values.timezoneId.trim() || undefined,
-            actionTimeoutMs: values.actionTimeoutMs,
-            navigationTimeoutMs: values.navigationTimeoutMs,
-            idleTimeoutMs: values.idleTimeoutMs,
-            dialogPolicy: values.dialogPolicy,
-            acceptDownloads: values.acceptDownloads,
-            ...(values.proxyServer.trim() ? { proxy: { server: values.proxyServer.trim() } } : {}),
-            access: {
-              allowList: splitHosts(values.allowList),
-              blockList: splitHosts(values.blockList),
-            },
+      await createBrowser.mutateAsync({
+        name: values.name.trim(),
+        description: values.description.trim() || undefined,
+        artifactBucketKey: values.artifactBucketKey.trim() || undefined,
+        defaultModelKey: values.defaultModelKey.trim() || undefined,
+        defaultSessionConfig: {
+          headless: values.headless,
+          viewport: { width: values.viewportWidth, height: values.viewportHeight },
+          locale: values.locale.trim() || undefined,
+          timezoneId: values.timezoneId.trim() || undefined,
+          actionTimeoutMs: values.actionTimeoutMs,
+          navigationTimeoutMs: values.navigationTimeoutMs,
+          idleTimeoutMs: values.idleTimeoutMs,
+          dialogPolicy: values.dialogPolicy,
+          acceptDownloads: values.acceptDownloads,
+          ...(values.proxyServer.trim() ? { proxy: { server: values.proxyServer.trim() } } : {}),
+          access: {
+            allowList: splitHosts(values.allowList),
+            blockList: splitHosts(values.blockList),
           },
-        }),
+        },
       });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || 'Failed to create');
-      }
       notifications.show({
         color: 'teal',
         title: 'Created',
@@ -222,15 +188,12 @@ export default function BrowsersListPage() {
       });
       createHandlers.close();
       form.reset();
-      await load();
     } catch (err) {
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
-    } finally {
-      setCreating(false);
     }
   }
 
@@ -242,19 +205,12 @@ export default function BrowsersListPage() {
       id: target.id,
       extraWarning: tSafe('browserExtra'),
       action: async () => {
-        const res = await fetch(`/api/browser/browsers/${target.id}`, {
-          method: 'DELETE',
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(text || 'Failed to delete');
-        }
+        await deleteBrowser.mutateAsync(target.id);
         notifications.show({
           color: 'teal',
           title: 'Deleted',
           message: 'Browser removed',
         });
-        await load();
       },
     });
   }
@@ -391,7 +347,7 @@ export default function BrowsersListPage() {
             ],
           },
         ]}
-        onRefresh={load}
+        onRefresh={() => void load()}
         refreshing={refreshing}
         empty={{
           icon: <IconWorld size={26} stroke={1.7} />,
@@ -432,7 +388,7 @@ export default function BrowsersListPage() {
         primaryAction={{
           label: 'Create browser',
           color: 'teal',
-          loading: creating,
+          loading: createBrowser.isPending,
           onClick: () => form.onSubmit(handleCreate)(),
         }}
         secondaryAction={{ label: 'Cancel', onClick: createHandlers.close }}

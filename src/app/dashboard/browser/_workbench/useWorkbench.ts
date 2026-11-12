@@ -19,6 +19,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { notifications } from '@mantine/notifications';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { errorMessage, isApiError } from '@/lib/api/client';
+import {
+  closeWorkbenchSession,
+  fetchSessionDiagnostics,
+  fetchSessionSnapshot,
+  openWorkbenchSession,
+  postSessionAction,
+} from '@/lib/api/queries/browser';
 import { limitMessageKey, limitMessageValues, limitTitleKey, parseLimitError } from '@/lib/limits/describeLimitError';
 import type { BrowserSessionView } from '@/lib/services/browser';
 import { INTERACTIVE_ROLES, parseSnapshot, type SnapshotNode } from './snapshot';
@@ -110,9 +118,8 @@ export function useWorkbenchStage(
     // cannot be built.
     const RETRY_DELAYS_MS = [300, 600, 900];
     for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
-      const res = await fetch(`/api/browser/sessions/${encodeURIComponent(key)}/snapshot`, { cache: 'no-store' });
-      if (!res.ok) return;
-      const data = await res.json();
+      const data = await fetchSessionSnapshot(key);
+      if (!data) return;
       const tree = (data.ariaSnapshot ?? '') as string;
       const parsed = parseSnapshot(tree);
       const usable = parsed.some((node) => INTERACTIVE_ROLES.has(node.role));
@@ -153,9 +160,8 @@ export function useWorkbenchStage(
    * it — that is what makes this safe to run on a timer.
    */
   const poll = useCallback(async (key: string) => {
-    const res = await fetch(`/api/browser/sessions/${encodeURIComponent(key)}/snapshot`, { cache: 'no-store' });
-    if (!res.ok) return;
-    const data = await res.json();
+    const data = await fetchSessionSnapshot(key);
+    if (!data) return;
     const tree = (data.ariaSnapshot ?? '') as string;
     const parsed = parseSnapshot(tree);
     const usable = parsed.some((node) => INTERACTIVE_ROLES.has(node.role));
@@ -199,8 +205,8 @@ export function useWorkbenchStage(
 
   const loadDiagnostics = useCallback(async () => {
     if (!sessionKey) return;
-    const res = await fetch(`/api/browser/sessions/${encodeURIComponent(sessionKey)}/diagnostics`, { cache: 'no-store' });
-    if (res.ok) setDiagnostics(await res.json());
+    const found = await fetchSessionDiagnostics<StageDiagnostics>(sessionKey);
+    if (found) setDiagnostics(found);
   }, [sessionKey]);
 
   // Only the screenshot is polled. The snapshot is refetched when something
@@ -271,35 +277,29 @@ export function useDriveSession(config: {
     if (!browserId) return null;
     setStarting(true);
     try {
-      const res = await fetch('/api/browser/sessions', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ browserId, name }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        // A plan limit (no free browser session, ...) is said in its own words.
-        const limit = parseLimitError(res.status, data, res.headers.get('Retry-After'));
-        if (limit) {
-          notifications.show({
-            color: 'orange',
-            title: tl(limitTitleKey(limit)),
-            message: tl(limitMessageKey(limit), limitMessageValues(limit, { dimensionLabel: (key) => tl(key), locale })),
-          });
-          return null;
-        }
-        throw new Error(data.error || 'Could not start a session');
-      }
-      setSession(data.session);
+      const opened = await openWorkbenchSession(browserId, name);
+      setSession(opened);
       stage.reset();
       onStarted?.();
-      notifications.show({ color: 'teal', title: 'Session started', message: data.session.sessionKey });
-      return data.session as BrowserSessionView;
+      notifications.show({ color: 'teal', title: 'Session started', message: opened.sessionKey });
+      return opened;
     } catch (err) {
+      // A plan limit (no free browser session, ...) is said in its own words.
+      const limit = isApiError(err)
+        ? parseLimitError(err.status, err.payload, err.retryAfterMs !== undefined ? String(err.retryAfterMs / 1000) : null)
+        : null;
+      if (limit) {
+        notifications.show({
+          color: 'orange',
+          title: tl(limitTitleKey(limit)),
+          message: tl(limitMessageKey(limit), limitMessageValues(limit, { dimensionLabel: (key) => tl(key), locale })),
+        });
+        return null;
+      }
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Could not start a session'),
       });
       return null;
     } finally {
@@ -312,8 +312,7 @@ export function useDriveSession(config: {
     if (!open) return;
     setSession(null);
     stage.reset();
-    await fetch(`/api/browser/sessions/${encodeURIComponent(open.sessionKey)}`, { method: 'DELETE' })
-      .catch(() => undefined);
+    await closeWorkbenchSession(open.sessionKey).catch(() => undefined);
   }, [stage]);
 
   const runAction = useCallback(async (action: Record<string, unknown>): Promise<ActionOutcome | null> => {
@@ -328,17 +327,13 @@ export function useDriveSession(config: {
       const isRead = action.type === 'extract';
       const endpoint = isRead ? 'extract' : 'actions';
       const body = isRead ? { ...action, type: undefined } : action;
-      const res = await fetch(
-        `/api/browser/sessions/${encodeURIComponent(open.sessionKey)}/${endpoint}`,
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined))),
-        },
+      const { ok: accepted, data } = await postSessionAction(
+        open.sessionKey,
+        endpoint,
+        Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined)),
       );
-      const data = await res.json().catch(() => ({}));
       const result = (data.result ?? data ?? {}) as Record<string, unknown>;
-      const ok = res.ok && result?.ok !== false;
+      const ok = accepted && result?.ok !== false;
 
       const outcome: ActionOutcome = {
         ok,
@@ -363,7 +358,7 @@ export function useDriveSession(config: {
       notifications.show({
         color: 'red',
         title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
+        message: errorMessage(err, 'Failed'),
       });
       return { ok: false, result: {}, durationMs: Date.now() - started };
     } finally {

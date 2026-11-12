@@ -13,6 +13,7 @@ import {
   Textarea,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { playgroundErrorMessage, useEmbeddingPlayground } from '@/lib/api/queries/playground';
 import {
   IconAlertTriangle,
   IconPlayerPlay,
@@ -86,7 +87,13 @@ const DEFAULT_INPUT = [
 
 export default function EmbeddingPlayground({ modelKey }: EmbeddingPlaygroundProps) {
   const [text, setText] = useState(DEFAULT_INPUT);
-  const [running, setRunning] = useState(false);
+  const embedding = useEmbeddingPlayground<{
+    vectors?: VectorSummary[];
+    similarities?: SimilarityPair[];
+    latencyMs?: number;
+    usage?: Record<string, number> | null;
+  }>();
+  const running = embedding.isPending;
   const [vectors, setVectors] = useState<VectorSummary[]>([]);
   const [similarities, setSimilarities] = useState<SimilarityPair[]>([]);
   const [latency, setLatency] = useState<number | null>(null);
@@ -104,7 +111,6 @@ export default function EmbeddingPlayground({ modelKey }: EmbeddingPlaygroundPro
       return;
     }
 
-    setRunning(true);
     setError(null);
     setVectors([]);
     setSimilarities([]);
@@ -112,25 +118,15 @@ export default function EmbeddingPlayground({ modelKey }: EmbeddingPlaygroundPro
     setUsage(null);
 
     try {
-      const response = await fetch('/api/dashboard/playground/embeddings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: modelKey, input: inputs }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload.error || `Request failed (${response.status})`);
-      }
+      const payload = await embedding.mutateAsync({ model: modelKey, input: inputs });
       setVectors(payload.vectors ?? []);
       setSimilarities(payload.similarities ?? []);
       setLatency(typeof payload.latencyMs === 'number' ? payload.latencyMs : null);
       setUsage(payload.usage ?? null);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Embedding request failed';
+      const message = playgroundErrorMessage(err, 'Embedding request failed');
       setError(message);
       notifications.show({ color: 'red', title: 'Embedding failed', message });
-    } finally {
-      setRunning(false);
     }
   };
 

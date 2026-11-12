@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState, use as usePromise } from 'react';
+import { useEffect, useMemo, useState, use as usePromise } from 'react';
 import { useRouter } from 'next/navigation';
 import { useDisclosure } from '@mantine/hooks';
 import {
@@ -71,6 +71,8 @@ import HumanStepCard from '@/components/tracing/HumanStepCard';
 import ToolDefinitionsCard, { readToolDefinitions } from '@/components/tracing/ToolDefinitionsCard';
 import { tracedMessageContent } from '@/components/common/llm/tracedMessageContent';
 import { useTraceSessionFiles } from '@/components/common/llm/useTraceSessionFiles';
+import { errorMessage } from '@/lib/api/client';
+import { useTracingSession, useTracingSessionEvent } from '@/lib/api/queries/tracing';
 import type { TraceSessionFiles } from '@/components/common/llm/messageImages';
 import { type PropertyRow } from '@/components/common/ui/PropertiesPanel';
 import FunctionsList from '@/components/common/ui/FunctionsList';
@@ -1121,50 +1123,25 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
     const router = useRouter();
     const { openDocs } = useDocsDrawer();
 
-    const [loading, setLoading] = useState(true);
-    const [refreshing, setRefreshing] = useState(false);
-    const [error, setError] = useState<string | null>(null);
-    const [detail, setDetail] = useState<SessionDetailResponse | null>(null);
+    // A session that is still running (or paused: it resumes in place, the approval or answer lands here) is read again.
+    const sessionQuery = useTracingSession<SessionDetailResponse>(
+        sessionId,
+        (data) => data?.session?.status === 'in_progress' || data?.session?.status === 'paused',
+    );
+    const detail = sessionQuery.data ?? null;
+    const loading = sessionQuery.isPending;
+    const refreshing = sessionQuery.isFetching;
+    const error = sessionQuery.isError && !sessionQuery.isFetching
+        ? errorMessage(sessionQuery.error, 'Unable to load session')
+        : null;
     // The trace's thread is an agent session's: its recorded pictures are drawn from the session's files.
     const sessionFiles = useTraceSessionFiles(detail?.session?.threadId);
-    const [eventDetailError, setEventDetailError] = useState<string | null>(null);
-    const [eventDetailLoading, setEventDetailLoading] = useState(false);
-    const [eventDetailsById, setEventDetailsById] = useState<Record<string, SessionDetailResponse['events'][number]>>({});
     // null = not chosen yet: grouped, unless the session can't be grouped.
     const [chosenEventsView, setChosenEventsView] = useState<EventsView | null>(null);
     // Collapsed by default — thread/trace ids, models/tools and metadata are
     // follow-up detail, not the reason someone opened this page. Errors are
     // NOT gated behind this: they render unconditionally below the stat strip.
     const [sessionInfoOpen, setSessionInfoOpen] = useState(false);
-
-    const fetchDetail = useCallback(async (isRefresh = false) => {
-        try {
-            if (isRefresh) setRefreshing(true); else setLoading(true);
-            setError(null);
-            const response = await fetch(`/api/tracing/sessions/${sessionId}?includeEventContent=false`);
-            if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.error || 'Failed to fetch session detail');
-            }
-            const data: SessionDetailResponse = await response.json();
-            setDetail(data);
-        } catch (error) {
-            console.error('Failed to load session detail:', error);
-            setError(error instanceof Error ? error.message : 'Unable to load session');
-        } finally {
-            setLoading(false);
-            setRefreshing(false);
-        }
-    }, [sessionId]);
-
-    useEffect(() => { void fetchDetail(false); }, [fetchDetail]);
-
-    useEffect(() => {
-        // A paused session resumes in place: the approval or answer lands here.
-        if (detail?.session?.status !== 'in_progress' && detail?.session?.status !== 'paused') return;
-        const interval = setInterval(() => { void fetchDetail(true); }, 5000);
-        return () => clearInterval(interval);
-    }, [detail?.session?.status, fetchDetail]);
 
     const tokenStats = useMemo(() => {
         const summary = detail?.session?.summary;
@@ -1216,68 +1193,11 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
         if (!hasSelection) setSelectedEventId((sortedEvents.find((e) => stepCategory(e.type) === 'model') ?? sortedEvents[0]).id);
     }, [sortedEvents, selectedEventId]);
 
-    useEffect(() => {
-        if (!selectedEventId) {
-            setEventDetailError(null);
-            return;
-        }
-
-        if (eventDetailsById[selectedEventId]) {
-            setEventDetailError(null);
-            return;
-        }
-
-        let cancelled = false;
-
-        const loadEventDetail = async () => {
-            try {
-                setEventDetailLoading(true);
-                setEventDetailError(null);
-
-                const response = await fetch(
-                    `/api/tracing/sessions/${sessionId}/events/${encodeURIComponent(selectedEventId)}`,
-                );
-
-                if (!response.ok) {
-                    const errorData = await response.json();
-                    throw new Error(errorData.error || 'Failed to fetch event detail');
-                }
-
-                const data: EventDetailResponse = await response.json();
-                if (cancelled) {
-                    return;
-                }
-
-                setEventDetailsById((current) => ({
-                    ...current,
-                    [selectedEventId]: data.event,
-                }));
-            } catch (eventError) {
-                if (cancelled) {
-                    return;
-                }
-
-                setEventDetailError(
-                    eventError instanceof Error ? eventError.message : 'Unable to load event detail',
-                );
-            } finally {
-                if (!cancelled) {
-                    setEventDetailLoading(false);
-                }
-            }
-        };
-
-        void loadEventDetail();
-
-        return () => {
-            cancelled = true;
-        };
-    }, [eventDetailsById, selectedEventId, sessionId]);
-
-    const selectedEvent = useMemo(() => {
-        if (!selectedEventId) return null;
-        return eventDetailsById[selectedEventId] ?? null;
-    }, [eventDetailsById, selectedEventId]);
+    // An event is read once per visit; the panel shows it in full.
+    const eventQuery = useTracingSessionEvent<EventDetailResponse>(sessionId, selectedEventId);
+    const selectedEvent = selectedEventId ? (eventQuery.data?.event ?? null) : null;
+    const eventDetailLoading = eventQuery.isFetching;
+    const eventDetailError = eventQuery.isError ? errorMessage(eventQuery.error, 'Unable to load event detail') : null;
 
     // ── Render states ──────────────────────────────────────────
 
@@ -1304,7 +1224,7 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
             <Button onClick={() => openDocs('observe-tracing')} variant="default" size="sm" leftSection={<IconBook size={14} stroke={1.7} />}>
                 Docs
             </Button>
-            <Button leftSection={<IconRefresh size={14} stroke={1.7} />} variant="default" size="sm" onClick={() => void fetchDetail(true)} loading={refreshing}>
+            <Button leftSection={<IconRefresh size={14} stroke={1.7} />} variant="default" size="sm" onClick={() => void sessionQuery.refetch()} loading={refreshing}>
                 Refresh
             </Button>
         </>

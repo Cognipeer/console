@@ -28,7 +28,13 @@ import {
   formatRelativeTime,
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
-import { SkipTrail, type OffsetPageInfo } from '@/lib/shared/offsetPaging';
+import { type OffsetPageInfo } from '@/lib/shared/offsetPaging';
+import {
+  useRememberPageStart,
+  useSkipTrail,
+  useTracingFlowOptions,
+  useTracingSessions,
+} from '@/lib/api/queries/tracing';
 
 interface SessionRecord {
   sessionId: string;
@@ -74,13 +80,6 @@ export default function TracingSessionsPage() {
   const t = useTranslations('tracingHealth');
   const locale = useLocale();
   const { openDocs } = useDocsDrawer();
-  const [sessions, setSessions] = useState<SessionRecord[]>([]);
-  const [totalSessions, setTotalSessions] = useState(0);
-  // Where each page starts, and whether a list without a total has a next page (null: it has a total).
-  const skipTrail = useRef(new SkipTrail());
-  const [moreAfter, setMoreAfter] = useState<boolean | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize] = useState(DEFAULT_PAGE_SIZE);
   const [query, setQuery] = useState('');
@@ -94,7 +93,6 @@ export default function TracingSessionsPage() {
   );
   // Sessions of the hidden agents a flow owns, narrowed to one flow (`?flowId=`).
   const [flowFilter, setFlowFilter] = useState(() => searchParams.get('flowId')?.trim() || '');
-  const [flowOptions, setFlowOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [metadataKey, setMetadataKey] = useState(
     () => searchParams.get('metadataKey')?.trim() || '',
   );
@@ -102,10 +100,15 @@ export default function TracingSessionsPage() {
     () => searchParams.get('metadataValue')?.trim() || '',
   );
 
-  const buildQueryParams = useCallback(() => {
+  // Where each page starts: another search is another list, so the trail starts over with the filters.
+  const skipTrail = useSkipTrail(
+    JSON.stringify([query, statusFilter, agentFilter, flowFilter, fromFilter, toFilter, metadataKey, metadataValue]),
+  );
+
+  const queryString = (() => {
     const params = new URLSearchParams();
     params.set('limit', pageSize.toString());
-    params.set('skip', skipTrail.current.skipFor(page, pageSize).toString());
+    params.set('skip', skipTrail.skipFor(page, pageSize).toString());
     if (query) params.set('query', query.trim());
     if (statusFilter !== 'all') params.set('status', statusFilter);
     if (agentFilter) params.set('agent', agentFilter.trim());
@@ -116,8 +119,30 @@ export default function TracingSessionsPage() {
       params.set('metadataKey', metadataKey.trim());
       params.set('metadataValue', metadataValue.trim());
     }
-    return params;
-  }, [page, pageSize, query, statusFilter, agentFilter, flowFilter, fromFilter, toFilter, metadataKey, metadataValue]);
+    return params.toString();
+  })();
+
+  const sessionsQuery = useTracingSessions<SessionsResponse>(queryString);
+  useRememberPageStart(skipTrail, page, sessionsQuery.data, sessionsQuery.isPlaceholderData);
+  // A failed read shows an empty list, as an empty one does.
+  const sessionsData = sessionsQuery.isError ? undefined : sessionsQuery.data;
+  const sessions = sessionsData?.sessions ?? [];
+  const totalSessions = sessionsData?.total ?? 0;
+  // Whether a list without a total has a next page (null: it has a total).
+  const moreAfter = sessionsData && typeof sessionsData.total !== 'number' ? sessionsData.hasMore === true : null;
+  // The refresh button has its own spinner; a page or filter change shows the grid's loading state.
+  const [refreshRequested, setRefreshRequested] = useState(false);
+  const loading = sessionsQuery.isFetching && !refreshRequested;
+  const refreshing = sessionsQuery.isFetching && refreshRequested;
+  const refresh = async () => {
+    setRefreshRequested(true);
+    try {
+      await sessionsQuery.refetch();
+    } finally {
+      setRefreshRequested(false);
+    }
+  };
+  const flowOptions = useTracingFlowOptions().data ?? [];
 
   /** Writes (or removes) URL params without a navigation, so the filters stay shareable. */
   const replaceUrlParams = useCallback(
@@ -131,42 +156,6 @@ export default function TracingSessionsPage() {
       router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
     },
     [router, pathname, searchParams],
-  );
-
-  const fetchSessions = useCallback(
-    async (isRefresh = false, signal?: AbortSignal) => {
-      try {
-        if (isRefresh) setRefreshing(true);
-        else setLoading(true);
-
-        const params = buildQueryParams();
-        const response = await fetch(
-          `/api/tracing/sessions?${params.toString()}`,
-          { signal },
-        );
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.error || 'Failed to fetch sessions');
-        }
-        const data: SessionsResponse = await response.json();
-        setSessions(data.sessions || []);
-        skipTrail.current.remember(page, data);
-        setTotalSessions(data.total ?? 0);
-        setMoreAfter(typeof data.total === 'number' ? null : data.hasMore === true);
-      } catch (error) {
-        if (error instanceof DOMException && error.name === 'AbortError') return;
-        console.error('Failed to load sessions:', error);
-        setSessions([]);
-        setTotalSessions(0);
-        setMoreAfter(null);
-      } finally {
-        if (!signal?.aborted) {
-          setLoading(false);
-          setRefreshing(false);
-        }
-      }
-    },
-    [buildQueryParams, page],
   );
 
   // The URL only carries agent, status and range (typed metadata filters are page state), and the page rewrites
@@ -194,31 +183,6 @@ export default function TracingSessionsPage() {
     if (moved('metadataKey')) setMetadataKey((value) => (value === current.metadataKey ? value : current.metadataKey));
     if (moved('metadataValue')) setMetadataValue((value) => (value === current.metadataValue ? value : current.metadataValue));
   }, [searchParams]);
-
-  // Another search is another list: the pages of the last one no longer say where this one's start.
-  useEffect(() => {
-    skipTrail.current.reset();
-  }, [query, statusFilter, agentFilter, flowFilter, fromFilter, toFilter, metadataKey, metadataValue]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void fetchSessions(false, controller.signal);
-    return () => controller.abort();
-  }, [fetchSessions]);
-
-  // The flows to filter by. Without flows access the filter is simply not offered.
-  useEffect(() => {
-    const controller = new AbortController();
-    // Answers 404 / 402 where Flows are not part of the edition or the license: no options then.
-    fetch('/api/flows?limit=200', { cache: 'no-store', signal: controller.signal })
-      .then(async (response) => (response.ok ? ((await response.json()) as { items?: Array<{ id: string; name: string }> }) : null))
-      .then((result) => {
-        if (controller.signal.aborted || !result?.items) return;
-        setFlowOptions(result.items.map((flow) => ({ value: flow.id, label: flow.name })));
-      })
-      .catch(() => undefined);
-    return () => controller.abort();
-  }, []);
 
   const totalPages = useMemo(
     () => Math.max(1, Math.ceil(totalSessions / pageSize)),
@@ -490,7 +454,7 @@ export default function TracingSessionsPage() {
             )}
           </Group>
         }
-        onRefresh={() => void fetchSessions(true)}
+        onRefresh={() => void refresh()}
         refreshing={refreshing}
         empty={{
           title: t('sessionTable.emptyTitle'),
