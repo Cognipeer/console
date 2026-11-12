@@ -724,6 +724,27 @@ export async function getRun(tenantDbName: string, id: string): Promise<WithId<I
 }
 
 /**
+ * Deletes a run of the project; its item results are stored on the run, so they go with it. A run in flight is
+ * still being written by its worker and is not removable until it has finished, unless it has been
+ * running for over an hour (the same staleness rule as the concurrent-run guard: a crashed run must not stay forever).
+ */
+export async function deleteRun(
+  tenantDbName: string,
+  id: string,
+  projectId?: string,
+): Promise<'deleted' | 'not_found' | 'in_progress'> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const record = await db.findEvaluationRunById(id);
+  if (!record || record.projectId !== projectId) return 'not_found';
+  if (record.status === 'running' || record.status === 'pending') {
+    const since = new Date(record.startedAt ?? record.createdAt ?? 0).getTime();
+    if (Date.now() - since < 60 * 60 * 1000) return 'in_progress';
+  }
+  return (await db.deleteEvaluationRun(id)) ? 'deleted' : 'not_found';
+}
+
+/**
  * Diff a run against a baseline run (typically an earlier run of the same
  * suite). Returns null if either run is missing.
  */

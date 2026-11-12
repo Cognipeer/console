@@ -657,6 +657,11 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       return this.findEvaluationRunById(id);
     }
 
+    async deleteEvaluationRun(id: string): Promise<boolean> {
+      const db = this.getTenantDb();
+      return db.prepare(`DELETE FROM ${TABLES.evaluationRuns} WHERE id = @id`).run({ id }).changes === 1;
+    }
+
     async findEvaluationRunById(id: string): Promise<IEvaluationRun | null> {
       const db = this.getTenantDb();
       const row = db.prepare(`SELECT * FROM ${TABLES.evaluationRuns} WHERE id = @id`).get({ id }) as SqliteRow | undefined;

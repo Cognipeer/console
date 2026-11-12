@@ -151,18 +151,20 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
   };
 
   const confirmDelete = async (item: { kind: EvaluationSection; id: string; name: string }) => {
-    const path = item.kind === 'targets' ? 'targets' : item.kind === 'datasets' ? 'datasets' : 'suites';
+    const path = item.kind === 'targets' ? 'targets' : item.kind === 'datasets' ? 'datasets' : item.kind === 'runs' ? 'runs' : 'suites';
+    // A run is a result, not a resource other things refer to: no used-by check.
     const kinds = {
       targets: { noun: 'evaluationTarget', type: 'evaluation-target' },
       datasets: { noun: 'evaluationDataset', type: 'evaluation-dataset' },
       suites: { noun: 'evaluationSuite', type: 'evaluation-suite' },
+      runs: { noun: 'evaluationRun', type: undefined },
     } as const;
     const kind = kinds[path];
     const done = await deleteResource({
       noun: tq(`nouns.${kind.noun}`),
       name: item.name,
       type: kind.type,
-      id: item.id,
+      id: kind.type ? item.id : undefined,
       action: async () => {
         const res = await fetch(`/api/evaluation/${path}/${item.id}`, { method: 'DELETE' });
         if (!res.ok) throw new Error(tq('deleteFailed'));
@@ -454,6 +456,9 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
             title: 'No runs yet',
             description: 'Run a suite from the Suites section to see results here.',
           }}
+          rowActions={(r) => [
+            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => void confirmDelete({ kind: 'runs', id: r.id, name: `${r.suiteKey} · ${fmtDate(r.startedAt ?? r.createdAt)}` }) },
+          ]}
         />
       )}
 
