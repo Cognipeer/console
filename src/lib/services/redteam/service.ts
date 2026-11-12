@@ -1554,29 +1554,6 @@ export interface ReviewViewer {
   mayRead(tags: unknown, askers: ReadonlyArray<string | null | undefined>): Promise<boolean>;
 }
 
-/** Copy a legacy run's embedded attempts into attempt rows and point the run at them. Safe to repeat. */
-async function migrateEmbeddedAttempts(db: Db, runId: string, first: IRedTeamRun): Promise<IRedTeamRun | null> {
-  let run: IRedTeamRun | null = first;
-  for (let i = 0; run && i < 3; i += 1) {
-    if (run.attemptStore === 'collection') return run;
-    const attempts = withUniqueKeys(run.attempts ?? []);
-    await upsertRows(db, attempts.map((a, seq) => attemptRowOf(run!, runId, a, seq)));
-    // A row upsert stores a review only when it inserts the row, so a legacy review (carried in the row)
-    // never replaces one given after the attempt was migrated.
-    const switched = await db.updateRedTeamRunIf(
-      runId,
-      run.updatedAt ? { updatedAt: run.updatedAt } : {},
-      { attemptStore: 'collection', attempts: [] },
-    );
-    if (switched) return switched;
-    // The run changed while its attempts were copied: look again (copying twice is harmless).
-    run = await db.findRedTeamRunById(runId);
-  }
-  if (run && run.attemptStore === 'collection') return run;
-  if (!run) return null;
-  throw new RedTeamConflictError('The run changed while it was being prepared for review; try again');
-}
-
 const REVIEW_AGGREGATE_TRIES = 3;
 
 /**
@@ -1586,8 +1563,7 @@ const REVIEW_AGGREGATE_TRIES = 3;
  * id, which is accepted only when exactly one attempt of the run has it. A scan
  * still pending or running cannot be reviewed; neither can an attempt the target
  * never answered, nor one this viewer may not read (`viewer`: the route passes
- * the restricted-knowledge reader of its request). A run stored with embedded
- * attempts is moved to attempt rows here, the first time it is reviewed.
+ * the restricted-knowledge reader of its request).
  * Returns null when the run does not exist.
  */
 export async function reviewAttempt(
@@ -1599,14 +1575,11 @@ export async function reviewAttempt(
 ): Promise<WithId<IRedTeamRun> | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  const found = await db.findRedTeamRunById(runId);
-  if (!found) return null;
-  if (found.status === 'pending' || found.status === 'running') {
+  const run = await db.findRedTeamRunById(runId);
+  if (!run) return null;
+  if (run.status === 'pending' || run.status === 'running') {
     throw new RedTeamConflictError('The scan has not finished; review its attempts once it has');
   }
-  const run = await migrateEmbeddedAttempts(db, runId, found);
-  if (!run) return null;
-
   // The route sends `{ attemptKey }` or `{ attemptId }`; a plain string is read the same way.
   const ref = typeof attemptRef === 'string'
     ? (parseAttemptKey(attemptRef) ? { attemptKey: attemptRef } : { attemptId: attemptRef })
