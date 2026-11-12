@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useCallback } from 'react';
 import { PasswordInput, NumberInput, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
@@ -17,6 +17,8 @@ import FormShell, {
   ToggleRow,
 } from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useCreateConfigItem } from '@/lib/api/queries/config';
 
 interface CreateConfigItemModalProps {
   opened: boolean;
@@ -34,7 +36,8 @@ export default function CreateConfigItemModal({
   onCreated,
 }: CreateConfigItemModalProps) {
   const t = useTranslations('config');
-  const [loading, setLoading] = useState(false);
+  const createItem = useCreateConfigItem();
+  const loading = createItem.isPending;
 
   const form = useForm({
     initialValues: {
@@ -58,30 +61,21 @@ export default function CreateConfigItemModal({
     if (validation.hasErrors) return;
     const values = form.getValues();
 
-    setLoading(true);
     try {
       const tags = values.tags
         ? values.tags.split(',').map((tag) => tag.trim()).filter(Boolean)
         : undefined;
 
-      const res = await fetch(`/api/config/groups/${groupId}/items`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: values.name,
-          key: values.key || undefined,
-          description: values.description || undefined,
-          value: values.value,
-          valueType: values.valueType || 'string',
-          isSecret: values.isSecret,
-          tags,
-        }),
+      await createItem.mutateAsync({
+        groupId,
+        name: values.name,
+        key: values.key || undefined,
+        description: values.description || undefined,
+        value: values.value,
+        valueType: values.valueType || 'string',
+        isSecret: values.isSecret,
+        tags,
       });
-
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || t('createError'));
-      }
 
       notifications.show({
         title: t('itemCreated'),
@@ -94,13 +88,11 @@ export default function CreateConfigItemModal({
     } catch (err) {
       notifications.show({
         title: t('error'),
-        message: err instanceof Error ? err.message : t('createError'),
+        message: errorMessage(err, t('createError')),
         color: 'red',
       });
-    } finally {
-      setLoading(false);
     }
-  }, [form, groupId, onCreated, t]);
+  }, [createItem, form, groupId, onCreated, t]);
 
   const values = form.values;
   const validName = values.name.trim().length > 0;

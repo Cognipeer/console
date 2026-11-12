@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect } from 'react';
 import { TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
@@ -14,6 +14,8 @@ import FormShell, {
   SummaryKV,
 } from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useUpdateConfigGroup } from '@/lib/api/queries/config';
 
 interface ConfigGroupLike {
   _id: string;
@@ -37,7 +39,8 @@ export default function EditConfigGroupModal({
   onUpdated,
 }: EditConfigGroupModalProps) {
   const t = useTranslations('config');
-  const [loading, setLoading] = useState(false);
+  const updateGroup = useUpdateConfigGroup();
+  const loading = updateGroup.isPending;
 
   const form = useForm({
     initialValues: { name: '', description: '', tags: '' },
@@ -63,26 +66,17 @@ export default function EditConfigGroupModal({
     if (validation.hasErrors) return;
     const values = form.getValues();
 
-    setLoading(true);
     try {
       const tags = values.tags
         ? values.tags.split(',').map((tag) => tag.trim()).filter(Boolean)
         : undefined;
 
-      const res = await fetch(`/api/config/groups/${group._id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: values.name,
-          description: values.description || undefined,
-          tags,
-        }),
+      await updateGroup.mutateAsync({
+        id: group._id,
+        name: values.name,
+        description: values.description || undefined,
+        tags,
       });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || t('updateError'));
-      }
 
       notifications.show({
         title: t('groupUpdated'),
@@ -93,13 +87,11 @@ export default function EditConfigGroupModal({
     } catch (err) {
       notifications.show({
         title: t('error'),
-        message: err instanceof Error ? err.message : t('updateError'),
+        message: errorMessage(err, t('updateError')),
         color: 'red',
       });
-    } finally {
-      setLoading(false);
     }
-  }, [form, group, onUpdated, t]);
+  }, [form, group, onUpdated, t, updateGroup]);
 
   const values = form.values;
   const validName = values.name.trim().length > 0;

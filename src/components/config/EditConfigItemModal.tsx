@@ -1,11 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect } from 'react';
 import { PasswordInput, Select, Switch, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconCheck, IconEdit } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useUpdateConfigItem } from '@/lib/api/queries/config';
 import { ResourceUsageSection } from '@/components/common/confirm';
 import FormShell, {
   Checklist,
@@ -41,7 +43,8 @@ export default function EditConfigItemModal({
   onUpdated,
 }: EditConfigItemModalProps) {
   const t = useTranslations('config');
-  const [loading, setLoading] = useState(false);
+  const updateItem = useUpdateConfigItem();
+  const loading = updateItem.isPending;
 
   const form = useForm({
     initialValues: {
@@ -76,29 +79,20 @@ export default function EditConfigItemModal({
   const handleSubmit = useCallback(
     async (values: typeof form.values) => {
       if (!item) return;
-      setLoading(true);
       try {
         const tags = values.tags
           ? values.tags.split(',').map((tag) => tag.trim()).filter(Boolean)
           : undefined;
 
-        const res = await fetch(`/api/config/items/${item._id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: values.name,
-            description: values.description || undefined,
-            ...(keepsSecret && values.value === '' ? {} : { value: values.value }),
-            valueType: values.valueType,
-            isSecret: values.isSecret,
-            tags,
-          }),
+        await updateItem.mutateAsync({
+          id: item._id,
+          name: values.name,
+          description: values.description || undefined,
+          ...(keepsSecret && values.value === '' ? {} : { value: values.value }),
+          valueType: values.valueType,
+          isSecret: values.isSecret,
+          tags,
         });
-
-        if (!res.ok) {
-          const data = await res.json();
-          throw new Error(data.error || t('updateError'));
-        }
 
         notifications.show({
           title: t('itemUpdated'),
@@ -110,14 +104,12 @@ export default function EditConfigItemModal({
       } catch (error) {
         notifications.show({
           title: t('error'),
-          message: error instanceof Error ? error.message : t('updateError'),
+          message: errorMessage(error, t('updateError')),
           color: 'red',
         });
-      } finally {
-        setLoading(false);
       }
     },
-    [form.values, item, keepsSecret, onUpdated, t],
+    [form.values, item, keepsSecret, onUpdated, t, updateItem],
   );
 
   const v = form.values;

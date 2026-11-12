@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useCallback } from 'react';
 import { TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
@@ -14,6 +14,8 @@ import FormShell, {
   SummaryKV,
 } from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useCreateConfigGroup } from '@/lib/api/queries/config';
 
 interface CreateConfigGroupModalProps {
   opened: boolean;
@@ -27,7 +29,8 @@ export default function CreateConfigGroupModal({
   onCreated,
 }: CreateConfigGroupModalProps) {
   const t = useTranslations('config');
-  const [loading, setLoading] = useState(false);
+  const createGroup = useCreateConfigGroup();
+  const loading = createGroup.isPending;
 
   const form = useForm({
     initialValues: {
@@ -46,27 +49,17 @@ export default function CreateConfigGroupModal({
     if (validation.hasErrors) return;
     const values = form.getValues();
 
-    setLoading(true);
     try {
       const tags = values.tags
         ? values.tags.split(',').map((tag) => tag.trim()).filter(Boolean)
         : undefined;
 
-      const res = await fetch('/api/config/groups', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: values.name,
-          key: values.key || undefined,
-          description: values.description || undefined,
-          tags,
-        }),
+      await createGroup.mutateAsync({
+        name: values.name,
+        key: values.key || undefined,
+        description: values.description || undefined,
+        tags,
       });
-
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || t('createError'));
-      }
 
       notifications.show({
         title: t('groupCreated'),
@@ -79,13 +72,11 @@ export default function CreateConfigGroupModal({
     } catch (err) {
       notifications.show({
         title: t('error'),
-        message: err instanceof Error ? err.message : t('createError'),
+        message: errorMessage(err, t('createError')),
         color: 'red',
       });
-    } finally {
-      setLoading(false);
     }
-  }, [form, onCreated, t]);
+  }, [createGroup, form, onCreated, t]);
 
   const values = form.values;
   const validName = values.name.trim().length > 0;

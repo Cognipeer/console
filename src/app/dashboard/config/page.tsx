@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useRouter } from 'next/navigation';
@@ -11,23 +11,9 @@ import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTableControls } from '@/components/common/ui/useTableControls';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useConfigGroups, useConfigItems, useDeleteConfigGroup, type ConfigGroupRow } from '@/lib/api/queries/config';
 import CreateConfigGroupModal from '@/components/config/CreateConfigGroupModal';
-
-interface ConfigGroupRow {
-  _id: string;
-  key: string;
-  name: string;
-  description?: string;
-  tags?: string[];
-  updatedAt?: string;
-  createdAt?: string;
-}
-
-interface ConfigItemRow {
-  _id: string;
-  groupId: string;
-  isSecret: boolean;
-}
 
 interface GroupView extends ConfigGroupRow {
   itemCount: number;
@@ -45,37 +31,19 @@ export default function ConfigPage() {
   const tSafe = useTranslations('common.confirm.dataSafety');
   const deleteResource = useDeleteResource();
   const router = useRouter();
-  const [groups, setGroups] = useState<ConfigGroupRow[]>([]);
-  const [items, setItems] = useState<ConfigItemRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadFailed, setLoadFailed] = useState(false);
+  const groupsQuery = useConfigGroups();
+  const itemsQuery = useConfigItems();
+  const deleteGroup = useDeleteConfigGroup();
   const [createOpen, setCreateOpen] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      // Two calls total; items are counted per group client-side.
-      const [groupsRes, itemsRes] = await Promise.all([
-        fetch('/api/config/groups', { cache: 'no-store' }),
-        fetch('/api/config/items', { cache: 'no-store' }),
-      ]);
-      if (!groupsRes.ok || !itemsRes.ok) throw new Error('load failed');
-      const groupsData = await groupsRes.json();
-      const itemsData = await itemsRes.json();
-      setGroups(groupsData.groups || []);
-      setItems(itemsData.items || []);
-      setLoadFailed(false);
-    } catch (err) {
-      console.error('Failed to load config groups', err);
-      setLoadFailed(true);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const groups = useMemo(() => groupsQuery.data ?? [], [groupsQuery.data]);
+  const items = useMemo(() => itemsQuery.data ?? [], [itemsQuery.data]);
+  // First load, and a retry after a failure (a query without data starts over as pending).
+  const loading = groupsQuery.isPending || itemsQuery.isPending;
+  const loadFailed = groupsQuery.isError || itemsQuery.isError;
+  const load = async () => {
+    await Promise.all([groupsQuery.refetch(), itemsQuery.refetch()]);
+  };
 
   const rows: GroupView[] = useMemo(() => {
     const counts = new Map<string, { items: number; secrets: number }>();
@@ -105,17 +73,16 @@ export default function ConfigPage() {
       id: group._id,
       extraWarning: tSafe('configGroupExtra'),
       action: async () => {
-        const res = await fetch(`/api/config/groups/${group._id}`, { method: 'DELETE' });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.error || t('deleteError'));
+        try {
+          await deleteGroup.mutateAsync(group._id);
+        } catch (error) {
+          throw new Error(errorMessage(error, t('deleteError')));
         }
         notifications.show({
           title: t('groupDeleted'),
           message: t('groupDeletedMessage'),
           color: 'teal',
         });
-        await load();
       },
     });
   };
