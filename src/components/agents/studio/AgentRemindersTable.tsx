@@ -7,13 +7,14 @@
  * a way to fire or cancel it. Polls while anything is still scheduled.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ActionIcon, Button, Group, Menu, Select, Skeleton, Stack, Text, Tooltip, UnstyledButton } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconDots, IconRefresh } from '@tabler/icons-react';
 import DataGrid from '@/components/common/ui/DataGrid';
 import { useConfirm } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { useAgentReminders } from '@/lib/api/queries/agents';
 import { cancelReminder, fireReminderNow } from './reminderActions';
 import ReminderDetailDrawer from './ReminderDetailDrawer';
 import {
@@ -23,11 +24,8 @@ import {
     reminderOwnerText,
     reminderQueryStatus,
     type AgentReminderView,
-    type AgentRemindersResponse,
     type ReminderStatusFilter,
 } from './reminderUi';
-
-const POLL_MS = 15_000;
 
 export interface AgentRemindersTableProps {
     agentId: string;
@@ -40,35 +38,25 @@ export interface AgentRemindersTableProps {
 export default function AgentRemindersTable({ agentId, onOpenSession, onActiveCountChange }: AgentRemindersTableProps) {
     const t = useTranslations('agents.reminders');
     const { confirm } = useConfirm();
-    const [reminders, setReminders] = useState<AgentReminderView[] | null>(null);
-    const [viewOthers, setViewOthers] = useState(false);
     const [filter, setFilter] = useState<ReminderStatusFilter>('active');
     const [ownerId, setOwnerId] = useState<string | null>(null);
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [busyId, setBusyId] = useState<string | null>(null);
 
     const queryStatus = reminderQueryStatus(filter);
-    const load = useCallback(async () => {
-        try {
-            const res = await fetch(`/api/agents/${agentId}/reminders?status=${queryStatus}&limit=200`, { cache: 'no-store' });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json() as AgentRemindersResponse;
-            setReminders(data.reminders ?? []);
-            setViewOthers(data.scope?.viewOthers === true);
-            if (typeof data.summary?.active === 'number') onActiveCountChange?.(data.summary.active);
-        } catch {
-            setReminders((prev) => prev ?? []);
-        }
-    }, [agentId, queryStatus, onActiveCountChange]);
-
-    useEffect(() => { void load(); }, [load]);
-
-    const scheduledCount = useMemo(() => (reminders ?? []).filter(isUpcomingReminder).length, [reminders]);
+    const remindersQuery = useAgentReminders<AgentReminderView>(agentId, queryStatus);
+    // Null until the first answer; a failed read reads as none. Polls while anything is still scheduled.
+    const reminders = useMemo<AgentReminderView[] | null>(
+        () => remindersQuery.data?.reminders ?? (remindersQuery.isPending ? null : []),
+        [remindersQuery.data, remindersQuery.isPending],
+    );
+    const viewOthers = remindersQuery.data?.scope?.viewOthers === true;
+    const activeCount = remindersQuery.data?.summary?.active;
     useEffect(() => {
-        if (scheduledCount === 0) return;
-        const timer = setInterval(() => { void load(); }, POLL_MS);
-        return () => clearInterval(timer);
-    }, [scheduledCount, load]);
+        if (typeof activeCount === 'number') onActiveCountChange?.(activeCount);
+    }, [activeCount, onActiveCountChange]);
+    const load = remindersQuery.refetch;
+    const scheduledCount = useMemo(() => (reminders ?? []).filter(isUpcomingReminder).length, [reminders]);
 
     const cancelOne = async (reminder: AgentReminderView) => {
         setBusyId(reminder.id);

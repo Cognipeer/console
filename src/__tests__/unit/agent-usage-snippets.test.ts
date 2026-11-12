@@ -25,6 +25,8 @@
  * (createElement, not JSX: the suite only collects `.test.ts`.)
  */
 
+import { QueryClientProvider } from '@tanstack/react-query';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { createElement as h, type ReactNode } from 'react';
@@ -1369,7 +1371,7 @@ describe('what the old tab said and the API no longer does', () => {
 // ── The tab ───────────────────────────────────────────────────────────────
 
 const render = (node: ReactNode, locale: 'en' | 'tr' = 'en') =>
-  renderToStaticMarkup(h(MantineProvider, null, h(I18nProvider, { locale, children: node })));
+  renderToStaticMarkup(h(QueryClientProvider, { client: newTestQueryClient() }, h(MantineProvider, null, h(I18nProvider, { locale, children: node }))));
 
 const panel = (over: Partial<Parameters<typeof AgentUsagePanel>[0]> = {}) =>
   h(AgentUsagePanel, {

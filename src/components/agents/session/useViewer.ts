@@ -8,6 +8,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { apiGet } from '@/lib/api/client';
 
 export interface Viewer {
     userId?: string;
@@ -19,9 +20,8 @@ let lookup: Promise<Viewer> | null = null;
 
 function loadViewer(): Promise<Viewer> {
     if (!lookup) {
-        lookup = fetch('/api/auth/session', { cache: 'no-store' })
-            .then((res) => (res.ok ? res.json() : {}))
-            .then((data: { userId?: unknown; role?: unknown }) => ({
+        lookup = apiGet<{ userId?: unknown; role?: unknown }>('/api/auth/session')
+            .then((data) => ({
                 ...(typeof data.userId === 'string' ? { userId: data.userId } : {}),
                 ...(typeof data.role === 'string' ? { role: data.role } : {}),
             }))

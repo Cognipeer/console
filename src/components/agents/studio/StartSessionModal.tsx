@@ -13,6 +13,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Select, Textarea, TextInput } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { apiPost } from '@/lib/api/client';
+import { serverErrorOr } from '@/lib/api/queries/agents';
 import { IconMessageCircle } from '@tabler/icons-react';
 import FormShell, {
     Checklist,
@@ -102,19 +104,15 @@ export default function StartSessionModal({
         if (!contextValid) return;
         setStarting(true);
         try {
-            const res = await fetch(`/api/agents/${agentId}/sessions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
+            let data: { session: { _id: unknown } };
+            try {
+                data = await apiPost<{ session: { _id: unknown } }>(`/api/agents/${agentId}/sessions`, {
                     title: name.trim() || undefined,
                     ...(parsedContext.value ? { context: parsedContext.value } : {}),
-                }),
-            });
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                throw new Error(err.error || 'Failed to start session');
+                });
+            } catch (error) {
+                throw new Error(serverErrorOr(error, 'Failed to start session'));
             }
-            const data = await res.json();
             onStarted(String(data.session._id), version);
         } catch (error) {
             notifications.show({

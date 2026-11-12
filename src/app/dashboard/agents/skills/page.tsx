@@ -2,7 +2,7 @@
 
 import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource } from '@/components/common/confirm';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
@@ -19,53 +19,43 @@ import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import SkillEditorModal from '@/components/skills/SkillEditorModal';
 import type { SkillView } from '@/components/skills/types';
+import { useDeleteSkill, useSetSkillStatus, useSkillList } from '@/lib/api/queries/skills';
 
 export default function SkillsPage() {
   const tConfirm = useTranslations('common.confirm');
   const tFeedback = useTranslations('navigationFeedback');
   const deleteResource = useDeleteResource();
-  const [skills, setSkills] = useState<SkillView[]>([]);
-  const [loading, setLoading] = useState(true);
+  const skillsQuery = useSkillList();
+  const setSkillStatus = useSetSkillStatus();
+  const deleteSkill = useDeleteSkill();
+  const skills = useMemo<SkillView[]>(() => skillsQuery.data ?? [], [skillsQuery.data]);
+  // Only the first load shows the table's loading state; a background refetch keeps the rows.
+  const loading = skillsQuery.isPending;
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<SkillView | null>(null);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
 
-  const loadSkills = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/skills', { cache: 'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setSkills(data.skills ?? []);
-    } catch (err) {
-      console.error('Failed to load skills', err);
-      // An empty list would read as "none yet"; say the load failed instead.
-      notifications.show({ color: 'red', message: tFeedback('loadFailed') });
-    } finally {
-      setLoading(false);
-    }
-  }, [tFeedback]);
-
+  const { isError: skillsFailed, errorUpdatedAt: skillsFailedAt } = skillsQuery;
   useEffect(() => {
-    void loadSkills();
-  }, [loadSkills]);
+    if (!skillsFailed) return;
+    // An empty list would read as "none yet"; say the load failed instead.
+    notifications.show({ color: 'red', message: tFeedback('loadFailed') });
+  }, [skillsFailed, skillsFailedAt, tFeedback]);
 
   const toggleStatus = async (skill: SkillView) => {
     try {
       const nextStatus = skill.status === 'active' ? 'inactive' : 'active';
-      const res = await fetch(`/api/skills/${skill._id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: nextStatus }),
-      });
-      if (!res.ok) throw new Error('Failed to update skill');
+      try {
+        await setSkillStatus.mutateAsync({ id: skill._id, status: nextStatus });
+      } catch {
+        throw new Error('Failed to update skill');
+      }
       notifications.show({
         title: nextStatus === 'active' ? 'Skill enabled' : 'Skill disabled',
         message: `"${skill.title}" is now ${nextStatus}`,
         color: nextStatus === 'active' ? 'teal' : 'orange',
       });
-      await loadSkills();
     } catch (err) {
       notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to update', color: 'red' });
     }
@@ -78,13 +68,15 @@ export default function SkillsPage() {
       type: 'skill',
       id: String(target._id),
       action: async () => {
-        const res = await fetch(`/api/skills/${target._id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error('Failed to delete');
+        try {
+          await deleteSkill.mutateAsync(String(target._id));
+        } catch {
+          throw new Error('Failed to delete');
+        }
       },
     });
     if (!deleted) return;
     notifications.show({ title: 'Skill deleted', message: `"${target.title}" was deleted`, color: 'red' });
-    await loadSkills();
   };
 
   const openEditor = (skill: SkillView | null) => {
@@ -170,7 +162,8 @@ export default function SkillsPage() {
             ],
           },
         ]}
-        onRefresh={loadSkills}
+        onRefresh={() => void skillsQuery.refetch()}
+        refreshing={skillsQuery.isFetching}
         empty={{
           icon: <IconBulb size={26} stroke={1.7} />,
           title: 'No skills yet',
@@ -212,7 +205,7 @@ export default function SkillsPage() {
         skill={editing}
         onSaved={() => {
           setEditorOpen(false);
-          void loadSkills();
+          void skillsQuery.refetch();
         }}
       />
     </PageContainer>

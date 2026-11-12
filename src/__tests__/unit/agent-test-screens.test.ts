@@ -11,6 +11,8 @@
  */
 
 import { createElement as h } from 'react';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import { notifications } from '@mantine/notifications';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -76,7 +78,7 @@ function installApi(level: string | null, ...routes: Route[]): ApiMock {
 }
 
 async function show(element: Parameters<typeof mount>[0]): Promise<void> {
-  mounted.push(await mount(element));
+  mounted.push(await mount(h(QueryClientProvider, { client: newTestQueryClient() }, element)));
   await wait(60);
 }
 

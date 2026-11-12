@@ -12,6 +12,8 @@ import { ActionIcon, Button, Group, Stack, Text, TextInput } from '@mantine/core
 import { IconPlus, IconTrash } from '@tabler/icons-react';
 import type { IAgentSandboxSeedFile } from '@/lib/database/provider/types.domain';
 import { useTranslations } from '@/lib/i18n';
+import { apiDelete, apiPost, isApiError } from '@/lib/api/client';
+import { serverErrorOr } from '@/lib/api/queries/agents';
 import {
     SEED_MAX_FILES,
     SEED_MAX_FILE_BYTES,
@@ -51,14 +53,21 @@ export default function SandboxSeedFiles({ agentId, value, onChange }: SandboxSe
                 if (next.length >= SEED_MAX_FILES) { setError(t('tooMany', { max: SEED_MAX_FILES })); break; }
                 if (file.size > SEED_MAX_FILE_BYTES) { setError(t('tooLarge', { name: file.name })); continue; }
                 if (next.reduce((sum, f) => sum + f.size, 0) + file.size > SEED_MAX_TOTAL_BYTES) { setError(t('totalTooLarge')); break; }
-                const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}/sandbox-seed-files?name=${encodeURIComponent(file.name)}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': file.type || 'application/octet-stream' },
-                    body: file,
-                });
-                const body = await res.json().catch(() => ({}));
-                if (!res.ok) { setError(body?.error ?? t('uploadFailed', { name: file.name })); continue; }
-                const seed = body.seedFile as IAgentSandboxSeedFile;
+                let seed: IAgentSandboxSeedFile;
+                try {
+                    // The file goes up as the raw body (its own type), not as JSON.
+                    const body = await apiPost<{ seedFile: IAgentSandboxSeedFile }>(
+                        `/api/agents/${encodeURIComponent(agentId)}/sandbox-seed-files?name=${encodeURIComponent(file.name)}`,
+                        file,
+                        { headers: { 'Content-Type': file.type || 'application/octet-stream' } },
+                    );
+                    seed = body.seedFile;
+                } catch (uploadError) {
+                    // A refusal says why; a failed connection falls to the outer message.
+                    if (!isApiError(uploadError)) throw uploadError;
+                    setError(serverErrorOr(uploadError, t('uploadFailed', { name: file.name })));
+                    continue;
+                }
                 fresh.current.add(seed.id);
                 next = [...next, seed];
             }
@@ -75,7 +84,7 @@ export default function SandboxSeedFiles({ agentId, value, onChange }: SandboxSe
         onChange(files.filter((f) => f.id !== file.id));
         if (agentId && fresh.current.delete(file.id)) {
             const q = new URLSearchParams({ bucketKey: file.fileRef.bucketKey, objectKey: file.fileRef.objectKey });
-            void fetch(`/api/agents/${encodeURIComponent(agentId)}/sandbox-seed-files?${q}`, { method: 'DELETE' }).catch(() => undefined);
+            void apiDelete(`/api/agents/${encodeURIComponent(agentId)}/sandbox-seed-files?${q}`).catch(() => undefined);
         }
     };
 

@@ -99,7 +99,7 @@ describe('AgentToolExceptionsModal', () => {
   it('fetches a bound tool\'s schema for the argument suggestions', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       tools: [{ key: 'mail', actions: [{ key: 'send_email', inputSchema: { properties: { recipient: {}, cc: {} } } }] }],
-    })));
+    }), { headers: { 'content-type': 'application/json' } }));
     vi.stubGlobal('fetch', fetchMock);
     await open({ origin: 'tool', sourceKey: 'mail', exceptions: [{ pattern: 'x', action: 'deny' }] });
     await wait(10);

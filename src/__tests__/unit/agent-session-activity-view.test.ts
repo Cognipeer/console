@@ -10,6 +10,8 @@ import React, { createElement as h, act } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { MantineProvider } from '@mantine/core';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import SessionActivity from '@/components/agents/session/SessionActivity';
 import SessionDetailDrawer from '@/components/agents/studio/SessionDetailDrawer';
 import { resetViewer } from '@/components/agents/session/useViewer';
@@ -60,11 +62,13 @@ afterEach(() => {
 
 const flush = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); }); };
 
+const queryClient = newTestQueryClient();
+
 function mount(node: React.ReactElement) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  act(() => root!.render(h(MantineProvider, null, node)));
+  act(() => root!.render(h(QueryClientProvider, { client: queryClient }, h(MantineProvider, null, node))));
 }
 
 const event = (seq: number, type: string, data: Record<string, unknown> = {}): SessionLogEvent => ({ seq, type, data, created_at: '2026-10-11T10:00:00.000Z' });
@@ -122,7 +126,7 @@ describe('SessionActivity', () => {
     await flush();
     expect(text()).toContain('Run ended: finished');
 
-    act(() => root!.render(h(MantineProvider, null, h(SessionActivity, { agentId: 'a1', sessionId: 's1', active: true, refreshKey: '3:idle' }))));
+    act(() => root!.render(h(QueryClientProvider, { client: queryClient }, h(MantineProvider, null, h(SessionActivity, { agentId: 'a1', sessionId: 's1', active: true, refreshKey: '3:idle' })))));
     await flush();
     expect(eventCalls().at(-1)?.url).toBe('/api/agents/a1/sessions/s1/events?limit=100&after=2');
     expect(text()).toContain('hi');

@@ -31,6 +31,7 @@ import CreateToolModal from '@/components/tools/CreateToolModal';
 import { useDeleteResource } from '@/components/common/confirm/useDeleteResource';
 import { useCanWriteService } from '@/components/layout/launcher/LauncherContext';
 import { useTranslations } from '@/lib/i18n';
+import { apiDelete } from '@/lib/api/client';
 import type { ToolView } from '@/lib/services/tools';
 import { ToolSelectorModal } from '../ToolSelectorModal';
 import { sourceIdOf, systemToolFor, useToolSources, type ToolBinding, type ToolSourceGroup } from '../toolSources';
@@ -162,8 +163,11 @@ export default function AgentToolsList({
       id: group.recordId,
       extraWarning: t('config.toolsDeleteServerWarning'),
       action: async () => {
-        const res = await fetch(`/api/mcp/${encodeURIComponent(group.recordId!)}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error('The MCP server could not be deleted.');
+        try {
+          await apiDelete(`/api/mcp/${encodeURIComponent(group.recordId!)}`);
+        } catch {
+          throw new Error('The MCP server could not be deleted.');
+        }
       },
     });
     if (!deleted) return;

@@ -12,7 +12,9 @@ import { act } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { MantineProvider } from '@mantine/core';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { I18nProvider } from '@/lib/i18n';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import UseAgentTemplateShell from '@/components/agents/templates/UseAgentTemplateShell';
 import TemplateDetailDrawer from '@/components/agents/templates/TemplateDetailDrawer';
 import { AGENT_TEMPLATES } from '@/lib/services/agents/templates/catalog';
@@ -59,7 +61,8 @@ beforeAll(() => {
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 
-const wrap = (node: ReactNode) => h(MantineProvider, null, h(I18nProvider, { locale: 'en', children: node }));
+const queryClient = newTestQueryClient();
+const wrap = (node: ReactNode) => h(QueryClientProvider, { client: queryClient }, h(MantineProvider, null, h(I18nProvider, { locale: 'en', children: node })));
 function mount(node: ReactNode) {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -71,7 +74,7 @@ const text = () => document.body.textContent ?? '';
 const button = (label: string) => [...document.body.querySelectorAll('button')].find((b) => b.textContent?.trim() === label);
 const click = async (element: Element | null | undefined) => { await act(async () => { (element as HTMLElement).click(); await Promise.resolve(); }); await flush(); };
 
-const json = (body: unknown, ok = true, status = ok ? 200 : 500) => Promise.resolve({ ok, status, json: () => Promise.resolve(body) } as Response);
+const json = (body: unknown, ok = true, status = ok ? 200 : 500) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }));
 type Call = { url: string; method: string; body: Record<string, unknown> | null };
 let calls: Call[];
 let instantiateAnswer: unknown;

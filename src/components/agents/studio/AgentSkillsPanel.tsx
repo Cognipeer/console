@@ -25,6 +25,7 @@ import { notifications } from '@mantine/notifications';
 import { IconBulb, IconInfoCircle, IconPencil, IconPlus, IconTrash } from '@tabler/icons-react';
 import { useDeleteResource } from '@/components/common/confirm/useDeleteResource';
 import { useTranslations } from '@/lib/i18n';
+import { useDeleteSkill } from '@/lib/api/queries/skills';
 import SkillEditorModal from '@/components/skills/SkillEditorModal';
 import type { IAgentSkillPolicy } from '@/lib/database/provider/types.domain';
 import type { SkillView } from '@/components/skills/types';
@@ -52,6 +53,7 @@ export default function AgentSkillsPanel({
     agentId,
 }: AgentSkillsPanelProps) {
     const deleteResource = useDeleteResource();
+    const deleteSkill = useDeleteSkill();
     const tNouns = useTranslations('common.confirm.nouns');
     const [creating, setCreating] = useState(false);
     const [editing, setEditing] = useState<SkillView | null>(null);
@@ -76,8 +78,11 @@ export default function AgentSkillsPanel({
             name: skill.title,
             extraWarning: 'It belongs to this agent only, so it is also taken off the agent.',
             action: async () => {
-                const res = await fetch(`/api/skills/${encodeURIComponent(skill._id)}`, { method: 'DELETE' });
-                if (!res.ok) throw new Error('The skill could not be deleted.');
+                try {
+                    await deleteSkill.mutateAsync(skill._id);
+                } catch {
+                    throw new Error('The skill could not be deleted.');
+                }
             },
         });
         if (!deleted) return;

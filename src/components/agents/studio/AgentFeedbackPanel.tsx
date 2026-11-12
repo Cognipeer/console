@@ -9,7 +9,7 @@
  * in `canReadComments`); everyone who can read the agent sees the counts.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
     Anchor,
     Badge,
@@ -29,6 +29,7 @@ import Link from 'next/link';
 import EmptyState from '@/components/common/EmptyState';
 import SectionCard from '@/components/common/SectionCard';
 import { useTranslations } from '@/lib/i18n';
+import { useAgentFeedbackPages, useAgentFeedbackSummary } from '@/lib/api/queries/agents';
 import type { AgentFeedbackReason, AgentMessageFeedbackTotals } from '@/lib/database/provider/types.domain';
 import { formatRelativeTime } from '@/lib/utils/tracingUtils';
 import {
@@ -58,37 +59,22 @@ const PAGE_SIZE = 20;
 export default function AgentFeedbackPanel({ agentId }: { agentId: string }) {
     const t = useTranslations('agents.feedback');
     const [filter, setFilter] = useState<FeedbackFilterState>(DEFAULT_FEEDBACK_FILTER);
-    const [summary, setSummary] = useState<FeedbackSummary | null>(null);
-    const [items, setItems] = useState<FeedbackItem[]>([]);
-    const [total, setTotal] = useState(0);
-    const [canReadComments, setCanReadComments] = useState(false);
-    const [loading, setLoading] = useState(true);
-    const [loadingMore, setLoadingMore] = useState(false);
-    const [failed, setFailed] = useState(false);
 
-    const load = useCallback(async (reset: boolean, skip: number) => {
-        if (reset) setLoading(true); else setLoadingMore(true);
-        try {
-            const [summaryRes, listRes] = await Promise.all([
-                reset ? fetch(`/api/agents/${agentId}/feedback/summary?${feedbackQuery(filter)}`, { cache: 'no-store' }) : Promise.resolve(null),
-                fetch(`/api/agents/${agentId}/feedback?${feedbackQuery(filter, { limit: PAGE_SIZE, skip })}`, { cache: 'no-store' }),
-            ]);
-            if (!listRes.ok || (summaryRes && !summaryRes.ok)) throw new Error('load failed');
-            const list = await listRes.json() as { items: FeedbackItem[]; total: number; canReadComments: boolean };
-            if (summaryRes) setSummary((await summaryRes.json() as { summary: FeedbackSummary }).summary);
-            setItems((previous) => (reset ? list.items : [...previous, ...list.items]));
-            setTotal(list.total);
-            setCanReadComments(list.canReadComments);
-            setFailed(false);
-        } catch {
-            setFailed(true);
-        } finally {
-            setLoading(false);
-            setLoadingMore(false);
-        }
-    }, [agentId, filter]);
-
-    useEffect(() => { void load(true, 0); }, [load]);
+    const summaryQuery = useAgentFeedbackSummary<FeedbackSummary>(agentId, feedbackQuery(filter));
+    const pagesQuery = useAgentFeedbackPages<FeedbackItem>(
+        agentId,
+        feedbackQuery(filter),
+        (skip) => feedbackQuery(filter, { limit: PAGE_SIZE, skip }),
+    );
+    const summary = summaryQuery.data ?? null;
+    const items = useMemo(() => (pagesQuery.data?.pages ?? []).flatMap((page) => page.items), [pagesQuery.data]);
+    const lastPage = pagesQuery.data?.pages[pagesQuery.data.pages.length - 1];
+    const total = lastPage?.total ?? 0;
+    const canReadComments = lastPage?.canReadComments ?? false;
+    // Only a (re)load of the filter shows the skeletons; "load more" keeps the rows and spins its button.
+    const loading = summaryQuery.isPending || pagesQuery.isPending;
+    const loadingMore = pagesQuery.isFetchingNextPage;
+    const failed = summaryQuery.isError || pagesQuery.isError;
 
     const bars = reasonBars(summary?.reasons);
     const reasonLabel = (reason: AgentFeedbackReason) => t(`reason.${reason}`);
@@ -209,7 +195,7 @@ export default function AgentFeedbackPanel({ agentId }: { agentId: string }) {
                         ))}
                         {items.length < total ? (
                             <Group justify="center">
-                                <Button size="xs" variant="subtle" loading={loadingMore} onClick={() => void load(false, items.length)}>
+                                <Button size="xs" variant="subtle" loading={loadingMore} onClick={() => void pagesQuery.fetchNextPage()}>
                                     {t('loadMore')}
                                 </Button>
                             </Group>

@@ -31,6 +31,8 @@ import {
     Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { apiPatch, apiPost } from '@/lib/api/client';
+import { serverErrorOr } from '@/lib/api/queries/agents';
 import { IconArrowRight, IconCheck, IconInfoCircle } from '@tabler/icons-react';
 
 /** Mirrors the server's own scan — see `promptVariables.ts#collectTemplateVariables`. */
@@ -56,6 +58,15 @@ export interface PromptOption {
     template: string;
 }
 
+interface PromptWire {
+    id?: string;
+    _id?: string;
+    key: string;
+    name: string;
+    description?: string;
+    template: string;
+}
+
 /** Writes a prompt and returns it in the shape this panel lists. */
 async function writePrompt(
     url: string,
@@ -64,14 +75,16 @@ async function writePrompt(
     failure: string,
     fallbackId?: string,
 ): Promise<PromptOption> {
-    const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || failure);
+    let data: { prompt: PromptWire };
+    try {
+        data = method === 'POST'
+            ? await apiPost<{ prompt: PromptWire }>(url, body)
+            : await apiPatch<{ prompt: PromptWire }>(url, body);
+    } catch (error) {
+        throw new Error(serverErrorOr(error, failure));
     }
-    const data = await res.json();
     return {
-        _id: data.prompt.id ?? data.prompt._id ?? fallbackId,
+        _id: (data.prompt.id ?? data.prompt._id ?? fallbackId) as string,
         key: data.prompt.key,
         name: data.prompt.name,
         description: data.prompt.description,

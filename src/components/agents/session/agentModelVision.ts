@@ -11,6 +11,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { apiGet } from '@/lib/api/client';
 
 export interface AgentModelVision {
     key: string;
@@ -53,9 +54,8 @@ export function useAgentModelVision(modelKey: string | undefined, enabled = true
             return;
         }
         let cancelled = false;
-        fetch('/api/models?category=llm', { cache: 'no-store' })
-            .then((res) => (res.ok ? res.json() : null))
-            .then((data: { models?: ModelListItem[] } | null) => {
+        apiGet<{ models?: ModelListItem[] } | null>('/api/models?category=llm')
+            .then((data) => {
                 if (!cancelled) setVision(visionOf(data?.models ?? [], modelKey));
             })
             .catch(() => { if (!cancelled) setVision(null); });

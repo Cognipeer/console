@@ -10,7 +10,7 @@
  * (`conversationId`). Polls while anything is still queued or running.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
     ActionIcon,
     Badge,
@@ -28,11 +28,8 @@ import EmptyState from '@/components/common/EmptyState';
 import DataGrid from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
+import { RUN_POLL_MS, httpErrorOr, useAgentRuns, useCancelRun, type AgentRunRow } from '@/lib/api/queries/agents';
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
-import type { serializeAgentRun } from '@/lib/services/agents/agentRunService';
-
-/** A run as `GET /api/agents/:id/runs` sends it. */
-type AgentRunRow = ReturnType<typeof serializeAgentRun>;
 
 const ERROR_LABELS: Record<string, string> = {
     agent_error: 'Agent error',
@@ -50,7 +47,6 @@ const ERROR_LABELS: Record<string, string> = {
 type Filter = 'all' | 'active' | 'failed';
 // A scheduled run is not running yet but can still change (it is promoted when due) and can be canceled.
 export const ACTIVE_RUN_STATUSES = new Set(['scheduled', 'queued', 'running']);
-const POLL_MS = 5_000;
 
 export interface AgentRunsTableProps {
     agentId: string;
@@ -75,50 +71,40 @@ export default function AgentRunsTable({ agentId, onOpenConversation, conversati
     const tTriggers = useTranslations('agents.triggers');
     const tr = useTranslations('agents.reminders');
     const tFeedback = useTranslations('navigationFeedback');
-    const [runs, setRuns] = useState<AgentRunRow[] | null>(null);
     const [filter, setFilter] = useState<Filter>('all');
     const [canceling, setCanceling] = useState<string | null>(null);
-    const loadedRef = useRef(false);
 
-    const load = useCallback(async () => {
-        try {
-            const query = conversationId
-                ? `conversationId=${encodeURIComponent(conversationId)}&limit=50`
-                : `limit=200${trigger ? `&triggerId=${encodeURIComponent(trigger.id)}` : ''}`;
-            const res = await fetch(`/api/agents/${agentId}/runs?${query}`, { cache: 'no-store' });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json() as { runs: AgentRunRow[] };
-            setRuns(data.runs ?? []);
-            loadedRef.current = true;
-        } catch {
-            // The first load failing would read as "no runs yet": say so. A failed poll keeps the last list quietly.
-            if (!loadedRef.current) notifications.show({ color: 'red', message: tFeedback('loadFailed') });
-            setRuns((prev) => prev ?? []);
-        }
-    }, [agentId, trigger, conversationId, tFeedback]);
-
-    useEffect(() => { void load(); }, [load]);
+    const runsQuery = useAgentRuns(
+        agentId,
+        conversationId
+            ? `conversationId=${encodeURIComponent(conversationId)}&limit=50`
+            : `limit=200${trigger ? `&triggerId=${encodeURIComponent(trigger.id)}` : ''}`,
+    );
+    const cancelRun = useCancelRun(agentId);
+    // Null until the first answer; a failed read reads as none. Polls while anything is still queued or running.
+    const runs = useMemo<AgentRunRow[] | null>(
+        () => runsQuery.data ?? (runsQuery.isPending ? null : []),
+        [runsQuery.data, runsQuery.isPending],
+    );
+    const load = runsQuery.refetch;
+    const { isError: runsFailed, errorUpdatedAt: runsFailedAt, data: runsData } = runsQuery;
+    useEffect(() => {
+        // The first load failing would read as "no runs yet": say so. A failed poll keeps the last list quietly.
+        if (runsFailed && !runsData) notifications.show({ color: 'red', message: tFeedback('loadFailed') });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [runsFailed, runsFailedAt]);
 
     const activeCount = useMemo(() => (runs ?? []).filter((run) => ACTIVE_RUN_STATUSES.has(run.status)).length, [runs]);
     useEffect(() => { onActiveCountChange?.(activeCount); }, [activeCount, onActiveCountChange]);
 
-    // Poll only while something can still change.
-    useEffect(() => {
-        if (activeCount === 0) return;
-        const timer = setInterval(() => { void load(); }, POLL_MS);
-        return () => clearInterval(timer);
-    }, [activeCount, load]);
-
     const cancel = async (run: AgentRunRow) => {
         setCanceling(run.id);
         try {
-            const res = await fetch(`/api/agents/${agentId}/runs/${run.id}/cancel`, { method: 'POST' });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : `HTTP ${res.status}`);
+            await cancelRun.mutateAsync(run.id);
             notifications.show({ color: 'teal', message: run.status === 'queued' || run.status === 'scheduled' ? 'Run canceled' : 'Cancel requested — the run stops at its next step' });
             await load();
         } catch (error) {
-            notifications.show({ color: 'red', message: `Could not cancel: ${error instanceof Error ? error.message : String(error)}` });
+            notifications.show({ color: 'red', message: `Could not cancel: ${httpErrorOr(error)}` });
         } finally {
             setCanceling(null);
         }
@@ -185,7 +171,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, conversati
                     ]}
                 />
                 <Group gap="xs">
-                    {activeCount > 0 ? <Text size="xs" c="dimmed">Refreshing every {POLL_MS / 1000}s</Text> : null}
+                    {activeCount > 0 ? <Text size="xs" c="dimmed">Refreshing every {RUN_POLL_MS / 1000}s</Text> : null}
                     <Tooltip label="Refresh" withArrow>
                         <ActionIcon variant="subtle" color="gray" onClick={() => void load()} aria-label="Refresh runs">
                             <IconRefresh size={14} />
