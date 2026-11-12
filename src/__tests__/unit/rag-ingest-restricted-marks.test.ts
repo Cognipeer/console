@@ -12,7 +12,10 @@ const h = vi.hoisted(() => ({
   marksAtEmbed: [] as string[][],
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return { getDatabase, runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(await getDatabase()) };
+});
 vi.mock('@/lib/services/models/inferenceService', async () => {
   const { currentRestrictedKnowledgeTags } = await import('@/lib/services/rag/access/exposure');
   return {

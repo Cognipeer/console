@@ -19,7 +19,7 @@
  */
 
 import mime from 'mime-types';
-import { getDatabase, type DatabaseProvider, type IFileBucketRecord, type IFileRecord } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider, type IFileBucketRecord, type IFileRecord } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
 import { assertStorageStock, noteStoredBytes } from '@/lib/limits';
@@ -90,12 +90,6 @@ export interface ImportFromStorageInput {
   cursor?: string;
   /** Objects looked at per call; 1 to `IMPORT_MAX_LIMIT`. */
   limit?: number;
-}
-
-async function tenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
 }
 
 /**
@@ -184,87 +178,88 @@ export async function importFromStorage(input: ImportFromStorageInput): Promise<
   running.add(lock);
 
   try {
-    const db = await tenantDb(tenantDbName);
-    // Before anything is listed: what a shared location holds is not all this bucket's.
-    if ((await findBucketsSharingStorage(db, tenantId, bucket)).length > 0) {
-      throw storageLocationSharedError('import');
-    }
+    return await runWithTenantScope(tenantDbName, async (db) => {
+      // Before anything is listed: what a shared location holds is not all this bucket's.
+      if ((await findBucketsSharingStorage(db, tenantId, bucket)).length > 0) {
+        throw storageLocationSharedError('import');
+      }
 
-    const folder = resolveBucketPrefix(bucket);
-    const page = await withResilience(
-      () => runtime.listFiles({ ...(folder ? { prefix: folder } : {}), limit, ...(input.cursor ? { cursor: input.cursor } : {}) }),
-      fileResilience('list', tenantId, bucket.providerKey),
-    );
-
-    const skipsCompanions = COMPANION_FILE_DRIVERS.has(provider.driver);
-    const candidates: Array<{ key: string; name: string; handle: (typeof page.items)[number] }> = [];
-    for (const handle of page.items) {
-      const objectKey = handle.key.replace(/^\/+/, '');
-      if (folder && !objectKey.startsWith(`${folder}/`)) continue;
-      const key = folder ? objectKey.slice(folder.length + 1) : objectKey;
-      if (key === '' || key.endsWith('/')) continue;
-      if (objectKey.startsWith(CONNECTION_TEST_FOLDER) || key.startsWith(CONNECTION_TEST_FOLDER)) continue;
-      if (skipsCompanions && key.endsWith('.meta.json')) continue;
-      if (!isAddressableObjectKey(key)) continue;
-      candidates.push({ key, name: key.slice(key.lastIndexOf('/') + 1), handle });
-    }
-
-    const lookup = { providerKey: bucket.providerKey, bucketKey: bucket.key, projectId, keys: candidates.map((candidate) => candidate.key) };
-    const [named, copies] = await Promise.all([
-      db.listFileRecordsByKeys(lookup),
-      db.listFileRecordsByKeys({ ...lookup, field: 'markdownKey' }),
-    ]);
-    const known = new Set<string>([
-      ...named.map((record) => record.key),
-      ...copies.flatMap((record) => (record.markdownKey ? [record.markdownKey] : [])),
-    ]);
-    const fresh = candidates.filter((candidate) => !known.has(candidate.key));
-    let imported = 0;
-
-    if (fresh.length > 0) {
-      await assertRoomFor(
-        { domain: 'file', projectId, providerKey: bucket.providerKey, resourceKey: bucket.key, tenantDbName, tenantId, userId: importedBy },
-        db,
-        { files: fresh.length, bytes: fresh.reduce((sum, candidate) => sum + Math.max(candidate.handle.size ?? 0, 0), 0) },
+      const folder = resolveBucketPrefix(bucket);
+      const page = await withResilience(
+        () => runtime.listFiles({ ...(folder ? { prefix: folder } : {}), limit, ...(input.cursor ? { cursor: input.cursor } : {}) }),
+        fileResilience('list', tenantId, bucket.providerKey),
       );
 
-      const createdIds: string[] = [];
-      await mapLimit(fresh, CREATE_CONCURRENCY, async ({ key, name, handle }) => {
-        // The lock above is this process's. Another node may have registered the object since the lookup, so the
-        // key is asked once more right before the insert: the window is one insert, not the whole page.
-        if (await db.findFileRecordByKey(bucket.providerKey, bucket.key, key, projectId)) return;
-        const contentType = importedContentType(handle.contentType, name);
-        const record: Omit<IFileRecord, '_id' | 'createdAt' | 'updatedAt'> = {
-          tenantId,
-          projectId,
-          providerKey: bucket.providerKey,
-          bucketKey: bucket.key,
-          key,
-          name,
-          size: Math.max(handle.size ?? 0, 0),
-          ...(contentType ? { contentType } : {}),
-          ...(handle.checksum ? { checksum: handle.checksum } : {}),
-          ...(handle.etag ? { etag: handle.etag } : {}),
-          markdownStatus: 'skipped',
-          origin: 'import',
-          uploadedBy: importedBy,
-          createdBy: importedBy,
-        };
-        const stored = await db.createFileRecord(record);
-        if (stored._id) createdIds.push(String(stored._id));
-        imported += 1;
-      });
+      const skipsCompanions = COMPANION_FILE_DRIVERS.has(provider.driver);
+      const candidates: Array<{ key: string; name: string; handle: (typeof page.items)[number] }> = [];
+      for (const handle of page.items) {
+        const objectKey = handle.key.replace(/^\/+/, '');
+        if (folder && !objectKey.startsWith(`${folder}/`)) continue;
+        const key = folder ? objectKey.slice(folder.length + 1) : objectKey;
+        if (key === '' || key.endsWith('/')) continue;
+        if (objectKey.startsWith(CONNECTION_TEST_FOLDER) || key.startsWith(CONNECTION_TEST_FOLDER)) continue;
+        if (skipsCompanions && key.endsWith('.meta.json')) continue;
+        if (!isAddressableObjectKey(key)) continue;
+        candidates.push({ key, name: key.slice(key.lastIndexOf('/') + 1), handle });
+      }
 
-      await withdrawIfBucketClosed(db, bucket, projectId, createdIds);
-      noteStoredBytes(tenantId, fresh.reduce((sum, candidate) => sum + Math.max(candidate.handle.size ?? 0, 0), 0));
-    }
+      const lookup = { providerKey: bucket.providerKey, bucketKey: bucket.key, projectId, keys: candidates.map((candidate) => candidate.key) };
+      const [named, copies] = await Promise.all([
+        db.listFileRecordsByKeys(lookup),
+        db.listFileRecordsByKeys({ ...lookup, field: 'markdownKey' }),
+      ]);
+      const known = new Set<string>([
+        ...named.map((record) => record.key),
+        ...copies.flatMap((record) => (record.markdownKey ? [record.markdownKey] : [])),
+      ]);
+      const fresh = candidates.filter((candidate) => !known.has(candidate.key));
+      let imported = 0;
 
-    return {
-      scanned: page.items.length,
-      imported,
-      skipped: page.items.length - imported,
-      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-    };
+      if (fresh.length > 0) {
+        await assertRoomFor(
+          { domain: 'file', projectId, providerKey: bucket.providerKey, resourceKey: bucket.key, tenantDbName, tenantId, userId: importedBy },
+          db,
+          { files: fresh.length, bytes: fresh.reduce((sum, candidate) => sum + Math.max(candidate.handle.size ?? 0, 0), 0) },
+        );
+
+        const createdIds: string[] = [];
+        await mapLimit(fresh, CREATE_CONCURRENCY, async ({ key, name, handle }) => {
+          // The lock above is this process's. Another node may have registered the object since the lookup, so the
+          // key is asked once more right before the insert: the window is one insert, not the whole page.
+          if (await db.findFileRecordByKey(bucket.providerKey, bucket.key, key, projectId)) return;
+          const contentType = importedContentType(handle.contentType, name);
+          const record: Omit<IFileRecord, '_id' | 'createdAt' | 'updatedAt'> = {
+            tenantId,
+            projectId,
+            providerKey: bucket.providerKey,
+            bucketKey: bucket.key,
+            key,
+            name,
+            size: Math.max(handle.size ?? 0, 0),
+            ...(contentType ? { contentType } : {}),
+            ...(handle.checksum ? { checksum: handle.checksum } : {}),
+            ...(handle.etag ? { etag: handle.etag } : {}),
+            markdownStatus: 'skipped',
+            origin: 'import',
+            uploadedBy: importedBy,
+            createdBy: importedBy,
+          };
+          const stored = await db.createFileRecord(record);
+          if (stored._id) createdIds.push(String(stored._id));
+          imported += 1;
+        });
+
+        await withdrawIfBucketClosed(db, bucket, projectId, createdIds);
+        noteStoredBytes(tenantId, fresh.reduce((sum, candidate) => sum + Math.max(candidate.handle.size ?? 0, 0), 0));
+      }
+
+      return {
+        scanned: page.items.length,
+        imported,
+        skipped: page.items.length - imported,
+        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+      };
+    });
   } finally {
     running.delete(lock);
   }

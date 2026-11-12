@@ -13,6 +13,7 @@ const hoisted = vi.hoisted(() => ({ db: undefined as unknown }));
 vi.mock('@/lib/database', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   getDatabase: async () => hoisted.db,
+  runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(hoisted.db),
 }));
 
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
