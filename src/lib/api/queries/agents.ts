@@ -245,6 +245,8 @@ export function useAgentVersionOptionsQuery(agentKey: string | null | undefined,
     },
     enabled: enabled && Boolean(agentKey),
     retry: false,
+    // Versions are published from AgentDetailPage, outside these hooks: every mount must refetch.
+    staleTime: 0,
   });
 }
 

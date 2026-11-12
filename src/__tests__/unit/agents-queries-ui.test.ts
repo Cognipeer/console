@@ -17,6 +17,7 @@ import {
   useAgentReminders,
   useAgentRuns,
   useAgentTemplates,
+  useAgentVersionOptionsQuery,
   useAttachmentBucketsQuery,
   useDeleteAgent,
   useSaveAgent,
@@ -147,6 +148,26 @@ describe('agent list hooks', () => {
       await probe.current.mutateAsync({ body: {} }).catch((error) => { failure = error; });
     });
     expect(serverErrorOr(failure, 'Failed to create')).toBe('Key is taken');
+  });
+});
+
+describe('agent version options', () => {
+  it('refetches on every mount so a freshly published version is offered', async () => {
+    const api = installApiMock([
+      ['GET', '/api/agents', () => ({ agents: [agentRow('a1')] })],
+      ['GET', '/api/agents/a1/versions', () => ({ publishedVersion: 2, versions: [{ version: 2 }, { version: 1 }] })],
+    ]);
+    const client = newTestQueryClient();
+    const probe = await renderHook(client, () => useAgentVersionOptionsQuery('a1', true));
+    await settle();
+    expect(probe.current.data?.versions).toEqual([{ version: 2, published: true }, { version: 1, published: false }]);
+    expect(api.to('GET', '/api/agents/a1/versions')).toHaveLength(1);
+
+    await act(async () => root?.unmount());
+    host?.remove();
+    await renderHook(client, () => useAgentVersionOptionsQuery('a1', true));
+    await settle();
+    expect(api.to('GET', '/api/agents/a1/versions')).toHaveLength(2);
   });
 });
 
