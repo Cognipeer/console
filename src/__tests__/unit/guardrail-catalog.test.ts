@@ -82,7 +82,7 @@ import {
 // The engine reaches the `@/lib/database` barrel, which is why the mock above
 // has to be in place before this import. `policyOwnMessage` itself is pure.
 import { policyOwnMessage } from '@/lib/services/guardrail/hooks/engine';
-import { validateGuardrailHooks } from '@/lib/services/guardrail/hooks/legacy';
+import { validateGuardrailHooks } from '@/lib/services/guardrail/hooks/validate';
 import { familyMeta, familyLabel } from '@/components/guardrails/policyFamilyMeta';
 import {
   COMMON_POLICY_FIELDS,

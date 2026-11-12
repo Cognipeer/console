@@ -48,7 +48,7 @@
  *   · `components/guardrails/GuardrailHooksMatrix.tsx` — `defaultPolicyFor` is
  *     its own family switch, built before `defaults()` existed here and still
  *     hook-aware in a way `defaults()` is not. Compile error if you forget.
- *   · `hooks/legacy.ts` `validateGuardrailHooks` — its `switch (policy.family)`
+ *   · `hooks/validate.ts` `validateGuardrailHooks` — its `switch (policy.family)`
  *     has a hand-written arm per family, and a family with no arm FALLS THROUGH
  *     SILENTLY. A `required` field declared here is then enforced in the editor
  *     and nowhere on the server, so an incomplete policy saves. No compile
@@ -378,7 +378,7 @@ const hostOf = (value: unknown): string => {
  * the field it belongs in — a validator that merely said "invalid" would leave
  * the operator with the same question they started with.
  *
- * A HINT, NOT A GATE. `validateGuardrailHooks` (hooks/legacy.ts) is the save-time
+ * A HINT, NOT A GATE. `validateGuardrailHooks` (hooks/validate.ts) is the save-time
  * authority and knows nothing about this, so a policy carrying a misplaced entry
  * still saves — which is right, because the entry is useless rather than
  * illegal. The drawer surfaces it beside the control; see the handover note.

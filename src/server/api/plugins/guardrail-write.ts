@@ -25,11 +25,9 @@ import {
   readPolicyList,
 } from '@/lib/services/guardrail/hooks/contract';
 import type { PolicyFamily } from '@/lib/services/guardrail/hooks/contract';
-import {
-  projectHooksToLegacy,
-  validateGuardrailHooks,
-} from '@/lib/services/guardrail/hooks/legacy';
+import { projectHooksToLegacy } from '@/lib/services/guardrail/hooks/legacy';
 import type { LegacyProjectionContext } from '@/lib/services/guardrail/hooks/legacy';
+import { validateGuardrailHooks } from '@/lib/services/guardrail/hooks/validate';
 // Reached at its own path, like the hook-plane modules above: this is the
 // family's own account of why a pattern will not run, and a configuration
 // surface that rejects a rule owes its author that account rather than a

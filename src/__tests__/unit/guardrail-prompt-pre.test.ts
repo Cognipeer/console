@@ -52,7 +52,8 @@ import type {
   GuardrailHooksConfig,
   HookId,
 } from '@/lib/services/guardrail/hooks/contract';
-import { liftLegacyBindings, liftLegacyHooks, validateGuardrailHooks } from '@/lib/services/guardrail/hooks/legacy';
+import { liftLegacyBindings, liftLegacyHooks } from '@/lib/services/guardrail/hooks/legacy';
+import { validateGuardrailHooks } from '@/lib/services/guardrail/hooks/validate';
 import { parseHookId } from '@/server/api/plugins/guardrails';
 import type { IGuardrail } from '@/lib/database/provider/types.domain';
 

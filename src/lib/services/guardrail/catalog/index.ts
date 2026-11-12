@@ -29,7 +29,7 @@
  * and the save-time validator can be talking about the same thing.
  *
  * ── WHAT IT IS NOT ──────────────────────────────────────────────────────────
- * Not the save-time authority. `validateGuardrailHooks` (hooks/legacy.ts) is,
+ * Not the save-time authority. `validateGuardrailHooks` (hooks/validate.ts) is,
  * and it runs behind the database barrel where a client cannot reach it. Every
  * rule here is one the server also applies: a client validator that is stricter
  * blocks a save the server would accept, and a looser one promises a save the

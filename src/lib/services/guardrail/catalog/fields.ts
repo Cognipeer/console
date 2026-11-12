@@ -667,7 +667,7 @@ export function validatePolicyField(
 /**
  * Every field of one policy, in declaration order.
  *
- * NOT the authority. `validateGuardrailHooks` (hooks/legacy.ts) is, and it runs
+ * NOT the authority. `validateGuardrailHooks` (hooks/validate.ts) is, and it runs
  * behind the database barrel where a client bundle cannot reach it. This is the
  * editor's immediate feedback, and every rule it applies is one the server also
  * applies — a client validator that is stricter blocks a save the server would

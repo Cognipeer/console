@@ -373,7 +373,7 @@ function storedConfig(): GuardrailHooksConfig {
         runIf: 'always',
         // NOT decoration, and the fixture was wrong without it: an enabled
         // LLM-backed policy with no `modelKey` is refused by
-        // `validateGuardrailHooks` (hooks/legacy.ts:1052), which never consults
+        // `validateGuardrailHooks` (hooks/validate.ts), which never consults
         // the record-level key — `liftLegacyHooks` copies
         // `moderation.modelKey ?? record.modelKey` down into the policy
         // precisely so it does not have to. Until the server half of this file

@@ -129,7 +129,8 @@ import type {
 } from '@/lib/services/guardrail/hooks/contract';
 import { drainPendingTasks } from '@/lib/core/asyncTask';
 import { runHook } from '@/lib/services/guardrail/hooks/engine';
-import { ensureHooks, validateGuardrailHooks } from '@/lib/services/guardrail/hooks/legacy';
+import { ensureHooks } from '@/lib/services/guardrail/hooks/legacy';
+import { validateGuardrailHooks } from '@/lib/services/guardrail/hooks/validate';
 import { resetRecordCaches } from '@/lib/services/guardrail/hooks/recordCache';
 
 // ═══════════════════════════════════════════════════════════════════════════
