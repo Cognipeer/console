@@ -23,7 +23,7 @@
  */
 
 import { isSyntheticActor } from './syntheticActor';
-import { getDatabase, type IAgentConfig } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type IAgentConfig } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { AgentSpendLimitError } from './agentErrors';
 import { checkBudget, settleUsageBudget, type QuotaContext } from '@/lib/quota/quotaGuard';
@@ -123,9 +123,7 @@ export async function assertQueuedTurnSpendAllowed(input: {
   agentKey: string;
   userId?: string;
 }): Promise<void> {
-  const db = await getDatabase();
-  await db.switchToTenant(input.tenantDbName);
-  const agent = await db.findAgentByKey(input.agentKey, input.projectId);
+  const agent = await runWithTenantScope(input.tenantDbName, (db) => db.findAgentByKey(input.agentKey, input.projectId));
   const config = agent?.config;
   if (!config?.modelKey || config.kind === 'flow' || (config.kind === 'external' && config.connection)) return;
   const scope = await resolveAgentSpendScope(input);
