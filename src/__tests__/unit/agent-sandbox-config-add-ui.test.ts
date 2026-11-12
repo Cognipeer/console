@@ -10,13 +10,15 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MantineProvider } from '@mantine/core';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import AgentSandboxPanel from '@/components/agents/studio/AgentSandboxPanel';
 import type { IAgentSandboxConfig } from '@/lib/database/provider/types.domain';
 
 (globalThis as { React?: typeof React }).React = React;
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
+const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
 
 beforeAll(() => {
   window.matchMedia = window.matchMedia || ((query: string) => ({
@@ -64,11 +66,13 @@ describe('the sandbox panel, Add from Config', () => {
     function Harness() {
       const [value, setValue] = useState<IAgentSandboxConfig | undefined>({ enabled: true, templateKey: 't' });
       // env="test": no transitions or portals, so the popover renders in place at once.
-      return h(MantineProvider, { env: 'test' }, h(AgentSandboxPanel, {
+      return h(QueryClientProvider, { client: queryClient }, h(MantineProvider, { env: 'test' }, h(AgentSandboxPanel, {
         value,
         onChange: (next: IAgentSandboxConfig | undefined) => { latest = next; setValue(next); },
-      }));
+      })));
     }
+    // The Config picker reads its catalog through React Query.
+    const queryClient = newTestQueryClient();
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
