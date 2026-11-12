@@ -1523,7 +1523,7 @@ describeForEachProvider('MCP Hub servers + audit logs', (getDb) => {
     await db.switchToTenant(dbName);
   });
 
-  it('round-trips a multi-source server (remote + stdio + exposure + aegis + lastError)', async () => {
+  it('round-trips a multi-source server (remote + stdio + exposure + guardrail + lastError)', async () => {
     const db = getDb();
     const created = await db.createMcpServer({
       tenantId,
@@ -1538,7 +1538,7 @@ describeForEachProvider('MCP Hub servers + audit logs', (getDb) => {
       upstreamBaseUrl: undefined,
       upstreamAuth: { type: 'token', sealed: 'sealed-blob' },
       exposure: { protocols: ['streamable-http'], accessMode: 'public' },
-      aegis: { mode: 'monitor', shieldId: 'shield-1' },
+      guardrail: { mode: 'monitor', guardrailKey: 'tool-policy' },
       status: 'active',
       endpointSlug: 'abcd1234abcd1234',
       totalRequests: 0,
@@ -1554,7 +1554,7 @@ describeForEachProvider('MCP Hub servers + audit logs', (getDb) => {
     expect(found?.upstreamAuth.sealed).toBe('sealed-blob');
     expect(found?.exposure?.accessMode).toBe('public');
     expect(found?.exposure?.protocols).toEqual(['streamable-http']);
-    expect(found?.aegis?.mode).toBe('monitor');
+    expect(found?.guardrail).toEqual({ mode: 'monitor', guardrailKey: 'tool-policy' });
 
     const bySlug = await db.findMcpServerByEndpointSlug('abcd1234abcd1234');
     expect(String(bySlug?._id)).toBe(String(created._id));
@@ -1579,6 +1579,7 @@ describeForEachProvider('MCP Hub servers + audit logs', (getDb) => {
     await db.createMcpRequestLog({
       tenantId,
       projectId: 'proj-1',
+      serverId: 'srv-a-id',
       serverKey: 'srv-a',
       toolName: 'echo',
       status: 'success',
@@ -1598,20 +1599,26 @@ describeForEachProvider('MCP Hub servers + audit logs', (getDb) => {
       errorMessage: 'nope',
     });
 
-    const logs = await db.listMcpRequestLogs({
-      serverId: 'nonexistent-server-id',
-      serverKey: 'srv-a',
+    // A row without a serverId (or one under a recycled key) is never matched by key.
+    await db.createMcpRequestLog({
+      tenantId,
       projectId: 'proj-1',
+      serverKey: 'srv-a',
+      toolName: 'keyless',
+      status: 'success',
     });
+
+    const logs = await db.listMcpRequestLogs({ serverId: 'srv-a-id', serverKey: 'srv-a' });
     expect(logs).toHaveLength(1);
+    expect(await db.listMcpRequestLogs({ serverId: 'srv-a-recreated-id', serverKey: 'srv-a' })).toHaveLength(0);
     expect(logs[0].callerType).toBe('public');
     expect(logs[0].transport).toBe('jsonrpc');
     expect(logs[0].sourceType).toBe('stdio');
     expect(logs[0].sessionId).toBe('sess-1');
 
     const recentP1 = await db.listRecentMcpRequestLogs({ projectId: 'proj-1' });
-    expect(recentP1).toHaveLength(1);
-    expect(recentP1[0].serverKey).toBe('srv-a');
+    expect(recentP1).toHaveLength(2);
+    expect(recentP1.every((log) => log.serverKey === 'srv-a')).toBe(true);
   });
 
   it('creates and filters audit logs', async () => {

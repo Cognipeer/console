@@ -8,10 +8,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 
-vi.mock('@/lib/database', async (importActual) => ({
-  ...(await importActual<typeof import('@/lib/database')>()),
-  getDatabase: vi.fn(),
-}));
+vi.mock('@/lib/database', async (importActual) => {
+  const getDatabase = vi.fn();
+  return {
+    ...(await importActual<typeof import('@/lib/database')>()),
+    getDatabase,
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 
 vi.mock('@/lib/services/mcp', async (importActual) => ({
   ...(await importActual<typeof import('@/lib/services/mcp')>()),

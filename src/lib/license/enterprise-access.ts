@@ -103,11 +103,10 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     module: 'reports',
     prefixes: ['/api/reports/'],
   },
-  // NOTE: there is deliberately NO rule for the guardrail hook plane (the old
-  // 'aegis' enforcement module, whose `/api/aegis/*` prefixes lived here). The
+  // NOTE: there is deliberately NO rule for the guardrail hook plane. The
   // whole enforcement surface — hooks, tool policy, webhook checks, streaming
   // gates — is COMMUNITY, so a FREE tenant must reach it. Re-adding an entry
-  // for `/api/guardrails/` or `/api/aegis/` would 402 every free tenant on
+  // for `/api/guardrails/` would 402 every free tenant on
   // functionality they are entitled to; RBAC (the `guardrails` service) is the
   // only gate that applies.
   {

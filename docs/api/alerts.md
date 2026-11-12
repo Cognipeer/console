@@ -38,7 +38,7 @@ Create and update take these fields; reads return them together with `_id`, `ten
 |-------|------|-------------|
 | `name` | string | Required on create, at most 120 characters |
 | `description` | string | At most 1,000 characters. An empty string clears it |
-| `module` | string | `agents`, `models`, `rag`, `mcp`, `tools`, `inference`, `guardrails`, `analysis`, `evaluation`, `redteam` or `ai-app-gateway`. A new rule cannot use the retired `aegis` module |
+| `module` | string | `agents`, `models`, `rag`, `mcp`, `tools`, `inference`, `guardrails`, `analysis`, `evaluation`, `redteam` or `ai-app-gateway` |
 | `metric` | string | A metric of that module (`meta.moduleMetrics`) |
 | `condition` | object | What counts as a breach (below) |
 | `windowMinutes` | integer | Evaluation window: `5`, `15`, `30`, `60`, `120`, `240` or `1440` |

@@ -372,8 +372,6 @@ describe('sqlite viaServerKey column', () => {
     const logs = await db.listMcpRequestLogs({
       serverId: String(memberA._id),
       serverKey: memberA.key,
-      projectId: memberA.projectId,
-      createdAt: memberA.createdAt,
     }, { limit: 50 });
     expect(logs.some((l) => l.viaServerKey)).toBe(true);
   });

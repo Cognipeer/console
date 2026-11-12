@@ -5,10 +5,8 @@
  *
  * ── HOW THE AUDIT TRAIL STAYS CLEAN ────────────────────────────────────────
  * Every probe runs with `shadow: true`. That one flag suppresses the evaluation
- * log write AND the usage event in the engine, in one place. The plane this
- * replaces achieved the same thing by constructing a throwaway in-memory store
- * and casting into its private `memory` map (aegis/redteam.ts:31) — a shadow
- * copy that could, and did, drift from the real evaluation path.
+ * log write AND the usage event in the engine, in one place. Probing a shadow
+ * copy of the evaluation path instead would drift from the real one.
  *
  * ── HOW "WHAT WOULD HAPPEN" IS OBTAINED ────────────────────────────────────
  * The plane this replaces forced its shadow shield to `mode: 'enforce'` so the

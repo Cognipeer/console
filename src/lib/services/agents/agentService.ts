@@ -111,7 +111,7 @@ import type { GuardrailBindingSource } from '@/lib/services/guardrail/hooks/bind
 import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/services/mcp';
 import { consoleIdentityCallerOf, consoleIdentityOfPausedTurn, consoleIdentityPersonOf, type ConsoleIdentityCaller, type ConsoleIdentityPerson } from '@/lib/iam/consoleIdentity';
 // By path: the barrel does not export it, and it is the ONE reader of a
-// server's `guardrail` / legacy `aegis` columns (`mcpService.ts`).
+// server's `guardrail` column (`mcpService.ts`).
 import { getToolAnnotationOverrides, resolveMcpGuardrailBinding, resolveSourceType } from '@/lib/services/mcp/mcpService';
 import { defaultAnnotationsForSource } from '@/lib/services/mcp/toolAnnotations';
 import { currentTurnSignal, runWithTurnSignal } from '@/lib/core/turnSignal';

@@ -75,7 +75,7 @@ const escape = () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'E
 
 describe('ServicePermissionMatrix', () => {
   function Harness({ role, mode, onDraft }: { role: string | null; mode: 'person' | 'group'; onDraft: (d: MatrixDraft) => void }) {
-    const [draft, setDraft] = useState<MatrixDraft>(() => readDraft({ aegis: 'admin' }));
+    const [draft, setDraft] = useState<MatrixDraft>(() => readDraft({}));
     onDraft(draft);
     return createElement(ServicePermissionMatrix, { draft, onChange: setDraft, role, mode });
   }
@@ -91,16 +91,15 @@ describe('ServicePermissionMatrix', () => {
     // a plain user writes in Model Hub by role, and has no access to an administration service
     expect(q('tr[data-service="models"]')?.textContent).toContain('Write');
     expect(q('tr[data-service="iam"]')?.textContent).toContain('No access');
-    // nothing chosen: nothing stored; a retired service never shows up
-    expect(toPermissions(draft)).toEqual({ aegis: 'admin' });
-    expect(q('tr[data-service="aegis"]')).toBeNull();
+    // nothing chosen: nothing stored
+    expect(toPermissions(draft)).toEqual({});
 
     await pick('models', 'Read');
-    expect(toPermissions(draft)).toEqual({ aegis: 'admin', models: 'read' });
+    expect(toPermissions(draft)).toEqual({ models: 'read' });
     await pick('iam', 'No access');
-    expect(toPermissions(draft)).toEqual({ aegis: 'admin', models: 'read', iam: 'none' });
+    expect(toPermissions(draft)).toEqual({ models: 'read', iam: 'none' });
     await pick('models', 'Role default');
-    expect(toPermissions(draft)).toEqual({ aegis: 'admin', iam: 'none' });
+    expect(toPermissions(draft)).toEqual({ iam: 'none' });
   });
 
   it('counts the changed services, filters to them and resets', async () => {
@@ -112,7 +111,7 @@ describe('ServicePermissionMatrix', () => {
     await click(qa<HTMLLabelElement>('label').find((l) => l.textContent === 'Changed (2)'));
     expect(qa('tbody tr')).toHaveLength(2);
     await click(buttonByText('Reset to role default'));
-    expect(toPermissions(draft)).toEqual({ aegis: 'admin' });
+    expect(toPermissions(draft)).toEqual({});
   });
 
   it('for a group without a role the default is "No grant"', async () => {
@@ -299,13 +298,13 @@ describe('ChangeRoleShell', () => {
 // ── edit access ────────────────────────────────────────────────────────────
 
 describe('EditAccessShell', () => {
-  const ann = { id: 'u-ann', name: 'Ann Lee', email: 'ann@example.com', role: 'user', servicePermissions: { models: 'read', aegis: 'admin' } };
+  const ann = { id: 'u-ann', name: 'Ann Lee', email: 'ann@example.com', role: 'user', servicePermissions: { models: 'read' } };
   const pickIn = async (service: string, label: string) => {
     const row = q(`tr[data-service="${service}"]`, shell())!;
     await click(qa<HTMLLabelElement>('label', row).find((l) => l.textContent === label));
   };
 
-  it('starts from the direct overrides, previews the whole draft and saves it with the entries it does not offer', async () => {
+  it('starts from the direct overrides, previews the whole draft and saves it', async () => {
     const onSaved = vi.fn();
     await show(createElement(EditAccessShell, { open: true, person: ann, onClose: vi.fn(), onSaved } as never), [
       ['POST', '/api/iam/principals/user/u-ann/preview', () => ({ effective: [], changes: [{ service: 'agents', from: 'write', to: 'admin' }], projects: null })],
@@ -317,12 +316,12 @@ describe('EditAccessShell', () => {
     await pickIn('agents', 'Admin');
     expect(shellButton('Save access')!.disabled).toBe(false);
     await settle(700);
-    expect(api.to('POST', '/api/iam/principals/user/u-ann/preview')[0]?.body).toEqual({ servicePermissions: { models: 'read', agents: 'admin', aegis: 'admin' } });
+    expect(api.to('POST', '/api/iam/principals/user/u-ann/preview')[0]?.body).toEqual({ servicePermissions: { models: 'read', agents: 'admin' } });
     expect(inShell('[data-testid="access-change"]')?.textContent).toContain('Agents: Write → Admin');
 
     await click(shellButton('Save access'));
     await settle(80);
-    expect(api.to('PATCH', '/api/users/u-ann/permissions')[0]?.body).toEqual({ servicePermissions: { models: 'read', agents: 'admin', aegis: 'admin' } });
+    expect(api.to('PATCH', '/api/users/u-ann/permissions')[0]?.body).toEqual({ servicePermissions: { models: 'read', agents: 'admin' } });
     expect(onSaved).toHaveBeenCalled();
   });
 
@@ -334,8 +333,8 @@ describe('EditAccessShell', () => {
     await click(buttonByText('Reset to role default'));
     await click(shellButton('Save access'));
     await settle(60);
-    // the retired service stays; everything the matrix offers is back to the role default
-    expect(api.to('PATCH', '/api/users/u-ann/permissions')[0]?.body).toEqual({ servicePermissions: { aegis: 'admin' } });
+    // everything the matrix offers is back to the role default
+    expect(api.to('PATCH', '/api/users/u-ann/permissions')[0]?.body).toEqual({ servicePermissions: {} });
   });
 });
 

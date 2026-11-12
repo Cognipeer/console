@@ -66,7 +66,6 @@ import { withoutRestrictedMcpLogContent } from '../restrictedKnowledgeRequest';
 import {
   VALID_AUTH_TYPES,
   auditContextFor,
-  parseAegis,
   parseExposure,
   parseGuardrail,
   parseRemoteConfig,
@@ -270,18 +269,6 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           enterpriseBuild: IS_ENTERPRISE_BUILD,
           licenseEnterprise,
           requiresEnterprise: false,
-        },
-        // @deprecated Mirror of `guardrail`, kept for the release in which the
-        // dashboard bundle may be older than this API. The four keys are the
-        // ones the shipped UI reads — dropping any of them mid-deploy makes the
-        // MCP create screen render an "unavailable" state for a feature that is
-        // now always available, which is why `hookAvailable` no longer folds in
-        // `licenseEnterprise`.
-        aegis: {
-          hookAvailable: guardrailHookAvailable,
-          seamAvailable: guardrailHookAvailable,
-          enterpriseBuild: IS_ENTERPRISE_BUILD,
-          licenseEnterprise,
         },
         // MCP Hubs ship as a whole separate plugin in the enterprise overlay
         // (no seam ref to check, unlike sandbox/guardrail) — the build flag
@@ -554,7 +541,6 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
       // binding is ungated, on every plan, to match create behaviour.
       const licenseEnterprise = isEnterpriseLicenseType(session.licenseType);
       const nextStdioConfig = body.stdioConfig !== undefined ? parseStdioConfig(body.stdioConfig) : undefined;
-      const nextAegis = body.aegis !== undefined ? parseAegis(body.aegis) : undefined;
       const nextGuardrail = body.guardrail !== undefined ? parseGuardrail(body.guardrail) : undefined;
       if (nextStdioConfig?.executionMode === 'sandbox' && !(licenseEnterprise && mcpSandboxRunner.current)) {
         return reply.code(402).send({
@@ -592,7 +578,6 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         endpointSlug: typeof body.endpointSlug === 'string' && body.endpointSlug.trim()
           ? body.endpointSlug.trim()
           : undefined,
-        aegis: nextAegis,
         guardrail: nextGuardrail,
         ...(nextAccess?.ok ? { access: nextAccess.access } : {}),
         runtimeHeaders: body.runtimeHeaders as { allow?: boolean; allowedNames?: string[] } | null | undefined,

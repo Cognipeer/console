@@ -21,7 +21,10 @@ const db = {
     findProviderByKey: vi.fn(),
 };
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn(async () => db) }));
+vi.mock('@/lib/database', () => ({
+    getDatabase: vi.fn(async () => db),
+    runWithTenantScope: vi.fn(async (_tenantDbName: string, fn: (scoped: unknown) => unknown) => fn(db)),
+}));
 
 const sandboxAvailability = vi.hoisted(() => ({ value: { available: true } as Record<string, unknown> }));
 vi.mock('@/lib/services/agents/agentSandboxTools', () => ({

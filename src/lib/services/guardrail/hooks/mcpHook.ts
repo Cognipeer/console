@@ -4,15 +4,10 @@
  *
  * Every MCP tool call on a server whose binding is not 'off' is evaluated by
  * the guardrail hook plane: arguments at `tool.pre`, the result at `tool.post`.
- * It replaces `aegis/mcpGuardrailHook.ts` with the SAME seam — the interface,
- * the context shape and the `{ current }` ref are untouched, so
- * `mcpService.ts:1710-1727` and `:1780-1786` keep working and the enterprise
- * overlay's registry only has to stop assigning its own implementation.
  *
  * ── `ctx.shieldId` IS DEAD AND IS IGNORED ──────────────────────────────────
- * Every persisted value in that field is an id from the `aegis_shields` table,
- * which no longer exists. Passing one to the engine as a guardrail key would
- * resolve nothing; passing it to the LEGACY facade would throw
+ * Every persisted value in that field is a dead reference. Passing one to the
+ * engine as a guardrail key would resolve nothing; passing it to the LEGACY facade would throw
  * `Guardrail with key "..." not found`, and that throw propagates out of
  * `beforeToolCall` into `executeMcpTool` — breaking EVERY tool call on every
  * server whose binding is not 'off'. The binding is resolved from the SERVER
@@ -208,7 +203,7 @@ function buildScope(ctx: McpGuardrailContext, tenantDbName: string): HookScope {
 
 /**
  * The human-readable half of the seam's `reason`, which `mcpService` renders as
- * `Blocked by Aegis shield: <reason>`.
+ * `Blocked by guardrail: <reason>`.
  *
  * Finding messages are preferred over codes because the tool-policy family
  * kept the enforcement plane's own sentences verbatim (`Tool X is not allowed`,

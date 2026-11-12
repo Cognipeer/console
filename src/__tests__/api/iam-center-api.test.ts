@@ -959,7 +959,6 @@ describeForEachProvider('IAM center API', (getDb) => {
       expect(agents.sources.map((s: any) => s.kind)).toContain('role');
       const members = detail.body.effective.find((e: any) => e.service === 'members');
       expect(members.level).toBe('none');
-      expect(detail.body.effective.find((e: any) => e.service === 'aegis')).toBeUndefined(); // retired services are not in the matrix
       // (a group also says where it comes from and whether the membership can be removed here)
       expect(detail.body.groups).toEqual([{ id: A.groups.eng, name: 'Engineering', source: 'local', tenantRole: 'user', removable: true }]);
       expect(detail.body.projects.map((p: any) => [p.name, p.role, p.via])).toEqual([['Project Two', 'member', 'direct']]);

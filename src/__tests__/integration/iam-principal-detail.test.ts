@@ -90,7 +90,6 @@ describeForEachProvider('Principal pages', (getDb) => {
       expect(detail.groups).toEqual([{ id: g, name: 'Raisers' }]);
       expect(detail.projects).toEqual([{ id: pid, name: 'Alpha', role: 'member', via: 'direct' }]);
       expect(detail.tokens?.map((t) => t.id)).toEqual([tokenId]);
-      expect(detail.effective.map((e) => e.service)).not.toContain('aegis');
 
       // role default + direct grant (read) lowered below the role's write; the group's tenant role raises it back
       const prompts = row(detail.effective, 'prompts');

@@ -119,7 +119,6 @@ describe('validateRuleInput', () => {
       [{ name: 42 }, 'invalid_name'],
       [{ description: 'x'.repeat(1001) }, 'invalid_description'],
       [{ module: 'unknown' }, 'invalid_module'],
-      [{ module: 'aegis' }, 'invalid_module'],
       [{ metric: 'bad_metric' }, 'invalid_metric'],
       [{ metric: 'gpu_cache_usage' }, 'metric_module_mismatch'],
       [{ windowMinutes: 99 }, 'invalid_window'],
@@ -469,12 +468,6 @@ describe('validateRuleInput', () => {
       // the same entity type keeps the stored selection
       const same = validateRuleInput({ metric: 'agent_p95_duration_ms' }, { mode: 'update', existing: agent });
       expect(same.entity).toEqual({ entityType: 'agent', mode: 'selected', keys: ['a'] });
-    });
-
-    it('a stored rule may keep the retired aegis module, a new one may not', () => {
-      const aegis: IAlertRule = { ...storedRule, module: 'aegis', metric: 'aegis_block_rate' };
-      expect(validateRuleInput({ name: 'x' }, { mode: 'update', existing: aegis }).module).toBe('aegis');
-      expectInvalid({ module: 'aegis', metric: 'aegis_block_rate' }, 'invalid_module');
     });
   });
 });

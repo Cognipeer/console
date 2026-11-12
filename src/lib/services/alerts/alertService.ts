@@ -63,15 +63,13 @@ export { AlertApiError } from './alertApiError';
 const MODULE_METRICS: Record<AlertModule, AlertMetric[]> = ALERT_MODULE_METRICS;
 
 /**
- * Supported metric names for validation. De-duplicated because `guardrails`
- * and the retired `aegis` alias share one array.
+ * Supported metric names for validation. De-duplicated so a metric listed
+ * under more than one module is checked once.
  */
 const VALID_METRICS: AlertMetric[] = [...new Set(Object.values(MODULE_METRICS).flat())];
 
 /**
- * Modules a NEW rule can target. `aegis` is deliberately absent: it is the
- * retired spelling of `guardrails`, kept in MODULE_METRICS only so stored rules
- * still resolve.
+ * Modules a rule can target.
  */
 const VALID_MODULES: AlertModule[] = [
   'models', 'inference', 'guardrails', 'rag', 'mcp', 'analysis', 'evaluation', 'redteam',
@@ -508,10 +506,9 @@ export function validateRuleInput(input: unknown, options: ValidateRuleOptions):
     if (description.length > MAX_DESCRIPTION_LENGTH) throw bad('invalid_description', `description must be at most ${MAX_DESCRIPTION_LENGTH} characters`);
   }
 
-  // module / metric consistency (a stored rule may keep the retired `aegis` module)
+  // module / metric consistency
   const alertModule = merged.module as AlertModule;
-  const moduleAllowed = VALID_MODULES.includes(alertModule) || (existing !== undefined && existing !== null && existing.module === alertModule);
-  if (typeof alertModule !== 'string' || !moduleAllowed) {
+  if (typeof alertModule !== 'string' || !VALID_MODULES.includes(alertModule)) {
     throw bad('invalid_module', `Invalid module: ${String(merged.module)}. Must be one of: ${VALID_MODULES.join(', ')}`);
   }
   const metric = merged.metric as AlertMetric;

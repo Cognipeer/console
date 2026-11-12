@@ -476,7 +476,6 @@ export type {
   IMcpRemoteConfig,
   IMcpStdioConfig,
   IMcpSandboxResources,
-  IMcpAegisConfig,
   IMcpGuardrailConfig,
   McpStdioRuntime,
   McpStdioExecutionMode,

@@ -23,14 +23,6 @@ export type PermissionService =
   | 'tools'
   | 'connectors'
   | 'sandbox'
-  /**
-   * @deprecated Folded into `guardrails`. Kept in the union ONLY so a stored
-   * grant survives `normalizeServicePermissions`, which silently drops any key
-   * it does not recognise — dropping the id would destroy the record a future
-   * migration needs to re-issue the grant as `guardrails`. Nothing routes here
-   * any more: both `/api/aegis` prefixes now resolve to `guardrails`.
-   */
-  | 'aegis'
   | 'abacus'
   | 'browser'
   | 'crawler'
@@ -126,7 +118,7 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'tracing', label: 'Agent Observability', description: 'Tracing sessions, threads and events.', category: 'operate' },
   { id: 'inference-monitoring', label: 'Model Monitoring', description: 'Inference servers and metrics.', category: 'operate' },
   // Covers the whole hook plane, not just the policy list: input/output checks,
-  // streaming gates AND tool-execution policy (the retired 'aegis' surface).
+  // streaming gates AND tool-execution policy.
   { id: 'guardrails', label: 'Guardrail', description: 'Guardrail policies, hook bindings, tool-execution policy and evaluation logs.', category: 'operate' },
   { id: 'evaluations', label: 'Evaluations', description: 'Offline agent/model evaluation: targets, datasets, suites and runs.', category: 'operate' },
   { id: 'redteam', label: 'Red Team', description: 'Adversarial agent/model testing: probes, campaigns and vulnerability scans.', category: 'operate' },
@@ -153,11 +145,6 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'audit', label: 'Audit Log', description: 'Security and administrative audit events.', category: 'admin', adminService: true },
   { id: 'gpu-fleet', label: 'GPU Fleet', description: 'GPU hosts, MIG slices, model deployments, and terminal access.', category: 'operate', adminService: true },
   { id: 'sandbox', label: 'Sandbox', description: 'Isolated runtime sandboxes: runners, templates, instances, volumes, and terminal access.', category: 'operate', adminService: true },
-  // @deprecated Folded into 'guardrails'. Present so a stored `aegis` grant is
-  // still a recognised key (see the union member) and so audit rows written
-  // against it keep resolving to a definition instead of the array's [0]
-  // fallback, which would mislabel them 'Model Hub'.
-  { id: 'aegis', label: 'Aegis (legacy)', description: 'Retired alias for Guardrail. Grant the Guardrail service instead — nothing routes here any more.', category: 'operate', deprecated: true },
   { id: 'abacus', label: 'Abacus', description: 'Cost intelligence: what-if repricing, model-switch recommendations and parity testing.', category: 'operate' },
   { id: 'cluster', label: 'Cluster', description: 'Multi-node cluster: node registry and per-instance assignment/orchestration.', category: 'admin', adminService: true },
   // Deliberately NOT adminService: a team lead must be able to read their own
@@ -244,11 +231,6 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/mcp', service: 'mcp' },
   { prefix: '/api/client/v1/sandbox', service: 'sandbox' },
   { prefix: '/api/client/v1/webhooks', service: 'webhooks' },
-  // Retired enforcement-plane paths, kept mapped so any client still calling
-  // them is authorized (and audited) as the guardrail service rather than
-  // falling through `getPermissionServiceForPath` to `null`, which means "not a
-  // gated surface" and would let an unprivileged token straight through.
-  { prefix: '/api/client/v1/aegis', service: 'guardrails' },
   { prefix: '/api/client/v1/ai-app-gateway', service: 'ai-app-gateway' },
   { prefix: '/api/client/v1/audit', service: 'audit' },
   { prefix: '/api/client/v1/monitoring', service: 'inference-monitoring' },
@@ -365,7 +347,6 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/abacus', service: 'abacus' },
   { prefix: '/api/gpu-fleet', service: 'gpu-fleet' },
   { prefix: '/api/sandbox', service: 'sandbox' },
-  { prefix: '/api/aegis', service: 'guardrails' },
   // Admin CRUD only. `/api/appgw/*` (the coding-agent data plane) is
   // deliberately NOT mapped: an RBAC mapping is what makes the onResponse hook
   // enqueue an audit row, and one row per inner-loop turn would flood

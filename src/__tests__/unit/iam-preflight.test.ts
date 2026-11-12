@@ -207,8 +207,6 @@ describe('levels, causes and directions', () => {
     const compared = comparedServices().map((s) => s.id);
     expect(addedServices().sort()).toEqual(['iam', 'portals', 'resources', 'webhooks']);
     for (const id of addedServices()) expect(compared).not.toContain(id);
-    // retired aliases route nowhere
-    expect(compared).not.toContain('aegis');
     expect(compared).toContain('models');
     expect(comparedServices().find((s) => s.id === 'audit')?.adminService).toBe(true);
   });

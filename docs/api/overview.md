@@ -108,7 +108,6 @@ These client (token-authenticated) endpoints are part of the **Enterprise** edit
 | Sandbox (lifecycle) | `/sandbox/sandboxes`, `/sandbox/sandboxes/:id/{exec,code,start,stop,snapshot,fork,files,preview,...}`, `/sandbox/snapshots` | GET, POST, PATCH, DELETE |
 | Sandbox (toolbox) | `/sandbox/sandboxes/:id/{fs/*,git/*,sessions/*}` | POST, GET, DELETE |
 | MCP Hubs | `/mcp/hubs`, `/mcp/hubs/:hubKey`, `/mcp/hubs/:hubKey/servers` | GET |
-| Aegis | `/aegis/evaluate`, `/aegis/shields`, `/aegis/shields/:id/audit` | GET, POST |
 
 ## Dashboard And Operational Endpoints
 

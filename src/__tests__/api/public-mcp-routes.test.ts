@@ -10,10 +10,14 @@ import { Writable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import winston from 'winston';
 
-vi.mock('@/lib/database', async (importActual) => ({
-  ...(await importActual<typeof import('@/lib/database')>()),
-  getDatabase: vi.fn(),
-}));
+vi.mock('@/lib/database', async (importActual) => {
+  const getDatabase = vi.fn();
+  return {
+    ...(await importActual<typeof import('@/lib/database')>()),
+    getDatabase,
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 
 vi.mock('@/lib/services/mcp', async (importActual) => ({
   ...(await importActual<typeof import('@/lib/services/mcp')>()),
@@ -458,7 +462,7 @@ describe('public MCP routes', () => {
 
     it('does not reveal why a guardrail or a disabled tool refused', async () => {
       await start();
-      vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error('Blocked by Aegis shield: contains customer IBAN'));
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error('Blocked by guardrail: contains customer IBAN'));
       vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error('Tool "echo" is disabled on MCP server "Payments prod"'));
       for (let i = 0; i < 2; i += 1) {
         const response = await post(callTool());

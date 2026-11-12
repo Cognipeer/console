@@ -1,6 +1,6 @@
 import { enforceServiceQuota, isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import { randomUUID } from 'node:crypto';
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync } from 'fastify';
 import type { GuardrailType, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -262,35 +262,6 @@ function readGuardrailKeysField(
     return { error: 'guardrail_key (or guardrail_keys) is required' };
   }
   return { keys };
-}
-
-/** A retired-surface answer. `replacement` is a path on this same API, or
- *  null when nothing token-facing replaces the call. */
-interface AegisGoneAnswer {
-  replacement: string | null;
-  message: string;
-}
-
-/**
- * 410 Gone, in the shape a deployed `@cognipeer/console-sdk` ≤ 1.7.x surfaces
- * as `CognipeerAPIError(410)`. `Deprecation: true` is the draft-era boolean
- * form, which is what deployed tooling recognises; `Link rel=successor-version`
- * names the replacement when there is one. No `Sunset`: the sunset has already
- * happened — that is what the status says.
- */
-function sendAegisGone(reply: FastifyReply, answer: AegisGoneAnswer) {
-  reply.header('Deprecation', 'true');
-  if (answer.replacement) {
-    reply.header('Link', `<${answer.replacement}>; rel="successor-version"`);
-  }
-  return reply.code(410).send({
-    error: {
-      type: 'gone',
-      code: 'aegis_removed',
-      message: answer.message,
-      replacement: answer.replacement,
-    },
-  });
 }
 
 export const clientGuardrailsApiPlugin: FastifyPluginAsync = async (app) => {
@@ -604,43 +575,4 @@ export const clientGuardrailsApiPlugin: FastifyPluginAsync = async (app) => {
         ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal error' });
     }
   }));
-
-  // ── Retired Aegis client surface: 410 Gone for one release ────────────────
-  // `@cognipeer/console-sdk` ≤ 1.7.x still calls these three paths. Without a
-  // route here Fastify answers a bare 404 — which an SDK consumer's catch block
-  // cannot tell from a typo, so a tool gate that treats transport errors as an
-  // outage fails OPEN on the very call meant to gate it. A 410 that names the
-  // replacement is unambiguous: the surface is gone on purpose, and this is
-  // where it went. Removed with contract v3.
-  //
-  // Same wrapper as every other route in this file: an unauthenticated caller
-  // still gets 401, and RBAC still applies (`/api/client/v1/aegis` maps to the
-  // `guardrails` service in lib/security/rbac.ts) — a retired path must not
-  // become an unauthenticated probe.
-  app.post('/client/v1/aegis/evaluate', withClientApiRequestContext(async (_request, reply) =>
-    sendAegisGone(reply, {
-      replacement: '/api/client/v1/guardrails/hooks/evaluate',
-      message: 'The Aegis enforcement plane was removed. Evaluate a tool call with '
-        + 'POST /api/client/v1/guardrails/hooks/evaluate (hook "tool.pre" or "tool.post"); '
-        + 'the verdict carries decision, riskScore, codes and traceId. '
-        + 'Upgrade to @cognipeer/console-sdk 2.x (client.guardrails.hooks.evaluate).',
-    })));
-
-  app.get('/client/v1/aegis/shields', withClientApiRequestContext(async (_request, reply) =>
-    sendAegisGone(reply, {
-      replacement: '/api/client/v1/guardrails',
-      message: 'Aegis shields were folded into guardrails. List them with '
-        + 'GET /api/client/v1/guardrails; hooksSummary.servable says which hooks each one '
-        + 'evaluates. Upgrade to @cognipeer/console-sdk 2.x (client.guardrails.list).',
-    })));
-
-  app.get('/client/v1/aegis/shields/:id/audit', withClientApiRequestContext(async (_request, reply) =>
-    sendAegisGone(reply, {
-      replacement: null,
-      message: 'The Aegis audit log was removed with the shields it indexed. Guardrail '
-        + 'decisions are recorded as evaluation logs (hook, decision, riskScore, traceId) and '
-        + 'read in the dashboard under Guardrails > Evaluations '
-        + '(GET /api/guardrails/:id/evaluations, cookie session); there is no API-token read '
-        + 'of that log yet. Correlate a call through the traceId of its verdict.',
-    })));
 };

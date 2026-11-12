@@ -51,7 +51,7 @@ const catalog: IamCatalog = {
     { id: 'agents', labelKey: 'iam.service.agents', adminService: false },
     { id: 'tools', labelKey: 'iam.service.tools', adminService: false },
     { id: 'config', labelKey: 'iam.service.config', adminService: true },
-    { id: 'aegis', labelKey: 'iam.service.aegis', adminService: false },
+    { id: 'retired', labelKey: 'iam.service.retired', adminService: false, deprecated: true },
   ],
   actions: [
     { id: 'Read', kind: 'group', level: 'read', labelKey: 'iam.action.group.read', labelParams: {} },
@@ -61,7 +61,7 @@ const catalog: IamCatalog = {
     { id: 'agents.write', kind: 'service', level: 'write', service: 'agents', labelKey: 'k', labelParams: { service: 'agents' } },
     { id: 'agents.admin', kind: 'service', level: 'admin', service: 'agents', labelKey: 'k', labelParams: { service: 'agents' } },
     { id: 'config.read', kind: 'service', level: 'read', service: 'config', labelKey: 'k', labelParams: { service: 'config' } },
-    { id: 'aegis.read', kind: 'service', level: 'read', service: 'aegis', labelKey: 'k', labelParams: { service: 'aegis' } },
+    { id: 'retired.read', kind: 'service', level: 'read', service: 'retired', labelKey: 'k', labelParams: { service: 'retired' } },
     {
       id: 'agent.invoke',
       kind: 'resource',
@@ -195,9 +195,9 @@ describe('catalog model', () => {
     expect(index.groupActions.map((a) => a.id)).toEqual(['Read', 'Write', 'Admin']);
     expect(index.serviceActions.get('agents')?.write?.id).toBe('agents.write');
     expect(index.resourceActions.get('agents')?.map((a) => a.id)).toEqual(['agent.invoke', 'agent.get']);
-    expect(index.services.map((s) => s.id)).not.toContain('aegis');
+    expect(index.services.map((s) => s.id)).not.toContain('retired');
     // ...but a retired service still resolves (stored grants, old policies)
-    expect(index.serviceById.get('aegis')?.id).toBe('aegis');
+    expect(index.serviceById.get('retired')?.id).toBe('retired');
   });
 
   it('matches queries word by word, case-insensitively', () => {

@@ -18,21 +18,14 @@
  * wrote. Folding them together would mean one of the two questions silently got
  * the other's population.
  *
- * ── THE SOURCE MOVED, THE METRIC IDs DID NOT ───────────────────────────────
- * These four used to be computed over `aegis_audit` by an enterprise-only
- * collector. That table is gone from the read path; the numbers now come from
- * `guardrail_evaluation_logs.decision` / `.riskScore`, which every guardrail
- * evaluation writes in both editions. The four `aegis_*` metric ids are still
- * claimed here, unchanged, because stored `IAlertRule` rows carry the metric
- * name in a column: dropping the old spelling would not migrate those rules, it
- * would make every one of them resolve to no collector and quietly report 0.
+ * The numbers come from `guardrail_evaluation_logs.decision` / `.riskScore`,
+ * which every guardrail evaluation writes in both editions.
  *
  * ── 'require_approval' ─────────────────────────────────────────────────────
  * A vestigial rung. It has no store and no UI in the hook plane, so nothing
- * writes it and the rate is structurally 0. The metric is retained rather than
- * removed for exactly the reason above — an existing rule must keep resolving —
- * and it is computed honestly rather than hardcoded, so it starts reporting the
- * moment something does emit that decision.
+ * writes it and the rate is structurally 0. It is computed honestly rather than
+ * hardcoded, so it starts reporting the moment something does emit that
+ * decision.
  *
  * Supports SQLite and MongoDB.
  */
@@ -61,11 +54,6 @@ export class GuardrailDecisionCollector implements IMetricCollector {
     'guardrail_approval_rate',
     'guardrail_avg_risk_score',
     'guardrail_total_decisions',
-    // @deprecated spellings — same numbers, same collector. See the header.
-    'aegis_block_rate',
-    'aegis_approval_rate',
-    'aegis_avg_risk_score',
-    'aegis_total_decisions',
   ];
 
   async collect(query: MetricQuery): Promise<MetricResult> {
@@ -177,16 +165,12 @@ export class GuardrailDecisionCollector implements IMetricCollector {
     if (totals.total === 0) return 0;
     switch (metric) {
       case 'guardrail_block_rate':
-      case 'aegis_block_rate':
         return (totals.blocked / totals.total) * 100;
       case 'guardrail_approval_rate':
-      case 'aegis_approval_rate':
         return (totals.approvals / totals.total) * 100;
       case 'guardrail_avg_risk_score':
-      case 'aegis_avg_risk_score':
         return totals.riskSum / totals.total;
       case 'guardrail_total_decisions':
-      case 'aegis_total_decisions':
         return totals.total;
       default:
         return 0;

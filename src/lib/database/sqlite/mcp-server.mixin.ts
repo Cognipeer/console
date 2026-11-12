@@ -21,29 +21,14 @@ import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
 /**
- * Build the WHERE clause matching a server's request logs by durable
- * `serverId` primarily. The `OR` branch only extends the match to rows
- * written before `serverId` existed (`serverId IS NULL`) — scoped to this
- * server's own `serverKey` + `projectId`, and no older than this server's
- * own `createdAt`, so a deleted-and-recreated server can never adopt its
- * predecessor's logs just because they share the same name-derived key.
- * Mutates `params` with the scope's bound parameters.
+ * Build the WHERE clause matching a server's request logs by its durable
+ * `serverId`. `serverKey` is never matched: a deleted-and-recreated server
+ * regenerates the same name-derived key and must not adopt its predecessor's
+ * logs. Mutates `params` with the scope's bound parameter.
  */
 function mcpLogScopeClause(scope: McpLogServerScope, params: Record<string, unknown>): string {
   params.scopeServerId = scope.serverId;
-  params.scopeServerKey = scope.serverKey;
-  const legacyParts = ['serverId IS NULL', 'serverKey = @scopeServerKey'];
-  if (scope.projectId !== undefined) {
-    params.scopeProjectId = scope.projectId;
-    legacyParts.push('projectId = @scopeProjectId');
-  } else {
-    legacyParts.push('projectId IS NULL');
-  }
-  if (scope.createdAt) {
-    params.scopeCreatedAt = scope.createdAt.toISOString();
-    legacyParts.push('createdAt >= @scopeCreatedAt');
-  }
-  return `(serverId = @scopeServerId OR (${legacyParts.join(' AND ')}))`;
+  return 'serverId = @scopeServerId';
 }
 
 export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
@@ -60,12 +45,12 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       db.prepare(`
         INSERT INTO ${TABLES.mcpServers}
         (id, tenantId, projectId, key, name, description, sourceType, openApiSpec, remoteConfig,
-         stdioConfig, tools, toolsDiscoveredAt, upstreamBaseUrl, upstreamAuth, exposure, aegis,
+         stdioConfig, tools, toolsDiscoveredAt, upstreamBaseUrl, upstreamAuth, exposure,
          guardrail, access, owner, ownerAgentId, status, endpointSlug, totalRequests, lastError, metadata,
          createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @sourceType, @openApiSpec,
          @remoteConfig, @stdioConfig, @tools, @toolsDiscoveredAt, @upstreamBaseUrl, @upstreamAuth,
-         @exposure, @aegis, @guardrail, @access, @owner, @ownerAgentId, @status, @endpointSlug, @totalRequests,
+         @exposure, @guardrail, @access, @owner, @ownerAgentId, @status, @endpointSlug, @totalRequests,
          @lastError, @metadata, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -83,9 +68,6 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         upstreamBaseUrl: server.upstreamBaseUrl ?? '',
         upstreamAuth: this.toJson(server.upstreamAuth ?? {}),
         exposure: server.exposure ? this.toJson(server.exposure) : null,
-        // `aegis` is still written alongside its successor for one release:
-        // an older console binary on the same tenant DB reads only that column.
-        aegis: server.aegis ? this.toJson(server.aegis) : null,
         guardrail: server.guardrail ? this.toJson(server.guardrail) : null,
         access: server.access ? this.toJson(server.access) : null,
         owner: server.owner ? this.toJson(server.owner) : null,
@@ -125,7 +107,6 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (data.upstreamBaseUrl !== undefined) { sets.push('upstreamBaseUrl = @upstreamBaseUrl'); params.upstreamBaseUrl = data.upstreamBaseUrl ?? ''; }
       if (data.upstreamAuth !== undefined) { sets.push('upstreamAuth = @upstreamAuth'); params.upstreamAuth = this.toJson(data.upstreamAuth); }
       if (data.exposure !== undefined) { sets.push('exposure = @exposure'); params.exposure = data.exposure ? this.toJson(data.exposure) : null; }
-      if (data.aegis !== undefined) { sets.push('aegis = @aegis'); params.aegis = data.aegis ? this.toJson(data.aegis) : null; }
       if (data.guardrail !== undefined) { sets.push('guardrail = @guardrail'); params.guardrail = data.guardrail ? this.toJson(data.guardrail) : null; }
       if (data.access !== undefined) { sets.push('access = @access'); params.access = data.access ? this.toJson(data.access) : null; }
       if (data.owner !== undefined) {
@@ -461,10 +442,6 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         upstreamBaseUrl: (r.upstreamBaseUrl as string) || undefined,
         upstreamAuth: this.parseJson(r.upstreamAuth, { type: 'none' }),
         exposure: r.exposure ? this.parseJson(r.exposure, undefined) : undefined,
-        // Deprecated but still mapped: the read-time normaliser folds an
-        // `aegis`-only row onto `guardrail`, so dropping it here would silently
-        // disarm every MCP server bound before the rename.
-        aegis: r.aegis ? this.parseJson(r.aegis, undefined) : undefined,
         guardrail: r.guardrail ? this.parseJson(r.guardrail, undefined) : undefined,
         // A list that no longer parses admits nobody rather than everybody.
         access: r.access ? this.parseJson(r.access, { mode: 'selected', userIds: [], groupIds: [] }) : undefined,
