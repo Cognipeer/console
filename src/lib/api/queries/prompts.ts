@@ -77,6 +77,8 @@ export function usePromptList() {
     queryKey: promptsKeys.list(project),
     queryFn: ({ signal }) => fetchPrompts(signal),
     retry: retryUnlessClientError,
+    // Prompts are also written outside these hooks (the agent studio's prompt panel), so a visit always refetches.
+    staleTime: 0,
   });
 }
 
@@ -86,6 +88,7 @@ export function usePromptStats() {
     queryKey: promptsKeys.stats(project),
     queryFn: ({ signal }) => fetchPromptStats(signal),
     retry: retryUnlessClientError,
+    staleTime: 0,
   });
 }
 

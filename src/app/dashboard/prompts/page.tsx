@@ -30,7 +30,8 @@ export default function PromptsPage() {
   const statsQuery = usePromptStats();
   const prompts = useMemo<PromptView[]>(() => promptsQuery.data ?? [], [promptsQuery.data]);
   const dashboardData = statsQuery.data ?? null;
-  const loading = promptsQuery.isFetching;
+  // Only the first load shows the table's loading state; a background refetch (after a save) keeps the rows.
+  const loading = promptsQuery.isPending;
   const dashboardLoading = statsQuery.isPending;
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingPrompt, setEditingPrompt] = useState<PromptView | null>(null);
