@@ -42,6 +42,7 @@ describe('Analysis service — two tenants at the same time', () => {
           createDefinition(tenant.dbName, tenant.id, 'tester@example.com', {
             name,
             fieldSet: [{ key: 'intent', type: 'string' }],
+            modes: {},
           }),
         ),
       ),
