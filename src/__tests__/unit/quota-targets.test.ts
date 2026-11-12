@@ -202,6 +202,7 @@ interface Reported {
 function reportedKeys(): Map<QuotaDomain, Reported> {
   const files = [
     ...readdirSync(path.join(ROOT, 'server/api/plugins')).filter((f) => f.endsWith('.ts')).map((f) => `server/api/plugins/${f}`),
+    ...readdirSync(path.join(ROOT, 'server/api/plugins/client-tracing')).filter((f) => f.endsWith('.ts')).map((f) => `server/api/plugins/client-tracing/${f}`),
     'lib/services/agents/agentQuota.ts',
   ];
   const found = new Map<QuotaDomain, Reported>();
@@ -300,7 +301,9 @@ describe('the routes agree with the table', () => {
   });
 
   it('puts the AGENT NAME in the context of tracing calls and the AGENT KEY in the context of agent runs', () => {
-    const tracing = read('server/api/plugins/client-tracing.ts');
+    const tracing = ['ingestRoutes', 'streamRoutes', 'threadRoutes']
+      .map((file) => read(`server/api/plugins/client-tracing/${file}.ts`))
+      .join('\n');
     expect(tracing).toMatch(/payload\?\.agent\?\.name \|\| sessionId/);
     expect(tracing).toMatch(/firstSession\.agentName \|\| firstSession\.sessionId/);
     expect(tracing).toMatch(/session\.agentName \|\| sessionId/);

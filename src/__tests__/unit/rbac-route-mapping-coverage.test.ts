@@ -44,7 +44,12 @@ function discoverClientRoutePaths(): Map<string, string> {
     .filter((f) => f.startsWith('client-') && f.endsWith('.ts'));
 
   for (const file of files) {
-    const content = fs.readFileSync(path.join(PLUGINS_DIR, file), 'utf8');
+    // A plugin split into modules keeps its routes in a sibling directory named like the file.
+    const siblingDir = path.join(PLUGINS_DIR, file.replace(/\.ts$/, ''));
+    const nested = fs.existsSync(siblingDir)
+      ? fs.readdirSync(siblingDir).filter((f) => f.endsWith('.ts')).map((f) => fs.readFileSync(path.join(siblingDir, f), 'utf8')).join('\n')
+      : '';
+    const content = fs.readFileSync(path.join(PLUGINS_DIR, file), 'utf8') + nested;
     let match: RegExpExecArray | null;
     ROUTE_LITERAL_RE.lastIndex = 0;
     while ((match = ROUTE_LITERAL_RE.exec(content))) {
