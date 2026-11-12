@@ -4,16 +4,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { Combobox, Group, Loader, Text, UnstyledButton, useCombobox } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { useQuery } from '@tanstack/react-query';
 import { IconCheck, IconChevronDown, IconSearch } from '@tabler/icons-react';
 import { includesFolded } from '@/lib/shared/searchFold';
+import { errorMessage } from '@/lib/api/client';
+import { useProjects, useSetActiveProject, type ProjectBasic } from '@/lib/api/queries/projects';
 import { pathAfterProjectSwitch } from './projectSwitchPath';
-
-type Project = {
-  _id: string;
-  name: string;
-  key: string;
-};
 
 export default function ProjectPill() {
   const [submitting, setSubmitting] = useState(false);
@@ -29,17 +24,8 @@ export default function ProjectPill() {
     },
   });
 
-  const projectsQuery = useQuery<{ projects: Project[]; activeProjectId?: string }>(
-    {
-      queryKey: ['projects'],
-      queryFn: async () => {
-        const res = await fetch('/api/projects', { cache: 'no-store' });
-        if (!res.ok) throw new Error('Failed to load projects');
-        return (await res.json()) as { projects: Project[]; activeProjectId?: string };
-      },
-      refetchOnMount: 'always',
-    },
-  );
+  const projectsQuery = useProjects<ProjectBasic>();
+  const setActiveProject = useSetActiveProject();
 
   const projects = useMemo(() => {
     return (projectsQuery.data?.projects ?? [])
@@ -62,25 +48,13 @@ export default function ProjectPill() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the store is stable; re-run on the query only
   }, [search, visible.length]);
   const loading = projectsQuery.isLoading;
-  const errorMessage = projectsQuery.isError
-    ? projectsQuery.error instanceof Error
-      ? projectsQuery.error.message
-      : 'Failed to load projects'
-    : undefined;
+  const loadError = projectsQuery.isError ? 'Failed to load projects' : undefined;
 
   const handleSwitch = async (projectId: string) => {
     if (!projectId || projectId === activeId) return;
     setSubmitting(true);
     try {
-      const res = await fetch('/api/projects/active', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectId }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || 'Failed to set active project');
-      }
+      await setActiveProject.mutateAsync(projectId);
       // A record of the project being left goes back to its list; any other page reloads in place.
       const next = pathAfterProjectSwitch(window.location.pathname, params);
       if (next) window.location.assign(next);
@@ -88,17 +62,17 @@ export default function ProjectPill() {
     } catch (error) {
       notifications.show({
         title: 'Project',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        message: errorMessage(error, 'Unexpected error'),
         color: 'red',
       });
       setSubmitting(false);
     }
   };
 
-  if (errorMessage) {
+  if (loadError) {
     return (
       <Text size="xs" c="red" px="sm">
-        {errorMessage}
+        {loadError}
       </Text>
     );
   }

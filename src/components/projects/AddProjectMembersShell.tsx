@@ -8,6 +8,8 @@ import FormShell, { FormSection, SummaryGroup, SummaryKV } from '@/components/co
 import { fetchPrincipals, isAbortError, type PrincipalSummary } from '@/components/iam/principals/client';
 import { directoryApi } from '@/components/iam/principals/directoryApi';
 import { useTranslations } from '@/lib/i18n';
+import { apiGet } from '@/lib/api/client';
+import { useBulkProjectMembers } from '@/lib/api/queries/projects';
 import {
   buildAddRequests,
   countByType,
@@ -47,15 +49,10 @@ function errorText(error: unknown, fallback: string): string {
  */
 async function fetchCandidates(projectId: string, query: string, signal: AbortSignal): Promise<PrincipalSummary[]> {
   if (query.length < MIN_CANDIDATE_QUERY) return [];
-  const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/member-candidates?q=${encodeURIComponent(query)}`, {
-    cache: 'no-store',
-    signal,
-  });
-  const body: unknown = await res.json().catch(() => null);
-  if (!res.ok) {
-    const message = body && typeof body === 'object' ? (body as { error?: unknown }).error : null;
-    throw new Error(typeof message === 'string' ? message : '');
-  }
+  const body = await apiGet<unknown>(
+    `/api/projects/${encodeURIComponent(projectId)}/member-candidates?q=${encodeURIComponent(query)}`,
+    { signal },
+  );
   const users = body && typeof body === 'object' ? (body as { users?: unknown }).users : null;
   if (!Array.isArray(users)) return [];
   return users.flatMap((raw): PrincipalSummary[] => {
@@ -95,6 +92,7 @@ export default function AddProjectMembersShell({
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [picked, setPicked] = useState<PickedEntry[]>([]);
+  const bulkMembers = useBulkProjectMembers(projectId);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const seq = useRef(0);
@@ -170,15 +168,11 @@ export default function AddProjectMembersShell({
     const done = new Set<string>();
     try {
       if (requests.users.length > 0) {
-        const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/members/bulk`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ add: requests.users }),
-        });
-        const body: unknown = await res.json().catch(() => null);
-        if (!res.ok) {
-          const message = body && typeof body === 'object' ? (body as { error?: unknown }).error : null;
-          throw new Error(typeof message === 'string' && message ? message : t('errors.save'));
+        let body: unknown;
+        try {
+          body = await bulkMembers.mutateAsync({ add: requests.users });
+        } catch (err) {
+          throw new Error(errorText(err, t('errors.save')));
         }
         const result = parseBulkResult(body);
         added += result.added;

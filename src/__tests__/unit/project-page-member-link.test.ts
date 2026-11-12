@@ -7,7 +7,8 @@
 
 import { createElement, Suspense } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { installApiMock, installDomStubs, mount, settle, text, type Mounted } from '../helpers/iamCenterUi';
+import { installApiMock, installDomStubs, settle, text, type Mounted } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 
 const nav = vi.hoisted(() => ({ search: '', replace: undefined as unknown as ReturnType<typeof vi.fn> }));
 vi.mock('next/navigation', () => ({
@@ -54,7 +55,7 @@ async function renderPage(search: string, role = 'admin') {
     ['GET', '/api/projects', () => ({ projects: [{ _id: 'proj-a', name: 'Alpha', key: 'alpha' }], activeProjectId: 'proj-a' })],
     ['GET', '/api/auth/session', () => ({ authenticated: true, role })],
   ]);
-  mounted = await mount(
+  mounted = await renderWithQuery(
     createElement(Suspense, { fallback: null }, createElement(ProjectDetailPage, { params: Promise.resolve({ projectId: 'proj-a' }) })),
   );
   await settle(200);

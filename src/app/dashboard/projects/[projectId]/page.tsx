@@ -15,6 +15,8 @@ import TokensTab from '@/components/projects/detail/TokensTab';
 import ProjectProvidersManager from '@/components/projects/ProjectProvidersManager';
 import { LAST_LIST_URL_KEY, sanitizeListUrl } from '@/components/projects/projectsListModel';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useProjects, useSessionRole, useSetActiveProject } from '@/lib/api/queries/projects';
 
 const TABS = ['overview', 'members', 'providers', 'tokens', 'limits', 'settings'] as const;
 type TabId = (typeof TABS)[number];
@@ -28,11 +30,18 @@ function ProjectDetail({ projectId }: { projectId: string }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  const [project, setProject] = useState<ProjectSummary | null>(null);
-  const [activeProjectId, setActiveProjectId] = useState<string | undefined>(undefined);
-  const [loading, setLoading] = useState(true);
-  const [sessionRole, setSessionRole] = useState<string | undefined>(undefined);
-  const [sessionLoaded, setSessionLoaded] = useState(false);
+  const projectsQuery = useProjects<ProjectSummary>();
+  const setActiveProject = useSetActiveProject();
+  const { data: sessionRole, isPending: sessionPending } = useSessionRole();
+  const sessionLoaded = !sessionPending;
+  // The id this page made active itself; until the list is read again it is the better answer.
+  const [activatedId, setActivatedId] = useState<string | undefined>(undefined);
+  const project = useMemo(
+    () => (projectsQuery.data?.projects ?? []).find((p) => String(p._id) === String(projectId)) ?? null,
+    [projectsQuery.data, projectId],
+  );
+  const activeProjectId = activatedId ?? projectsQuery.data?.activeProjectId;
+  const loading = projectsQuery.isPending;
   const [backHref, setBackHref] = useState('/dashboard/projects');
 
   const isTenantAdmin = sessionRole === 'owner' || sessionRole === 'admin';
@@ -70,54 +79,32 @@ function ProjectDetail({ projectId }: { projectId: string }) {
     [router, pathname, searchParams],
   );
 
-  const fetchProject = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/projects', { cache: 'no-store' });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error || t('loadFailed'));
-      }
-      const data = (await res.json()) as { projects?: ProjectSummary[]; activeProjectId?: string };
-      setProject((data.projects ?? []).find((p) => String(p._id) === String(projectId)) ?? null);
-      setActiveProjectId(data.activeProjectId);
-    } catch (error) {
-      notifications.show({ color: 'red', message: error instanceof Error ? error.message : t('loadFailed') });
-    } finally {
-      setLoading(false);
-    }
-  }, [projectId, t]);
-
+  // The project list could not be read (first load or a refresh): say so once per failure.
   useEffect(() => {
-    void fetchProject();
-    fetch('/api/auth/session', { cache: 'no-store' })
-      .then(async (res) => (res.ok ? ((await res.json()) as { role?: string }) : null))
-      .then((data) => setSessionRole(data?.role))
-      .catch(() => setSessionRole(undefined))
-      .finally(() => setSessionLoaded(true));
-  }, [fetchProject]);
+    if (!projectsQuery.isError) return;
+    notifications.show({ color: 'red', message: errorMessage(projectsQuery.error, t('loadFailed')) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectsQuery.errorUpdatedAt]);
+
+  const fetchProject = async () => {
+    setActivatedId(undefined);
+    await projectsQuery.refetch();
+  };
 
   // The providers tab (and what it lists) works on the active project: make this one active.
   useEffect(() => {
     if (loading || ready || !projectId) return;
     void (async () => {
       try {
-        const res = await fetch('/api/projects/active', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ projectId }),
-        });
-        if (!res.ok) {
-          const body = (await res.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(body?.error || t('loadFailed'));
-        }
-        setActiveProjectId(projectId);
+        await setActiveProject.mutateAsync(projectId);
+        setActivatedId(projectId);
         // What the navigation shows depends on the active project's limits.
         notifyActiveProjectChanged();
       } catch (error) {
-        notifications.show({ color: 'red', message: error instanceof Error ? error.message : t('loadFailed') });
+        notifications.show({ color: 'red', message: errorMessage(error, t('loadFailed')) });
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, ready, projectId, t]);
 
   const shellTabs: DetailShellTab[] = tabs.map((id) => ({ id, label: t(`tabs.${id}`) }));

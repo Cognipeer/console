@@ -10,6 +10,8 @@ import { DetailCard } from '@/components/common/ui/DetailShell';
 import { FormField, FormRow } from '@/components/common/ui/FormShell';
 import { notifyActiveProjectChanged } from '@/components/layout/useEffectivePermissions';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useDeleteProject, useUpdateProject } from '@/lib/api/queries/projects';
 
 export interface ProjectSummary {
   _id: string;
@@ -31,11 +33,6 @@ interface SettingsTabProps {
 
 const DEFAULT_PROJECT_KEY = 'default';
 
-const failure = async (res: Response, fallback: string): Promise<string> => {
-  const body = (await res.json().catch(() => null)) as { error?: string } | null;
-  return body?.error || fallback;
-};
-
 export default function SettingsTab({ project, canManage, backHref, onSaved }: SettingsTabProps) {
   const t = useTranslations('projectsAccess.settings');
   const locale = useLocale();
@@ -43,7 +40,9 @@ export default function SettingsTab({ project, canManage, backHref, onSaved }: S
 
   const [name, setName] = useState(project.name);
   const [description, setDescription] = useState(project.description ?? '');
-  const [saving, setSaving] = useState(false);
+  const updateProject = useUpdateProject();
+  const deleteProject = useDeleteProject();
+  const saving = updateProject.isPending;
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [typed, setTyped] = useState('');
   const [deleting, setDeleting] = useState(false);
@@ -60,20 +59,12 @@ export default function SettingsTab({ project, canManage, backHref, onSaved }: S
 
   const save = async () => {
     if (!canManage || saving || !dirty || !nameValid) return;
-    setSaving(true);
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(project._id)}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), description: description.trim() }),
-      });
-      if (!res.ok) throw new Error(await failure(res, t('saveFailed')));
+      await updateProject.mutateAsync({ id: project._id, name: name.trim(), description: description.trim() });
       notifications.show({ color: 'green', message: t('saved') });
       onSaved();
     } catch (err) {
-      notifications.show({ color: 'red', title: t('saveFailed'), message: err instanceof Error ? err.message : '' });
-    } finally {
-      setSaving(false);
+      notifications.show({ color: 'red', title: t('saveFailed'), message: errorMessage(err, '') });
     }
   };
 
@@ -81,13 +72,12 @@ export default function SettingsTab({ project, canManage, backHref, onSaved }: S
     if (deleting || typed.trim() !== project.name) return;
     setDeleting(true);
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(project._id)}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error(await failure(res, t('danger.failed')));
+      await deleteProject.mutateAsync(project._id);
       notifications.show({ color: 'green', message: t('danger.deleted') });
       notifyActiveProjectChanged();
       router.push(backHref);
     } catch (err) {
-      notifications.show({ color: 'red', title: t('danger.failed'), message: err instanceof Error ? err.message : '' });
+      notifications.show({ color: 'red', title: t('danger.failed'), message: errorMessage(err, '') });
       setDeleting(false);
     }
   };

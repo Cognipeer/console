@@ -11,7 +11,6 @@ import {
   installApiMock,
   installDomStubs,
   jsonResponse,
-  mount,
   q,
   qa,
   setInput,
@@ -22,6 +21,7 @@ import {
   type RouteHandler,
 } from '../helpers/iamCenterUi';
 import { PEOPLE } from '../helpers/iamDirectoryFixtures';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import AddProjectMembersShell from '@/components/projects/AddProjectMembersShell';
 
 vi.mock('next/navigation', () => ({
@@ -48,7 +48,7 @@ const NONE = { userIds: new Set<string>(), groupIds: new Set<string>(), adminIds
 
 async function show(props: { canAddGroups: boolean; existing?: typeof NONE }, routes: Route[]) {
   api = installApiMock(routes);
-  mounted = await mount(
+  mounted = await renderWithQuery(
     createElement(AddProjectMembersShell, {
       open: true,
       projectId: 'p-1',

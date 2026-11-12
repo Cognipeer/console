@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Button,
@@ -19,6 +19,14 @@ import {
 import { IconAlertCircle, IconAlertTriangle, IconCheck, IconCopy, IconExternalLink } from '@tabler/icons-react';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useSetActiveProject } from '@/lib/api/queries/projects';
+import {
+  useRefreshResourceList,
+  useResourceDetail,
+  useResourceHealth,
+  useResourceList,
+} from '@/lib/api/queries/resources';
 import { tryTranslate } from './i18nLookup';
 import ProjectCell, { type ProjectDisplay } from './ProjectCell';
 import ResourceUsagePanel, { type ResourceEdgeView, type ResourceRefView } from './ResourceUsagePanel';
@@ -132,23 +140,41 @@ export default function ResourceExplorer() {
   const [pageSize, setPageSize] = useState(50);
   const [tab, setTab] = useState<string>('resources');
   const [onlyIssues, setOnlyIssues] = useState(false);
-  const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
-  const [healthReload, setHealthReload] = useState(0);
-
-  const [data, setData] = useState<ListResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<ResourceListItem | null>(null);
-  const [detail, setDetail] = useState<ResourceDetail | null>(null);
-  const [detailState, setDetailState] = useState<'loading' | 'done' | 'failed'>('loading');
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState(false);
   // True while the drawer shows a bare reference (no list row behind it).
   const [selectedIsStub, setSelectedIsStub] = useState(false);
 
-  const requestSeq = useRef(0);
-  const detailSeq = useRef(0);
-  const pendingRefresh = useRef(false);
+  const listQuery = useResourceList<ListResponse>({
+    type: type || undefined,
+    projectId: projectId || undefined,
+    q,
+    status: status || undefined,
+    onlyIssues,
+    limit: pageSize,
+    offset: (page - 1) * pageSize,
+  });
+  const refreshList = useRefreshResourceList<ListResponse>();
+  // The header badge is a convenience: the unfiltered health report, which the lists work without.
+  const healthQuery = useResourceHealth<{ summary: HealthSummary }>();
+  const setActiveProject = useSetActiveProject();
+  const detailQuery = useResourceDetail<ResourceDetail>(selected?.type, selected?.id);
+  const data: ListResponse | null = listQuery.data ?? null;
+  const healthSummary: HealthSummary | null = healthQuery.data?.summary ?? null;
+  const loading = listQuery.isPending;
+  const refreshing = listQuery.isFetching || refreshList.isPending;
+  const error = listQuery.isError
+    ? errorMessage(listQuery.error, t('loadFailed'))
+    : refreshList.isError
+      ? errorMessage(refreshList.error, t('loadFailed'))
+      : null;
+  const detail: ResourceDetail | null = detailQuery.data ?? null;
+  const detailState: 'loading' | 'done' | 'failed' = detailQuery.isError
+    ? 'failed'
+    : detailQuery.isPending
+      ? 'loading'
+      : 'done';
 
   // Debounce the free-text search; reset paging when the applied query changes.
   useEffect(() => {
@@ -161,62 +187,16 @@ export default function ResourceExplorer() {
     return () => clearTimeout(handle);
   }, [searchInput]);
 
-  const load = useCallback(async () => {
-    const seq = ++requestSeq.current;
-    const refresh = pendingRefresh.current;
-    pendingRefresh.current = false;
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams();
-      if (type) params.set('type', type);
-      if (projectId) params.set('projectId', projectId);
-      if (q.trim()) params.set('q', q.trim());
-      if (status) params.set('status', status);
-      if (onlyIssues) params.set('health', 'issues');
-      params.set('limit', String(pageSize));
-      params.set('offset', String((page - 1) * pageSize));
-      if (refresh) params.set('refresh', '1');
-      const res = await fetch(`/api/resources?${params.toString()}`, { cache: 'no-store' });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || t('loadFailed'));
-      }
-      const body = (await res.json()) as ListResponse;
-      if (seq !== requestSeq.current) return;
-      setData(body);
-    } catch (err) {
-      if (seq !== requestSeq.current) return;
-      setError(err instanceof Error ? err.message : t('loadFailed'));
-    } finally {
-      if (seq === requestSeq.current) setLoading(false);
-    }
-  }, [type, projectId, q, status, onlyIssues, page, pageSize, t]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  const loadSummary = useCallback(async () => {
-    try {
-      const res = await fetch('/api/resources/health', { cache: 'no-store' });
-      if (!res.ok) return;
-      const body = (await res.json()) as { summary: HealthSummary };
-      setHealthSummary(body.summary);
-    } catch {
-      // The header badge is a convenience; the lists work without it.
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadSummary();
-  }, [loadSummary]);
-
   const handleRefresh = () => {
-    pendingRefresh.current = true;
-    void load();
-    void loadSummary();
-    setHealthReload((n) => n + 1);
+    refreshList.mutate({
+      type: type || undefined,
+      projectId: projectId || undefined,
+      q,
+      status: status || undefined,
+      onlyIssues,
+      limit: pageSize,
+      offset: (page - 1) * pageSize,
+    });
   };
 
   const typeInfo = useMemo(() => {
@@ -328,7 +308,7 @@ export default function ResourceExplorer() {
   // row isn't at hand, so a minimal stub stands in until the detail arrives.
   const openRef = (ref: ResourceRefView) => {
     if (!ref.id) return;
-    void openRow(
+    openRow(
       {
       crn: ref.crn ?? '',
       type: ref.type,
@@ -350,32 +330,12 @@ export default function ResourceExplorer() {
     );
   };
 
-  const openRow = async (row: ResourceListItem, stub = false) => {
-    const seq = ++detailSeq.current;
+  const openRow = (row: ResourceListItem, stub = false) => {
+    // The detail query reads the selected row; a slower answer for a row clicked earlier is never shown.
+    // When it fails the drawer degrades to the fields the list row already carries.
     setSelected(row);
     setSelectedIsStub(stub);
-    setDetail(null);
-    setDetailState('loading');
     setOpenError(false);
-    try {
-      const res = await fetch(
-        `/api/resources/${encodeURIComponent(row.type)}/${encodeURIComponent(row.id)}`,
-        { cache: 'no-store' },
-      );
-      // A slower response for a previously clicked row must not overwrite this one.
-      if (seq !== detailSeq.current) return;
-      if (!res.ok) {
-        setDetailState('failed');
-        return;
-      }
-      const body = (await res.json()) as { resource: ResourceDetail };
-      if (seq !== detailSeq.current) return;
-      setDetail(body.resource);
-      setDetailState('done');
-    } catch {
-      // The list row already carries the core fields; the drawer degrades to those.
-      if (seq === detailSeq.current) setDetailState('failed');
-    }
   };
 
   const handleOpen = async () => {
@@ -390,12 +350,7 @@ export default function ResourceExplorer() {
         // Project-scoped pages read the ACTIVE project, so switch first (same
         // endpoint as the project switcher).
         if (selected.projectId) {
-          const res = await fetch('/api/projects/active', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ projectId: selected.projectId }),
-          });
-          switched = res.ok;
+          await setActiveProject.mutateAsync(selected.projectId);
         }
       } catch {
         switched = false;
@@ -499,9 +454,7 @@ export default function ResourceExplorer() {
         <Tabs.Panel value="health">
           <ResourceHealthPanel
             types={data?.types ?? []}
-            reloadToken={healthReload}
             onOpen={openRef}
-            onSummary={setHealthSummary}
           />
         </Tabs.Panel>
 
@@ -548,7 +501,7 @@ export default function ResourceExplorer() {
             rowKey={(row) => `${row.type}:${row.id}`}
             columns={columns}
             loading={loading}
-            onRowClick={(row) => void openRow(row)}
+            onRowClick={(row) => openRow(row)}
             search={{
               value: searchInput,
               onChange: setSearchInput,
@@ -588,7 +541,7 @@ export default function ResourceExplorer() {
               />
             }
             onRefresh={handleRefresh}
-            refreshing={loading}
+            refreshing={refreshing}
             empty={{ title: t('emptyTitle'), description: t('emptyDescription') }}
             pagination={{
               page,
@@ -620,9 +573,7 @@ export default function ResourceExplorer() {
       <Drawer
         opened={Boolean(selected)}
         onClose={() => {
-          detailSeq.current++;
           setSelected(null);
-          setDetail(null);
         }}
         position="right"
         size="lg"
