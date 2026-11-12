@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import { TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
@@ -13,6 +13,8 @@ import FormShell, {
 	SummaryGroup,
 	SummaryKV,
 } from '@/components/common/ui/FormShell';
+import { errorMessage } from '@/lib/api/client';
+import { useCreatePrompt, useUpdatePrompt } from '@/lib/api/queries/prompts';
 import type { PromptView } from '@/lib/services/prompts';
 import { useTranslations } from '@/lib/i18n';
 
@@ -37,7 +39,9 @@ export default function PromptEditorModal({
 	prompt,
 	onSaved,
 }: PromptEditorModalProps) {
-	const [saving, setSaving] = useState(false);
+	const createPrompt = useCreatePrompt();
+	const updatePrompt = useUpdatePrompt();
+	const saving = createPrompt.isPending || updatePrompt.isPending;
 	const t = useTranslations('promptDetail');
 
 	const initialValues = useMemo<FormValues>(() => {
@@ -80,7 +84,6 @@ export default function PromptEditorModal({
 		const validation = form.validate();
 		if (validation.hasErrors) return;
 
-		setSaving(true);
 		try {
 			const payload = {
 				name: values.name.trim(),
@@ -90,33 +93,23 @@ export default function PromptEditorModal({
 				versionComment: values.versionComment.trim() || undefined,
 			};
 
-			const response = await fetch(prompt ? `/api/prompts/${prompt.id}` : '/api/prompts', {
-				method: prompt ? 'PATCH' : 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(payload),
-			});
+			const saved = prompt
+				? await updatePrompt.mutateAsync({ id: prompt.id, ...payload })
+				: await createPrompt.mutateAsync(payload);
 
-			if (!response.ok) {
-				const error = await response.json().catch(() => ({ error: t('editor.notifications.errorMessage') }));
-				throw new Error(error.error ?? t('editor.notifications.errorMessage'));
-			}
-
-			const data = await response.json();
 			notifications.show({
 				title: t('editor.notifications.savedTitle'),
 				message: t('editor.notifications.savedMessage'),
 				color: 'teal',
 			});
 
-			onSaved(data.prompt as PromptView);
+			onSaved(saved);
 		} catch (error) {
 			notifications.show({
 				title: t('editor.notifications.errorTitle'),
-				message: error instanceof Error ? error.message : t('editor.notifications.errorMessage'),
+				message: errorMessage(error, t('editor.notifications.errorMessage')),
 				color: 'red',
 			});
-		} finally {
-			setSaving(false);
 		}
 	};
 

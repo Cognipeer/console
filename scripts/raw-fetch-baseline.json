@@ -1,5 +1,5 @@
 {
-  "count": 681,
+  "count": 673,
   "allow": [
     {
       "file": "src/components/agents/session/AgentSessionView.tsx",
