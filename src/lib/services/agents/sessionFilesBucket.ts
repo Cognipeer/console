@@ -17,7 +17,7 @@ import type {
     IFileBucketRecord,
     IProviderRecord,
 } from '@/lib/database';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import { AgentAttachmentError } from './agentErrors';
 
 /** Why a bucket cannot take a file. Stable codes: the picker and clients switch on them. */
@@ -102,9 +102,9 @@ export async function inspectFileBucketForTenant(
     projectId: string,
     bucketKey: string,
 ): Promise<BucketInspection> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return inspectFileBucket(db, tenantId, projectId, bucketKey);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        return inspectFileBucket(db, tenantId, projectId, bucketKey);
+    });
 }
 
 /**
@@ -175,25 +175,25 @@ export async function findAgentsUsingBucket(
     projectId: string,
     bucketKey: string,
 ): Promise<BucketAgentUse[]> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    // Hidden agents a flow owns count too: one that keeps session files in a bucket keeps it from being deleted.
-    const agents: IAgent[] = await db.listAgents({ projectId, owned: 'include' });
-    const uses: BucketAgentUse[] = [];
-    for (const agent of agents) {
-        if (bucketOf(agent.config) === bucketKey) {
-            uses.push({ key: agent.key, name: agent.name });
-            continue;
+    return runWithTenantScope(tenantDbName, async (db) => {
+        // Hidden agents a flow owns count too: one that keeps session files in a bucket keeps it from being deleted.
+        const agents: IAgent[] = await db.listAgents({ projectId, owned: 'include' });
+        const uses: BucketAgentUse[] = [];
+        for (const agent of agents) {
+            if (bucketOf(agent.config) === bucketKey) {
+                uses.push({ key: agent.key, name: agent.name });
+                continue;
+            }
+            if (typeof agent.publishedVersion !== 'number') continue;
+            const published = await db.findAgentVersion(String(agent._id), agent.publishedVersion).catch(() => null);
+            if (bucketOf(published?.snapshot?.config) === bucketKey) {
+                uses.push({ key: agent.key, name: agent.name, publishedOnly: true });
+            }
         }
-        if (typeof agent.publishedVersion !== 'number') continue;
-        const published = await db.findAgentVersion(String(agent._id), agent.publishedVersion).catch(() => null);
-        if (bucketOf(published?.snapshot?.config) === bucketKey) {
-            uses.push({ key: agent.key, name: agent.name, publishedOnly: true });
-        }
-    }
-    // By name, then key: agents created in the same instant come back in no fixed order from the
-    // database, and the 409 message names them in this order.
-    return uses.sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
+        // By name, then key: agents created in the same instant come back in no fixed order from the
+        // database, and the 409 message names them in this order.
+        return uses.sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
+    });
 }
 
 /** The 409 body for deleting or disabling a bucket that agents still keep session files in. */
@@ -248,42 +248,42 @@ export async function listAttachmentBuckets(
     tenantId: string,
     projectId: string,
 ): Promise<AttachmentBucketOption[]> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const [buckets, assigned] = await Promise.all([
-        db.listFileBuckets(tenantId, projectId),
-        db.listProviders(tenantId, { type: 'file', projectId }),
-    ]);
-    const providers = new Map(assigned.map((provider) => [provider.key, provider]));
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const [buckets, assigned] = await Promise.all([
+            db.listFileBuckets(tenantId, projectId),
+            db.listProviders(tenantId, { type: 'file', projectId }),
+        ]);
+        const providers = new Map(assigned.map((provider) => [provider.key, provider]));
 
-    const options: AttachmentBucketOption[] = [];
-    for (const bucket of buckets) {
-        const provider = providers.get(bucket.providerKey);
-        let inspection: BucketInspection;
-        if (bucket.status !== 'active') {
-            inspection = { usable: false, issue: 'bucket_disabled', message: describeBucketIssue('bucket_disabled', bucket.key), bucket };
-        } else if (!provider) {
-            const elsewhere = await db.findProviderByKey(tenantId, bucket.providerKey);
-            const issue: BucketIssue = elsewhere ? 'provider_unassigned' : 'provider_missing';
-            inspection = { usable: false, issue, message: describeBucketIssue(issue, bucket.key, bucket.providerKey), bucket };
-        } else if (provider.status !== 'active') {
-            inspection = { usable: false, issue: 'provider_inactive', message: describeBucketIssue('provider_inactive', bucket.key, bucket.providerKey), bucket, provider };
-        } else {
-            inspection = { usable: true, bucket, provider };
+        const options: AttachmentBucketOption[] = [];
+        for (const bucket of buckets) {
+            const provider = providers.get(bucket.providerKey);
+            let inspection: BucketInspection;
+            if (bucket.status !== 'active') {
+                inspection = { usable: false, issue: 'bucket_disabled', message: describeBucketIssue('bucket_disabled', bucket.key), bucket };
+            } else if (!provider) {
+                const elsewhere = await db.findProviderByKey(tenantId, bucket.providerKey);
+                const issue: BucketIssue = elsewhere ? 'provider_unassigned' : 'provider_missing';
+                inspection = { usable: false, issue, message: describeBucketIssue(issue, bucket.key, bucket.providerKey), bucket };
+            } else if (provider.status !== 'active') {
+                inspection = { usable: false, issue: 'provider_inactive', message: describeBucketIssue('provider_inactive', bucket.key, bucket.providerKey), bucket, provider };
+            } else {
+                inspection = { usable: true, bucket, provider };
+            }
+            options.push({
+                id: String(bucket._id),
+                key: bucket.key,
+                name: bucket.name,
+                providerKey: bucket.providerKey,
+                providerLabel: provider?.label ?? bucket.providerKey,
+                driver: provider?.driver ?? '',
+                bucketStatus: bucket.status,
+                providerStatus: provider?.status ?? 'missing',
+                usable: inspection.usable,
+                ...(inspection.usable ? {} : { reason: sentence(inspection.message), reasonCode: inspection.issue }),
+                localDisk: provider?.driver === LOCAL_DISK_DRIVER,
+            });
         }
-        options.push({
-            id: String(bucket._id),
-            key: bucket.key,
-            name: bucket.name,
-            providerKey: bucket.providerKey,
-            providerLabel: provider?.label ?? bucket.providerKey,
-            driver: provider?.driver ?? '',
-            bucketStatus: bucket.status,
-            providerStatus: provider?.status ?? 'missing',
-            usable: inspection.usable,
-            ...(inspection.usable ? {} : { reason: sentence(inspection.message), reasonCode: inspection.issue }),
-            localDisk: provider?.driver === LOCAL_DISK_DRIVER,
-        });
-    }
-    return options.sort((a, b) => a.name.localeCompare(b.name));
+        return options.sort((a, b) => a.name.localeCompare(b.name));
+    });
 }

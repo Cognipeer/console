@@ -13,7 +13,14 @@ import path from 'node:path';
 const hoisted = vi.hoisted(() => ({ getDatabase: vi.fn() }));
 vi.mock('@/lib/database', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/database')>();
-  return { ...actual, getDatabase: hoisted.getDatabase };
+  return {
+    ...actual,
+    getDatabase: hoisted.getDatabase,
+    runWithTenantScope: async (tenantDbName: string, fn: (d: unknown) => unknown) => {
+    const provider = (await hoisted.getDatabase()) as { runWithTenant: (n: string, work: () => unknown) => Promise<unknown> };
+    return provider.runWithTenant(tenantDbName, () => fn(provider));
+  },
+  };
 });
 
 import type { IAgentConfig } from '@/lib/database';

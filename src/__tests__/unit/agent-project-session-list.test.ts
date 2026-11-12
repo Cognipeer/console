@@ -13,7 +13,10 @@ const db = vi.hoisted(() => ({
     updateAgentConversationRuntime: vi.fn(),
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn(async () => db) }));
+vi.mock('@/lib/database', () => ({
+    getDatabase: vi.fn(async () => db),
+    runWithTenantScope: vi.fn(async (_n: string, fn: (d: unknown) => unknown) => fn(db)),
+}));
 
 import { Buffer } from 'node:buffer';
 import { decodeActivityCursor, decodeSessionCursor, encodeActivityCursor, listProjectSessions } from '@/lib/services/agents/sessionList';

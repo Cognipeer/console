@@ -17,7 +17,9 @@ const h = vi.hoisted(() => ({
 vi.mock('@/lib/core/logger', () => ({ createLogger: () => ({ info() {}, warn() {}, error() {}, debug() {} }) }));
 vi.mock('@/lib/database', () => ({
   getDatabase: async () => h.db,
-  runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(h.db),
+  // Same contract as the real helper: bind the tenant for the whole callback, on the one shared provider.
+  runWithTenantScope: async (tenantDbName: string, fn: (db: unknown) => unknown) =>
+    h.db.runWithTenant(tenantDbName, () => fn(h.db)),
 }));
 vi.mock('@/lib/services/availability/serviceAvailability', () => ({ assertServiceEnabled: async () => undefined }));
 vi.mock('@cognipeer/to-markdown', () => ({ convertToMarkdown: vi.fn() }));

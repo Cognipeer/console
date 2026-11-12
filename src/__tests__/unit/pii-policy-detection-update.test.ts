@@ -13,6 +13,7 @@ const hoisted = vi.hoisted(() => ({
 
 vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(async () => hoisted),
+  runWithTenantScope: vi.fn(async (_n: string, fn: (d: unknown) => unknown) => fn(hoisted)),
 }));
 
 import { updatePiiPolicy } from '@/lib/services/pii/piiService';

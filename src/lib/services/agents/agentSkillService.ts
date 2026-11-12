@@ -16,7 +16,7 @@
  */
 
 import type { Skill } from '@cognipeer/agent-sdk';
-import { getDatabase, type IAgentSkill } from '@/lib/database';
+import { runWithTenantScope, type IAgentSkill } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { mayUseSharedResource, type SharedResourceRun } from './sharedResourceAccess';
 import { isUsableByAgent } from './agentOwnedResources';
@@ -57,36 +57,36 @@ export async function buildAgentSkills(
 ): Promise<Skill[]> {
     if (!skillKeys || skillKeys.length === 0) return [];
 
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
 
-    const skills: Skill[] = [];
-    for (const key of skillKeys) {
-        try {
-            const record = await db.findSkillByKey(key, projectId);
-            // Another agent's own skill does not exist for this one.
-            if (!record || !isUsableByAgent(record, agentId)) {
-                logger.warn('Skill key does not resolve; skipping', { key });
-                continue;
+        const skills: Skill[] = [];
+        for (const key of skillKeys) {
+            try {
+                const record = await db.findSkillByKey(key, projectId);
+                // Another agent's own skill does not exist for this one.
+                if (!record || !isUsableByAgent(record, agentId)) {
+                    logger.warn('Skill key does not resolve; skipping', { key });
+                    continue;
+                }
+                if (record.status !== 'active') continue;
+                if (!(await mayUseSharedResource(run, {
+                    type: 'skill',
+                    id: String(record._id ?? ''),
+                    key: record.key,
+                    projectId: record.projectId,
+                    access: record.access,
+                }))) {
+                    logger.info('Skill is not open to the person this run is made for; left out', { key });
+                    continue;
+                }
+                skills.push(toSdkSkill(record));
+            } catch (error) {
+                logger.warn('Failed to load skill; skipping', {
+                    key,
+                    error: error instanceof Error ? error.message : String(error),
+                });
             }
-            if (record.status !== 'active') continue;
-            if (!(await mayUseSharedResource(run, {
-                type: 'skill',
-                id: String(record._id ?? ''),
-                key: record.key,
-                projectId: record.projectId,
-                access: record.access,
-            }))) {
-                logger.info('Skill is not open to the person this run is made for; left out', { key });
-                continue;
-            }
-            skills.push(toSdkSkill(record));
-        } catch (error) {
-            logger.warn('Failed to load skill; skipping', {
-                key,
-                error: error instanceof Error ? error.message : String(error),
-            });
         }
-    }
-    return skills;
+        return skills;
+    });
 }

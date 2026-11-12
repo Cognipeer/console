@@ -41,7 +41,7 @@ import {
     type AgentSandboxRef,
     type AgentSandboxRunner,
 } from '@/enterprise/registry';
-import { getDatabase, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentSandboxConfig } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentSandboxConfig } from '@/lib/database';
 import type { TraceToolDefinition } from '@/lib/services/tracingToolDefinitions';
 import { resolveSandboxMode } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './sandboxAvailability';
@@ -275,7 +275,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
      * it is THIS agent's session in THIS project - the same scope every session route checks
      * (api/plugins/agent-session-access.ts) - never merely whatever the id names.
      */
-    const readOwnConversation = async (db: Awaited<ReturnType<typeof getDatabase>>): Promise<IAgentConversation | null> => {
+    const readOwnConversation = async (db: DatabaseProvider): Promise<IAgentConversation | null> => {
         if (!sessionConversationId) return null;
         const found = await db.findAgentConversationById(sessionConversationId);
         return found && found.agentKey === input.agentKey && found.projectId === input.projectId ? found : null;
@@ -283,20 +283,20 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
 
     const saveRecord = async (instanceId: string): Promise<void> => {
         if (!sessionConversationId) return;
-        const db = await getDatabase();
-        await db.switchToTenant(input.tenantDbName);
-        const latest = await readOwnConversation(db);
-        if (!latest) return;
-        const now = new Date().toISOString();
-        const record: ConversationSandboxRecord = {
-            instanceId,
-            ...(config.templateKey ? { templateKey: config.templateKey } : {}),
-            lifecycle: 'session',
-            createdAt: createdAt ?? now,
-            lastUsedAt: now,
-        };
-        await db.updateAgentConversation(sessionConversationId, {
-            metadata: { ...(latest?.metadata ?? {}), sandbox: record },
+        return runWithTenantScope(input.tenantDbName, async (db) => {
+            const latest = await readOwnConversation(db);
+            if (!latest) return;
+            const now = new Date().toISOString();
+            const record: ConversationSandboxRecord = {
+                instanceId,
+                ...(config.templateKey ? { templateKey: config.templateKey } : {}),
+                lifecycle: 'session',
+                createdAt: createdAt ?? now,
+                lastUsedAt: now,
+            };
+            await db.updateAgentConversation(sessionConversationId, {
+                metadata: { ...(latest?.metadata ?? {}), sandbox: record },
+            });
         });
     };
 
@@ -353,19 +353,19 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         if (attachedId) return attach(attachedId);
         let previous: ConversationSandboxRecord | undefined;
         if (sessionConversationId) {
-            const db = await getDatabase();
-            await db.switchToTenant(input.tenantDbName);
-            const fresh = await readOwnConversation(db);
-            previous = fresh?.metadata?.sandbox as ConversationSandboxRecord | undefined;
-            if (previous && (previous.lifecycle !== 'session'
-                || (config.templateKey && previous.templateKey && previous.templateKey !== config.templateKey))) {
-                // Made under the old `persist` (a machine the idle reaper never
-                // closes), or the agent now wants a different template: start over.
-                await runner.destroy(ref, previous.instanceId).catch((error: unknown) => {
-                    logger.warn('Could not delete a replaced conversation sandbox', { error: String(error) });
-                });
-                previous = undefined;
-            }
+            await runWithTenantScope(input.tenantDbName, async (db) => {
+                const fresh = await readOwnConversation(db);
+                previous = fresh?.metadata?.sandbox as ConversationSandboxRecord | undefined;
+                if (previous && (previous.lifecycle !== 'session'
+                    || (config.templateKey && previous.templateKey && previous.templateKey !== config.templateKey))) {
+                    // Made under the old `persist` (a machine the idle reaper never
+                    // closes), or the agent now wants a different template: start over.
+                    await runner.destroy(ref, previous.instanceId).catch((error: unknown) => {
+                        logger.warn('Could not delete a replaced conversation sandbox', { error: String(error) });
+                    });
+                    previous = undefined;
+                }
+            });
         }
         const { instanceId, created } = await runner.ensureInstance(ref, {
             templateKey: config.templateKey,
@@ -408,27 +408,27 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
     const stageAttachments = async (instanceId: string): Promise<void> => {
         if (!conversationId) return;
         try {
-            const db = await getDatabase();
-            await db.switchToTenant(input.tenantDbName);
-            const records = (await db.listFileRecordsByConversation(conversationId))
-                .filter((record) => record.projectId === input.projectId && record.purpose === 'conversation' && record.origin !== 'agent_output');
-            if (records.length === 0) return;
-            const byId = new Map(records.map((record) => [String(record._id), record]));
-            const staged = await stageSessionFiles({
-                files: records.map((record) => ({ id: String(record._id), name: record.name, size: record.size, createdAt: record.createdAt })),
-                runner: { exec: (cmd) => runner.exec(ref, instanceId, cmd) },
-                readBytes: async (file) => {
-                    const record = byId.get(file.id)!;
-                    const result = await downloadFile(input.tenantDbName, input.tenantId, input.projectId, record.bucketKey, record.key);
-                    return Buffer.from(result.data as Uint8Array);
-                },
-                ...(currentTurnSignal() ? { signal: currentTurnSignal() } : {}),
-                onWarn: (message, meta) => logger.warn(message, { agentKey: input.agentKey, instanceId, ...meta }),
+            await runWithTenantScope(input.tenantDbName, async (db) => {
+                const records = (await db.listFileRecordsByConversation(conversationId))
+                    .filter((record) => record.projectId === input.projectId && record.purpose === 'conversation' && record.origin !== 'agent_output');
+                if (records.length === 0) return;
+                const byId = new Map(records.map((record) => [String(record._id), record]));
+                const staged = await stageSessionFiles({
+                    files: records.map((record) => ({ id: String(record._id), name: record.name, size: record.size, createdAt: record.createdAt })),
+                    runner: { exec: (cmd) => runner.exec(ref, instanceId, cmd) },
+                    readBytes: async (file) => {
+                        const record = byId.get(file.id)!;
+                        const result = await downloadFile(input.tenantDbName, input.tenantId, input.projectId, record.bucketKey, record.key);
+                        return Buffer.from(result.data as Uint8Array);
+                    },
+                    ...(currentTurnSignal() ? { signal: currentTurnSignal() } : {}),
+                    onWarn: (message, meta) => logger.warn(message, { agentKey: input.agentKey, instanceId, ...meta }),
+                });
+                if (staged.failed.length > 0) {
+                    const failed = `Some attached files could not be placed in ${ATTACHMENTS_DIR}: ${staged.failed.map((f) => `${f.name} (${f.reason})`).join('; ')}.`;
+                    seedNotice = [seedNotice, failed].filter(Boolean).join(' ');
+                }
             });
-            if (staged.failed.length > 0) {
-                const failed = `Some attached files could not be placed in ${ATTACHMENTS_DIR}: ${staged.failed.map((f) => `${f.name} (${f.reason})`).join('; ')}.`;
-                seedNotice = [seedNotice, failed].filter(Boolean).join(' ');
-            }
         } catch (error) {
             logger.warn('Could not place the attached files in the sandbox', { agentKey: input.agentKey, error: error instanceof Error ? error.message : String(error) });
         }
@@ -660,14 +660,14 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
             });
             if (session && result.attachments.length > 0) {
                 // `metadata` is replaced wholesale: start from a fresh read (see `saveRecord`).
-                const db = await getDatabase();
-                await db.switchToTenant(input.tenantDbName);
-                const latest = await readOwnConversation(db);
-                if (latest) {
-                    await db.updateAgentConversation(conversationId, {
-                        metadata: { ...(latest.metadata ?? {}), sandboxOutputs: result.seen },
-                    });
-                }
+                await runWithTenantScope(input.tenantDbName, async (db) => {
+                    const latest = await readOwnConversation(db);
+                    if (latest) {
+                        await db.updateAgentConversation(conversationId, {
+                            metadata: { ...(latest.metadata ?? {}), sandboxOutputs: result.seen },
+                        });
+                    }
+                });
             }
             if (result.warnings.length > 0) logger.warn('Sandbox outputs collected with warnings', { agentKey: input.agentKey, warnings: result.warnings });
             return { attachments: result.attachments, warnings: result.warnings };

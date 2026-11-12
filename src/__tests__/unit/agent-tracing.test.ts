@@ -8,9 +8,18 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
+vi.mock('@/lib/database', async () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // Mirrors the provider fallback of the real wrapper: bind the tenant, then run `fn`.
+    runWithTenantScope: vi.fn(async (name: string, fn: (d: unknown) => unknown) => {
+      const db = (await getDatabase()) as { switchToTenant?: (n: string) => Promise<void> };
+      await db.switchToTenant?.(name);
+      return fn(db);
+    }),
+  };
+});
 
 import { getDatabase } from '@/lib/database';
 import { createMockDb } from '../helpers/db.mock';

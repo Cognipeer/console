@@ -11,7 +11,7 @@
 
 import slugify from 'slugify';
 import {
-    getDatabase,
+    runWithTenantScope,
     type IAgentResourceOwner,
     type IAgentSkill,
     type IResourceAccessList,
@@ -27,14 +27,14 @@ function normalizeKeyCandidate(input: string): string {
 }
 
 async function generateUniqueKey(tenantDbName: string, projectId: string, desired: string): Promise<string> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const base = normalizeKeyCandidate(desired);
-    for (let attempt = 0; attempt < MAX_KEY_ATTEMPTS; attempt += 1) {
-        const candidate = attempt === 0 ? base : `${base}-${attempt + 1}`;
-        if (!(await db.findSkillByKey(candidate, projectId))) return candidate;
-    }
-    return `${base}-${Date.now()}`;
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const base = normalizeKeyCandidate(desired);
+        for (let attempt = 0; attempt < MAX_KEY_ATTEMPTS; attempt += 1) {
+            const candidate = attempt === 0 ? base : `${base}-${attempt + 1}`;
+            if (!(await db.findSkillByKey(candidate, projectId))) return candidate;
+        }
+        return `${base}-${Date.now()}`;
+    });
 }
 
 export interface CreateSkillInput {
@@ -66,9 +66,9 @@ export async function listSkills(
     projectId: string,
     options?: { status?: IAgentSkill['status']; search?: string } & OwnedResourceListFilter,
 ): Promise<IAgentSkill[]> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db.listSkills({ projectId, ...options });
+    return runWithTenantScope(tenantDbName, async (db) => {
+        return db.listSkills({ projectId, ...options });
+    });
 }
 
 export async function getSkillById(
@@ -76,9 +76,9 @@ export async function getSkillById(
     projectId: string,
     id: string,
 ): Promise<IAgentSkill | null> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db.findSkillById(id, projectId);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        return db.findSkillById(id, projectId);
+    });
 }
 
 export async function createSkill(
@@ -88,25 +88,25 @@ export async function createSkill(
     userId: string,
     payload: CreateSkillInput,
 ): Promise<IAgentSkill> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
 
-    const key = await generateUniqueKey(tenantDbName, projectId, payload.key || payload.title);
+        const key = await generateUniqueKey(tenantDbName, projectId, payload.key || payload.title);
 
-    return db.createSkill({
-        tenantId,
-        projectId,
-        key,
-        title: payload.title,
-        header: payload.header,
-        body: payload.body,
-        minModelTier: payload.minModelTier,
-        // Omitted when not given (a skill without a list is open), never `undefined` (BSON null on Mongo).
-        ...(payload.access ? { access: payload.access } : {}),
-        ...(payload.owner ? { owner: { kind: 'agent' as const, agentId: payload.owner.agentId } } : {}),
-        status: payload.status ?? 'active',
-        createdBy: userId,
-        updatedBy: userId,
+        return db.createSkill({
+            tenantId,
+            projectId,
+            key,
+            title: payload.title,
+            header: payload.header,
+            body: payload.body,
+            minModelTier: payload.minModelTier,
+            // Omitted when not given (a skill without a list is open), never `undefined` (BSON null on Mongo).
+            ...(payload.access ? { access: payload.access } : {}),
+            ...(payload.owner ? { owner: { kind: 'agent' as const, agentId: payload.owner.agentId } } : {}),
+            status: payload.status ?? 'active',
+            createdBy: userId,
+            updatedBy: userId,
+        });
     });
 }
 
@@ -117,27 +117,27 @@ export async function updateSkill(
     userId: string,
     updates: UpdateSkillInput,
 ): Promise<IAgentSkill | null> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
 
-    const existing = await db.findSkillById(id, projectId);
-    if (!existing) return null;
+        const existing = await db.findSkillById(id, projectId);
+        if (!existing) return null;
 
-    return db.updateSkill(id, {
-        title: updates.title,
-        header: updates.header,
-        body: updates.body,
-        minModelTier: updates.minModelTier === null ? undefined : (updates.minModelTier ?? existing.minModelTier),
-        ...(updates.access ? { access: updates.access } : {}),
-        status: updates.status,
-        updatedBy: userId,
+        return db.updateSkill(id, {
+            title: updates.title,
+            header: updates.header,
+            body: updates.body,
+            minModelTier: updates.minModelTier === null ? undefined : (updates.minModelTier ?? existing.minModelTier),
+            ...(updates.access ? { access: updates.access } : {}),
+            status: updates.status,
+            updatedBy: userId,
+        });
     });
 }
 
 export async function deleteSkill(tenantDbName: string, projectId: string, id: string): Promise<boolean> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const existing = await db.findSkillById(id, projectId);
-    if (!existing) return false;
-    return db.deleteSkill(id);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const existing = await db.findSkillById(id, projectId);
+        if (!existing) return false;
+        return db.deleteSkill(id);
+    });
 }

@@ -11,9 +11,13 @@ const hoisted = vi.hoisted(() => ({
   recordUsageEvent: vi.fn((_input: Record<string, unknown>) => ({})),
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: hoisted.getDatabase }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: hoisted.getDatabase,
+  runWithTenantScope: vi.fn(async (_n: string, fn: (d: unknown) => unknown) => fn(await hoisted.getDatabase())),
+}));
 vi.mock('@/lib/services/usage/usageEvents', () => ({ recordUsageEvent: hoisted.recordUsageEvent }));
 
+import { runWithTenantScope } from '@/lib/database';
 import { recordTraceModelUsage } from '@/lib/services/agentTracing';
 import {
   registerManagedCreditsHost,
@@ -25,7 +29,6 @@ const TENANT_DB = 'tenant_acme';
 
 function makeDb(options: { models?: unknown[]; external?: unknown[] } = {}) {
   return {
-    switchToTenant: vi.fn(async () => undefined),
     listModels: vi.fn(async () => options.models ?? []),
     listExternalModelPricing: vi.fn(async () => options.external ?? []),
   };
@@ -59,7 +62,7 @@ describe('recordTraceModelUsage', () => {
       ],
     });
 
-    expect(db.switchToTenant).toHaveBeenCalledWith(TENANT_DB);
+    expect(runWithTenantScope).toHaveBeenCalledWith(TENANT_DB, expect.any(Function));
     expect(hoisted.recordUsageEvent).toHaveBeenCalledTimes(1);
     expect(hoisted.recordUsageEvent.mock.calls[0][0]).toEqual({
       tenantDbName: TENANT_DB,

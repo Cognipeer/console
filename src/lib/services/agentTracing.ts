@@ -5,7 +5,7 @@
 
 import { getFlowsHost } from '@/enterprise/flows';
 import { isManagedModel, loadManagedCreditPricer } from '@/enterprise/managed-credits';
-import { getDatabase, type IAgentTracingEvent } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider, type IAgentTracingEvent } from '@/lib/database';
 import type { IAgentTracingSession } from '@/lib/database/provider/types.base';
 import { createLogger } from '@/lib/core/logger';
 import { deriveEnterpriseAgentInsights } from '@/enterprise/registry';
@@ -177,50 +177,50 @@ export interface TraceModelPricer {
 export type TraceModelPricerLoader = () => Promise<TraceModelPricer>;
 
 async function loadTraceModelPricer(tenantDbName: string, projectId?: string, tenantId?: string): Promise<TraceModelPricer> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const models = await db.listModels({ projectId });
-  // A model paid with credits has no token price: its calls are priced in credits at the tenant's rate.
-  const creditPricer = models.some((model) => isManagedModel(model)) ? await loadManagedCreditPricer(tenantId) : null;
-  const byKey = new Map(models.map((model) => [model.key.toLowerCase(), model]));
-  const byModelId = new Map(models.map((model) => [model.modelId.toLowerCase(), model]));
-  const externalEntries = await db.listExternalModelPricing(projectId);
-  // Project-scoped entries win over tenant-wide ('') ones for the same name.
-  const externalByName = new Map(
-    externalEntries
-      .sort((a, b) => (a.projectId === '' ? -1 : 1) - (b.projectId === '' ? -1 : 1))
-      .map((entry) => [entry.normalizedName, entry]),
-  );
-  const today = toUtcDay(new Date());
+  return runWithTenantScope(tenantDbName, async (db) => {
+      const models = await db.listModels({ projectId });
+      // A model paid with credits has no token price: its calls are priced in credits at the tenant's rate.
+      const creditPricer = models.some((model) => isManagedModel(model)) ? await loadManagedCreditPricer(tenantId) : null;
+      const byKey = new Map(models.map((model) => [model.key.toLowerCase(), model]));
+      const byModelId = new Map(models.map((model) => [model.modelId.toLowerCase(), model]));
+      const externalEntries = await db.listExternalModelPricing(projectId);
+      // Project-scoped entries win over tenant-wide ('') ones for the same name.
+      const externalByName = new Map(
+        externalEntries
+          .sort((a, b) => (a.projectId === '' ? -1 : 1) - (b.projectId === '' ? -1 : 1))
+          .map((entry) => [entry.normalizedName, entry]),
+      );
+      const today = toUtcDay(new Date());
 
-  return {
-    price(modelName, tokens) {
-      const lookup = modelName.toLowerCase();
-      const hubModel = byKey.get(lookup) ?? byModelId.get(lookup);
-      if (hubModel && creditPricer && isManagedModel(hubModel)) {
-        const quote = creditPricer(
-          {
-            providerKey: hubModel.providerKey,
-            modelKey: hubModel.key,
-            modelId: hubModel.modelId,
-            kind: hubModel.category === 'embedding' ? 'embedding' : 'chat',
-          },
-          {
-            inputTokens: tokens.inputTokens,
-            outputTokens: tokens.outputTokens,
-            cachedInputTokens: tokens.cachedInputTokens,
-            ...(tokens.calls !== undefined ? { calls: tokens.calls } : {}),
-          },
-        );
-        if (quote) return { refKey: hubModel.key, costUsd: quote.usd };
-      }
-      const externalEntry = externalByName.get(lookup);
-      const pricing = hubModel?.pricing
-        ?? (externalEntry ? resolveExternalPricingForDay(externalEntry, today) : undefined);
-      const costUsd = pricing ? calculateCost(pricing, tokens, hubModel).totalCost : 0;
-      return { refKey: hubModel?.key ?? modelName, costUsd };
-    },
-  };
+      return {
+        price(modelName, tokens) {
+          const lookup = modelName.toLowerCase();
+          const hubModel = byKey.get(lookup) ?? byModelId.get(lookup);
+          if (hubModel && creditPricer && isManagedModel(hubModel)) {
+            const quote = creditPricer(
+              {
+                providerKey: hubModel.providerKey,
+                modelKey: hubModel.key,
+                modelId: hubModel.modelId,
+                kind: hubModel.category === 'embedding' ? 'embedding' : 'chat',
+              },
+              {
+                inputTokens: tokens.inputTokens,
+                outputTokens: tokens.outputTokens,
+                cachedInputTokens: tokens.cachedInputTokens,
+                ...(tokens.calls !== undefined ? { calls: tokens.calls } : {}),
+              },
+            );
+            if (quote) return { refKey: hubModel.key, costUsd: quote.usd };
+          }
+          const externalEntry = externalByName.get(lookup);
+          const pricing = hubModel?.pricing
+            ?? (externalEntry ? resolveExternalPricingForDay(externalEntry, today) : undefined);
+          const costUsd = pricing ? calculateCost(pricing, tokens, hubModel).totalCost : 0;
+          return { refKey: hubModel?.key ?? modelName, costUsd };
+        },
+      };
+  });
 }
 
 /**
@@ -736,7 +736,7 @@ export function isFlowOwnedTrace(metadata: unknown): boolean {
 
 /** Hidden agents of the project by display name -> their flow, so per-agent aggregates can be grouped under the flow. */
 async function ownedAgentFlows(
-  db: Awaited<ReturnType<typeof getDatabase>>,
+  db: DatabaseProvider,
   tenantId: string | undefined,
   projectId: string,
 ): Promise<Map<string, { flowId: string; flowName: string }>> {
@@ -921,7 +921,7 @@ const SESSION_ANALYTICS_BATCH_SIZE = 1000;
 const SESSION_ANALYTICS_HARD_CAP = 100_000;
 
 async function fetchAllSessionsBatched(
-  db: Awaited<ReturnType<typeof getDatabase>>,
+  db: DatabaseProvider,
   projectId: string,
   baseQuery: SessionListQuery,
   projection: Record<string, 0 | 1>,
@@ -982,22 +982,22 @@ export class AgentTracingService {
       flowId?: string;
     },
   ) {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
 
-    const result = await db.listAgentTracingThreads({
-      threadId: filters?.threadId,
-      agentName: filters?.agent,
-      status: filters?.status,
-      from: filters?.from,
-      to: filters?.to,
-      limit: filters?.limit || '50',
-      skip: filters?.skip || '0',
-      metadataKey: filters?.flowId ? 'flowId' : filters?.metadataKey,
-      metadataValue: filters?.flowId ? filters.flowId : filters?.metadataValue,
-    }, projectId);
+        const result = await db.listAgentTracingThreads({
+          threadId: filters?.threadId,
+          agentName: filters?.agent,
+          status: filters?.status,
+          from: filters?.from,
+          to: filters?.to,
+          limit: filters?.limit || '50',
+          skip: filters?.skip || '0',
+          metadataKey: filters?.flowId ? 'flowId' : filters?.metadataKey,
+          metadataValue: filters?.flowId ? filters.flowId : filters?.metadataValue,
+        }, projectId);
 
-    return result;
+        return result;
+    });
   }
 
   /**
@@ -1008,76 +1008,76 @@ export class AgentTracingService {
     projectId: string,
     threadId: string,
   ) {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
 
-    const { sessions } = await db.listAgentTracingSessions({
-      includeTotal: false,
-      threadId,
-      limit: 1000,
-      projection: THREAD_SESSION_PROJECTION,
-    }, projectId);
+        const { sessions } = await db.listAgentTracingSessions({
+          includeTotal: false,
+          threadId,
+          limit: 1000,
+          projection: THREAD_SESSION_PROJECTION,
+        }, projectId);
 
-    if (sessions.length === 0) {
-      return null;
-    }
+        if (sessions.length === 0) {
+          return null;
+        }
 
-    const sorted = sessions
-      .slice()
-      .sort(
-        (a, b) =>
-          new Date(a.startedAt || 0).getTime() -
-          new Date(b.startedAt || 0).getTime(),
-      );
+        const sorted = sessions
+          .slice()
+          .sort(
+            (a, b) =>
+              new Date(a.startedAt || 0).getTime() -
+              new Date(b.startedAt || 0).getTime(),
+          );
 
-    const agents = [...new Set(sorted.map((s) => s.agentName).filter(Boolean))] as string[];
-    const statuses = sorted.map((s) => s.status || 'unknown');
-    const hasError = statuses.includes('error');
-    // 'abandoned' is a finished state too (the run went quiet and was closed by the finalizer); without it a thread would stay in_progress forever.
-    const allDone = statuses.every((s) => s === 'success' || s === 'error' || s === 'completed' || s === 'abandoned');
-    // A thread whose sessions ALL went quiet without an end is 'abandoned', not a successful conversation.
-    const allAbandoned = statuses.every((s) => s === 'abandoned');
-    const overallStatus = hasError ? 'error' : allAbandoned ? 'abandoned' : allDone ? 'success' : 'in_progress';
+        const agents = [...new Set(sorted.map((s) => s.agentName).filter(Boolean))] as string[];
+        const statuses = sorted.map((s) => s.status || 'unknown');
+        const hasError = statuses.includes('error');
+        // 'abandoned' is a finished state too (the run went quiet and was closed by the finalizer); without it a thread would stay in_progress forever.
+        const allDone = statuses.every((s) => s === 'success' || s === 'error' || s === 'completed' || s === 'abandoned');
+        // A thread whose sessions ALL went quiet without an end is 'abandoned', not a successful conversation.
+        const allAbandoned = statuses.every((s) => s === 'abandoned');
+        const overallStatus = hasError ? 'error' : allAbandoned ? 'abandoned' : allDone ? 'success' : 'in_progress';
 
-    const totalInputTokens = sorted.reduce((sum, s) => sum + (s.totalInputTokens || 0), 0);
-    const totalOutputTokens = sorted.reduce((sum, s) => sum + (s.totalOutputTokens || 0), 0);
-    const totalCachedInputTokens = sorted.reduce((sum, s) => sum + (s.totalCachedInputTokens || 0), 0);
-    const totalEvents = sorted.reduce((sum, s) => sum + (s.totalEvents || 0), 0);
-    const totalDurationMs = sorted.reduce((sum, s) => sum + (s.durationMs || 0), 0);
-    const modelsUsed = [...new Set(sorted.flatMap((s) => s.modelsUsed || []))];
-    const toolsUsed = [...new Set(sorted.flatMap((s) => s.toolsUsed || []))];
+        const totalInputTokens = sorted.reduce((sum, s) => sum + (s.totalInputTokens || 0), 0);
+        const totalOutputTokens = sorted.reduce((sum, s) => sum + (s.totalOutputTokens || 0), 0);
+        const totalCachedInputTokens = sorted.reduce((sum, s) => sum + (s.totalCachedInputTokens || 0), 0);
+        const totalEvents = sorted.reduce((sum, s) => sum + (s.totalEvents || 0), 0);
+        const totalDurationMs = sorted.reduce((sum, s) => sum + (s.durationMs || 0), 0);
+        const modelsUsed = [...new Set(sorted.flatMap((s) => s.modelsUsed || []))];
+        const toolsUsed = [...new Set(sorted.flatMap((s) => s.toolsUsed || []))];
 
-    return {
-      threadId,
-      status: overallStatus,
-      agents,
-      sessionsCount: sorted.length,
-      startedAt: sorted[0]?.startedAt,
-      endedAt: sorted[sorted.length - 1]?.endedAt,
-      totalDurationMs,
-      totalEvents,
-      totalInputTokens,
-      totalOutputTokens,
-      totalCachedInputTokens,
-      modelsUsed,
-      toolsUsed,
-      sessions: sorted.map((s) => ({
-        ...(traceFlowOf(s.metadata) ? { flow: traceFlowOf(s.metadata) } : {}),
-        sessionId: s.sessionId,
-        agentName: s.agentName,
-        agentVersion: s.agentVersion,
-        status: s.status,
-        startedAt: s.startedAt,
-        endedAt: s.endedAt,
-        durationMs: s.durationMs,
-        totalEvents: s.totalEvents,
-        totalTokens: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
-        totalInputTokens: s.totalInputTokens,
-        totalOutputTokens: s.totalOutputTokens,
-        modelsUsed: s.modelsUsed,
-        toolsUsed: s.toolsUsed,
-      })),
-    };
+        return {
+          threadId,
+          status: overallStatus,
+          agents,
+          sessionsCount: sorted.length,
+          startedAt: sorted[0]?.startedAt,
+          endedAt: sorted[sorted.length - 1]?.endedAt,
+          totalDurationMs,
+          totalEvents,
+          totalInputTokens,
+          totalOutputTokens,
+          totalCachedInputTokens,
+          modelsUsed,
+          toolsUsed,
+          sessions: sorted.map((s) => ({
+            ...(traceFlowOf(s.metadata) ? { flow: traceFlowOf(s.metadata) } : {}),
+            sessionId: s.sessionId,
+            agentName: s.agentName,
+            agentVersion: s.agentVersion,
+            status: s.status,
+            startedAt: s.startedAt,
+            endedAt: s.endedAt,
+            durationMs: s.durationMs,
+            totalEvents: s.totalEvents,
+            totalTokens: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
+            totalInputTokens: s.totalInputTokens,
+            totalOutputTokens: s.totalOutputTokens,
+            modelsUsed: s.modelsUsed,
+            toolsUsed: s.toolsUsed,
+          })),
+        };
+    });
   }
 
   /**
@@ -1091,18 +1091,18 @@ export class AgentTracingService {
     try {
       logger.debug('Getting dashboard overview', { tenantDbName, filters });
 
-      const db = await getDatabase();
-      await db.switchToTenant(tenantDbName);
+      return await runWithTenantScope(tenantDbName, async (db) => {
 
-      const overview = await db.aggregateAgentTracingDashboard(filters, projectId);
-      // Hidden agents a flow owns are not agents of their own: their rows are folded into one `Flow: <name>` row per flow.
-      const index = await ownedAgentFlows(db, undefined, projectId);
-      if (index.size === 0) return overview;
-      return {
-        ...overview,
-        recentAgents: regroupOwnedAgentRows(overview.recentAgents ?? [], index),
-        analytics: { ...overview.analytics, agents: regroupOwnedAgentRows(overview.analytics?.agents ?? [], index) },
-      };
+          const overview = await db.aggregateAgentTracingDashboard(filters, projectId);
+          // Hidden agents a flow owns are not agents of their own: their rows are folded into one `Flow: <name>` row per flow.
+          const index = await ownedAgentFlows(db, undefined, projectId);
+          if (index.size === 0) return overview;
+          return {
+            ...overview,
+            recentAgents: regroupOwnedAgentRows(overview.recentAgents ?? [], index),
+            analytics: { ...overview.analytics, agents: regroupOwnedAgentRows(overview.analytics?.agents ?? [], index) },
+          };
+      });
     } catch (error) {
       logger.error('Error in getDashboardOverview', { error });
       throw error;
@@ -1131,49 +1131,49 @@ export class AgentTracingService {
       truncated?: boolean;
     },
   ) {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
 
-    // `flowId` is the metadata filter on the flow tag; it is one filter, so it cannot be combined with another metadata filter.
-    const metadataKey = filters?.flowId ? 'flowId' : filters?.metadataKey;
-    const metadataValue = filters?.flowId ? filters.flowId : filters?.metadataValue;
+        // `flowId` is the metadata filter on the flow tag; it is one filter, so it cannot be combined with another metadata filter.
+        const metadataKey = filters?.flowId ? 'flowId' : filters?.metadataKey;
+        const metadataValue = filters?.flowId ? filters.flowId : filters?.metadataValue;
 
-    const result = await db.listAgentTracingSessions({
-      agentName: filters?.agent,
-      query: filters?.query,
-      projection: SESSION_LIST_PROJECTION,
-      status: filters?.status,
-      from: filters?.from,
-      to: filters?.to,
-      limit: filters?.limit || '50',
-      skip: filters?.skip || '0',
-      metadataKey,
-      metadataValue,
-      truncated: filters?.truncated,
-    }, projectId);
+        const result = await db.listAgentTracingSessions({
+          agentName: filters?.agent,
+          query: filters?.query,
+          projection: SESSION_LIST_PROJECTION,
+          status: filters?.status,
+          from: filters?.from,
+          to: filters?.to,
+          limit: filters?.limit || '50',
+          skip: filters?.skip || '0',
+          metadataKey,
+          metadataValue,
+          truncated: filters?.truncated,
+        }, projectId);
 
-    return {
-      sessions: result.sessions.map((s) => ({
-        // The flow the session ran under, when it did: a hidden agent's session belongs to its flow.
-        ...(traceFlowOf(s.metadata) ? { flow: traceFlowOf(s.metadata) } : {}),
-        sessionId: s.sessionId,
-        threadId: s.threadId,
-        agentName: s.agentName,
-        status: s.status,
-        startedAt: s.startedAt,
-        endedAt: s.endedAt,
-        durationMs: s.durationMs,
-        totalEvents: s.totalEvents,
-        totalTokens: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
-        totalInputTokens: s.totalInputTokens,
-        totalOutputTokens: s.totalOutputTokens,
-        totalCachedInputTokens: s.totalCachedInputTokens,
-        totalReasoningTokens: s.totalReasoningTokens,
-        truncatedEvents: s.truncatedEvents,
-        metadata: s.metadata,
-      })),
-      total: result.total,
-    };
+        return {
+          sessions: result.sessions.map((s) => ({
+            // The flow the session ran under, when it did: a hidden agent's session belongs to its flow.
+            ...(traceFlowOf(s.metadata) ? { flow: traceFlowOf(s.metadata) } : {}),
+            sessionId: s.sessionId,
+            threadId: s.threadId,
+            agentName: s.agentName,
+            status: s.status,
+            startedAt: s.startedAt,
+            endedAt: s.endedAt,
+            durationMs: s.durationMs,
+            totalEvents: s.totalEvents,
+            totalTokens: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
+            totalInputTokens: s.totalInputTokens,
+            totalOutputTokens: s.totalOutputTokens,
+            totalCachedInputTokens: s.totalCachedInputTokens,
+            totalReasoningTokens: s.totalReasoningTokens,
+            truncatedEvents: s.truncatedEvents,
+            metadata: s.metadata,
+          })),
+          total: result.total,
+        };
+    });
   }
 
   /**
@@ -1193,11 +1193,11 @@ export class AgentTracingService {
     projectId: string,
     sessionId: string,
   ): Promise<{ threadId: string | null; userId: string | null; kbRestricted: string[] } | null> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const session = await db.findAgentTracingSessionById(sessionId, projectId);
-    if (!session) return null;
-    return { threadId: session.threadId ?? null, userId: session.userId ?? null, kbRestricted: session.kbRestricted ?? [] };
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const session = await db.findAgentTracingSessionById(sessionId, projectId);
+        if (!session) return null;
+        return { threadId: session.threadId ?? null, userId: session.userId ?? null, kbRestricted: session.kbRestricted ?? [] };
+    });
   }
 
   /**
@@ -1209,57 +1209,57 @@ export class AgentTracingService {
     sessionId: string,
     options?: { includeEventContent?: boolean },
   ) {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
 
-    const session = await db.findAgentTracingSessionById(sessionId, projectId);
-    if (!session) {
-      return null;
-    }
+        const session = await db.findAgentTracingSessionById(sessionId, projectId);
+        if (!session) {
+          return null;
+        }
 
-    const events = await db.listAgentTracingEvents(
-      sessionId,
-      projectId,
-      options?.includeEventContent === false
-        ? { projection: SESSION_EVENT_SUMMARY_PROJECTION }
-        : undefined,
-    );
+        const events = await db.listAgentTracingEvents(
+          sessionId,
+          projectId,
+          options?.includeEventContent === false
+            ? { projection: SESSION_EVENT_SUMMARY_PROJECTION }
+            : undefined,
+        );
 
-    return {
-      session: {
-        sessionId: session.sessionId,
-        threadId: session.threadId,
-        traceId: session.traceId,
-        rootSpanId: session.rootSpanId,
-        source: session.source,
-        agentName: session.agentName,
-        agentVersion: session.agentVersion,
-        agentModel: session.agentModel,
-        metadata: session.metadata,
-        status: session.status,
-        startedAt: session.startedAt,
-        endedAt: session.endedAt,
-        durationMs: session.durationMs,
-        totalEvents: session.totalEvents,
-        totalInputTokens: session.totalInputTokens,
-        totalOutputTokens: session.totalOutputTokens,
-        totalCachedInputTokens: session.totalCachedInputTokens,
-        totalReasoningTokens: session.totalReasoningTokens,
-        truncatedEvents: session.truncatedEvents,
-        totalBytesIn: session.totalBytesIn,
-        totalBytesOut: session.totalBytesOut,
-        summary: session.summary,
-        modelsUsed: session.modelsUsed,
-        toolsUsed: session.toolsUsed,
-        eventCounts: session.eventCounts,
-        errors: session.errors,
-      },
-      events: events.map((e) => (
-        options?.includeEventContent === false
-          ? mapTracingEventSummary(e)
-          : mapTracingEventDetail(e)
-      )),
-    };
+        return {
+          session: {
+            sessionId: session.sessionId,
+            threadId: session.threadId,
+            traceId: session.traceId,
+            rootSpanId: session.rootSpanId,
+            source: session.source,
+            agentName: session.agentName,
+            agentVersion: session.agentVersion,
+            agentModel: session.agentModel,
+            metadata: session.metadata,
+            status: session.status,
+            startedAt: session.startedAt,
+            endedAt: session.endedAt,
+            durationMs: session.durationMs,
+            totalEvents: session.totalEvents,
+            totalInputTokens: session.totalInputTokens,
+            totalOutputTokens: session.totalOutputTokens,
+            totalCachedInputTokens: session.totalCachedInputTokens,
+            totalReasoningTokens: session.totalReasoningTokens,
+            truncatedEvents: session.truncatedEvents,
+            totalBytesIn: session.totalBytesIn,
+            totalBytesOut: session.totalBytesOut,
+            summary: session.summary,
+            modelsUsed: session.modelsUsed,
+            toolsUsed: session.toolsUsed,
+            eventCounts: session.eventCounts,
+            errors: session.errors,
+          },
+          events: events.map((e) => (
+            options?.includeEventContent === false
+              ? mapTracingEventSummary(e)
+              : mapTracingEventDetail(e)
+          )),
+        };
+    });
   }
 
   static async getSessionEventDetail(
@@ -1268,17 +1268,17 @@ export class AgentTracingService {
     sessionId: string,
     eventId: string,
   ) {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
 
-    const event = await db.findAgentTracingEventById(sessionId, eventId, projectId);
-    if (!event) {
-      return null;
-    }
+        const event = await db.findAgentTracingEventById(sessionId, eventId, projectId);
+        if (!event) {
+          return null;
+        }
 
-    return {
-      event: mapTracingEventDetail(event),
-    };
+        return {
+          event: mapTracingEventDetail(event),
+        };
+    });
   }
 
   /**
@@ -1290,245 +1290,245 @@ export class AgentTracingService {
     agentName: string,
     filters?: { from?: string; to?: string; timezone?: string },
   ) {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
 
-    const query: SessionListQuery = {
-      agentNameExact: agentName,
-    };
-    if (filters?.from || filters?.to) {
-      query.from = filters.from;
-      query.to = filters.to;
-    }
+        const query: SessionListQuery = {
+          agentNameExact: agentName,
+        };
+        if (filters?.from || filters?.to) {
+          query.from = filters.from;
+          query.to = filters.to;
+        }
 
-    const sessions = await fetchAllSessionsBatched(
-      db,
-      projectId,
-      query,
-      AGENT_OVERVIEW_SESSION_PROJECTION,
-    );
+        const sessions = await fetchAllSessionsBatched(
+          db,
+          projectId,
+          query,
+          AGENT_OVERVIEW_SESSION_PROJECTION,
+        );
 
-    if (sessions.length === 0) {
-      return {
-        agent: {
+        if (sessions.length === 0) {
+          return {
+            agent: {
+              name: agentName,
+              label: agentName,
+              latestStatus: null,
+              latestVersion: null,
+              latestSessionAt: null,
+              versions: [],
+              sessionsCount: 0,
+            },
+            recentSessions: [],
+            analytics: {
+              totals: {
+                sessionsCount: 0,
+                totalEvents: 0,
+                totalInputTokens: 0,
+                totalOutputTokens: 0,
+                totalCachedInputTokens: 0,
+                totalTokens: 0,
+                totalDurationMs: 0,
+                averageInputTokensPerSession: 0,
+                averageOutputTokensPerSession: 0,
+                averageCachedInputTokensPerSession: 0,
+                averageTokensPerSession: 0,
+                averageDurationMs: 0,
+              },
+              tools: {
+                totals: {
+                  totalCalls: 0,
+                  errorCalls: 0,
+                  successCalls: 0,
+                  errorRate: 0,
+                },
+                items: [],
+              },
+              statuses: [],
+              models: [],
+              versions: [],
+              daily: [],
+              insights: null,
+            },
+          };
+        }
+
+        const sortedSessions = sessions
+          .slice()
+          .sort(
+            (a, b) =>
+              new Date(b.startedAt || 0).getTime() -
+              new Date(a.startedAt || 0).getTime(),
+          );
+
+        const insights = await deriveEnterpriseAgentInsights(
+          db,
+          projectId,
+          sortedSessions as unknown as Array<Record<string, unknown>>,
+        );
+
+        const totals = buildAggregateTotals(sessions);
+
+        const recentSessions = sortedSessions.slice(0, 10).map((s) => ({
+          sessionId: s.sessionId,
+          threadId: s.threadId,
+          status: s.status,
+          startedAt: s.startedAt,
+          durationMs: s.durationMs,
+          totalEvents: s.totalEvents,
+          totalTokens: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
+        }));
+
+        // Agent info
+        const latestSession = sortedSessions[0];
+        const agent = {
           name: agentName,
           label: agentName,
-          latestStatus: null,
-          latestVersion: null,
-          latestSessionAt: null,
-          versions: [],
-          sessionsCount: 0,
-        },
-        recentSessions: [],
-        analytics: {
-          totals: {
-            sessionsCount: 0,
-            totalEvents: 0,
-            totalInputTokens: 0,
-            totalOutputTokens: 0,
-            totalCachedInputTokens: 0,
-            totalTokens: 0,
-            totalDurationMs: 0,
-            averageInputTokensPerSession: 0,
-            averageOutputTokensPerSession: 0,
-            averageCachedInputTokensPerSession: 0,
-            averageTokensPerSession: 0,
-            averageDurationMs: 0,
-          },
-          tools: {
-            totals: {
-              totalCalls: 0,
-              errorCalls: 0,
-              successCalls: 0,
-              errorRate: 0,
-            },
-            items: [],
-          },
-          statuses: [],
-          models: [],
-          versions: [],
-          daily: [],
-          insights: null,
-        },
-      };
-    }
+          latestStatus: latestSession?.status || null,
+          latestVersion: latestSession?.agentVersion || null,
+          latestSessionAt: latestSession?.startedAt || null,
+          versions: Array.from(
+            new Set(sortedSessions.map((s) => s.agentVersion).filter(Boolean)),
+          ),
+          sessionsCount: sessions.length,
+        };
 
-    const sortedSessions = sessions
-      .slice()
-      .sort(
-        (a, b) =>
-          new Date(b.startedAt || 0).getTime() -
-          new Date(a.startedAt || 0).getTime(),
-      );
-
-    const insights = await deriveEnterpriseAgentInsights(
-      db,
-      projectId,
-      sortedSessions as unknown as Array<Record<string, unknown>>,
-    );
-
-    const totals = buildAggregateTotals(sessions);
-
-    const recentSessions = sortedSessions.slice(0, 10).map((s) => ({
-      sessionId: s.sessionId,
-      threadId: s.threadId,
-      status: s.status,
-      startedAt: s.startedAt,
-      durationMs: s.durationMs,
-      totalEvents: s.totalEvents,
-      totalTokens: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
-    }));
-
-    // Agent info
-    const latestSession = sortedSessions[0];
-    const agent = {
-      name: agentName,
-      label: agentName,
-      latestStatus: latestSession?.status || null,
-      latestVersion: latestSession?.agentVersion || null,
-      latestSessionAt: latestSession?.startedAt || null,
-      versions: Array.from(
-        new Set(sortedSessions.map((s) => s.agentVersion).filter(Boolean)),
-      ),
-      sessionsCount: sessions.length,
-    };
-
-    // Status breakdown
-    const statusMap = new Map<string, number>();
-    sortedSessions.forEach((session) => {
-      const status = session.status || 'unknown';
-      statusMap.set(status, (statusMap.get(status) || 0) + 1);
-    });
-    const statuses = Array.from(statusMap.entries())
-      .map(([status, count]) => ({ status, count }))
-      .sort((a, b) => b.count - a.count);
-
-    // Versions breakdown
-    const versionMap = new Map<string, number>();
-    sortedSessions.forEach((session) => {
-      const version = session.agentVersion || 'unknown';
-      versionMap.set(version, (versionMap.get(version) || 0) + 1);
-    });
-    const versions = Array.from(versionMap.entries())
-      .map(([version, sessionsCount]) => ({
-        version: version === 'unknown' ? null : version,
-        sessionsCount,
-      }))
-      .sort((a, b) => b.sessionsCount - a.sessionsCount);
-
-    // Model usage
-    const modelMap = new Map<string, number>();
-    sortedSessions.forEach((session) => {
-      (session.modelsUsed || []).forEach((model) => {
-        modelMap.set(model, (modelMap.get(model) || 0) + 1);
-      });
-    });
-    const models = Array.from(modelMap.entries())
-      .map(([model, sessionsCount]) => ({ model, sessionsCount }))
-      .sort((a, b) => b.sessionsCount - a.sessionsCount);
-
-    // Tool analytics
-    const toolMap = new Map<
-      string,
-      { totalCalls: number; errorCalls: number; successCalls: number }
-    >();
-    sortedSessions.forEach((session) => {
-      (session.toolsUsed || []).forEach((tool) => {
-        if (!toolMap.has(tool)) {
-          toolMap.set(tool, { totalCalls: 0, errorCalls: 0, successCalls: 0 });
-        }
-        const toolStats = toolMap.get(tool)!;
-        toolStats.totalCalls++;
-        if (session.status === 'error') {
-          toolStats.errorCalls++;
-        } else {
-          toolStats.successCalls++;
-        }
-      });
-    });
-
-    const toolItems = Array.from(toolMap.entries())
-      .map(([toolName, stats]) => ({
-        toolName,
-        ...stats,
-        errorRate:
-          stats.totalCalls > 0 ? stats.errorCalls / stats.totalCalls : 0,
-      }))
-      .sort((a, b) => b.totalCalls - a.totalCalls);
-
-    const toolTotals = {
-      totalCalls: toolItems.reduce((sum, t) => sum + t.totalCalls, 0),
-      errorCalls: toolItems.reduce((sum, t) => sum + t.errorCalls, 0),
-      successCalls: toolItems.reduce((sum, t) => sum + t.successCalls, 0),
-      errorRate: 0,
-    };
-    if (toolTotals.totalCalls > 0) {
-      toolTotals.errorRate = toolTotals.errorCalls / toolTotals.totalCalls;
-    }
-
-    // Daily trend
-    const dailyMap = new Map<
-      string,
-      {
-        sessionsCount: number;
-        totalEvents: number;
-        totalTokens: number;
-        totalDurationMs: number;
-      }
-    >();
-    sortedSessions.forEach((session) => {
-      if (!session.startedAt) {
-        return;
-      }
-      const dateKey = dayjs(session.startedAt).format('YYYY-MM-DD');
-      if (!dailyMap.has(dateKey)) {
-        dailyMap.set(dateKey, {
-          sessionsCount: 0,
-          totalEvents: 0,
-          totalTokens: 0,
-          totalDurationMs: 0,
+        // Status breakdown
+        const statusMap = new Map<string, number>();
+        sortedSessions.forEach((session) => {
+          const status = session.status || 'unknown';
+          statusMap.set(status, (statusMap.get(status) || 0) + 1);
         });
-      }
-      const entry = dailyMap.get(dateKey)!;
-      entry.sessionsCount += 1;
-      entry.totalEvents += session.totalEvents || 0;
-      entry.totalTokens +=
-        (session.totalInputTokens || 0) + (session.totalOutputTokens || 0);
-      entry.totalDurationMs += session.durationMs || 0;
+        const statuses = Array.from(statusMap.entries())
+          .map(([status, count]) => ({ status, count }))
+          .sort((a, b) => b.count - a.count);
+
+        // Versions breakdown
+        const versionMap = new Map<string, number>();
+        sortedSessions.forEach((session) => {
+          const version = session.agentVersion || 'unknown';
+          versionMap.set(version, (versionMap.get(version) || 0) + 1);
+        });
+        const versions = Array.from(versionMap.entries())
+          .map(([version, sessionsCount]) => ({
+            version: version === 'unknown' ? null : version,
+            sessionsCount,
+          }))
+          .sort((a, b) => b.sessionsCount - a.sessionsCount);
+
+        // Model usage
+        const modelMap = new Map<string, number>();
+        sortedSessions.forEach((session) => {
+          (session.modelsUsed || []).forEach((model) => {
+            modelMap.set(model, (modelMap.get(model) || 0) + 1);
+          });
+        });
+        const models = Array.from(modelMap.entries())
+          .map(([model, sessionsCount]) => ({ model, sessionsCount }))
+          .sort((a, b) => b.sessionsCount - a.sessionsCount);
+
+        // Tool analytics
+        const toolMap = new Map<
+          string,
+          { totalCalls: number; errorCalls: number; successCalls: number }
+        >();
+        sortedSessions.forEach((session) => {
+          (session.toolsUsed || []).forEach((tool) => {
+            if (!toolMap.has(tool)) {
+              toolMap.set(tool, { totalCalls: 0, errorCalls: 0, successCalls: 0 });
+            }
+            const toolStats = toolMap.get(tool)!;
+            toolStats.totalCalls++;
+            if (session.status === 'error') {
+              toolStats.errorCalls++;
+            } else {
+              toolStats.successCalls++;
+            }
+          });
+        });
+
+        const toolItems = Array.from(toolMap.entries())
+          .map(([toolName, stats]) => ({
+            toolName,
+            ...stats,
+            errorRate:
+              stats.totalCalls > 0 ? stats.errorCalls / stats.totalCalls : 0,
+          }))
+          .sort((a, b) => b.totalCalls - a.totalCalls);
+
+        const toolTotals = {
+          totalCalls: toolItems.reduce((sum, t) => sum + t.totalCalls, 0),
+          errorCalls: toolItems.reduce((sum, t) => sum + t.errorCalls, 0),
+          successCalls: toolItems.reduce((sum, t) => sum + t.successCalls, 0),
+          errorRate: 0,
+        };
+        if (toolTotals.totalCalls > 0) {
+          toolTotals.errorRate = toolTotals.errorCalls / toolTotals.totalCalls;
+        }
+
+        // Daily trend
+        const dailyMap = new Map<
+          string,
+          {
+            sessionsCount: number;
+            totalEvents: number;
+            totalTokens: number;
+            totalDurationMs: number;
+          }
+        >();
+        sortedSessions.forEach((session) => {
+          if (!session.startedAt) {
+            return;
+          }
+          const dateKey = dayjs(session.startedAt).format('YYYY-MM-DD');
+          if (!dailyMap.has(dateKey)) {
+            dailyMap.set(dateKey, {
+              sessionsCount: 0,
+              totalEvents: 0,
+              totalTokens: 0,
+              totalDurationMs: 0,
+            });
+          }
+          const entry = dailyMap.get(dateKey)!;
+          entry.sessionsCount += 1;
+          entry.totalEvents += session.totalEvents || 0;
+          entry.totalTokens +=
+            (session.totalInputTokens || 0) + (session.totalOutputTokens || 0);
+          entry.totalDurationMs += session.durationMs || 0;
+        });
+
+        const daily = Array.from(dailyMap.entries())
+          .sort((a, b) => dayjs(a[0]).valueOf() - dayjs(b[0]).valueOf())
+          .map(([date, stats]) => ({
+            date,
+            sessionsCount: stats.sessionsCount,
+            totalEvents: stats.totalEvents,
+            totalTokens: stats.totalTokens,
+            averageDurationMs:
+              stats.sessionsCount > 0
+                ? Math.round(stats.totalDurationMs / stats.sessionsCount)
+                : 0,
+          }))
+          .slice(-30);
+
+        // ── Deterministic insights (bounded event sample of recent sessions) ──
+
+        return {
+          agent,
+          recentSessions,
+          analytics: {
+            totals,
+            tools: {
+              totals: toolTotals,
+              items: toolItems,
+            },
+            statuses,
+            models,
+            versions,
+            daily,
+            insights,
+          },
+        };
     });
-
-    const daily = Array.from(dailyMap.entries())
-      .sort((a, b) => dayjs(a[0]).valueOf() - dayjs(b[0]).valueOf())
-      .map(([date, stats]) => ({
-        date,
-        sessionsCount: stats.sessionsCount,
-        totalEvents: stats.totalEvents,
-        totalTokens: stats.totalTokens,
-        averageDurationMs:
-          stats.sessionsCount > 0
-            ? Math.round(stats.totalDurationMs / stats.sessionsCount)
-            : 0,
-      }))
-      .slice(-30);
-
-    // ── Deterministic insights (bounded event sample of recent sessions) ──
-
-    return {
-      agent,
-      recentSessions,
-      analytics: {
-        totals,
-        tools: {
-          totals: toolTotals,
-          items: toolItems,
-        },
-        statuses,
-        models,
-        versions,
-        daily,
-        insights,
-      },
-    };
   }
 
   /**
@@ -1541,49 +1541,49 @@ export class AgentTracingService {
     projectId: string,
     filters?: { from?: string; to?: string; limit?: number },
   ) {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
 
-    const query: SessionListQuery = {};
-    if (filters?.from) query.from = filters.from;
-    if (filters?.to) query.to = filters.to;
+        const query: SessionListQuery = {};
+        if (filters?.from) query.from = filters.from;
+        if (filters?.to) query.to = filters.to;
 
-    const sessions = await fetchAllSessionsBatched(
-      db,
-      projectId,
-      query,
-      AGENT_DIRECTORY_SESSION_PROJECTION,
-    );
+        const sessions = await fetchAllSessionsBatched(
+          db,
+          projectId,
+          query,
+          AGENT_DIRECTORY_SESSION_PROJECTION,
+        );
 
-    const byAgent = new Map<
-      string,
-      { name: string; sessionsCount: number; latestSessionAt: string | null; latestStatus: string | null }
-    >();
-    for (const session of sessions) {
-      const name = session.agentName;
-      if (!name) continue;
-      // A hidden agent a flow owns is listed under its flow, not as an agent.
-      if (isFlowOwnedTrace(session.metadata)) continue;
-      const entry = byAgent.get(name) ?? {
-        name,
-        sessionsCount: 0,
-        latestSessionAt: null,
-        latestStatus: null,
-      };
-      entry.sessionsCount += 1;
-      const at = session.startedAt ? new Date(session.startedAt).toISOString() : null;
-      if (at && (!entry.latestSessionAt || at > entry.latestSessionAt)) {
-        entry.latestSessionAt = at;
-        entry.latestStatus = session.status ?? null;
-      }
-      byAgent.set(name, entry);
-    }
+        const byAgent = new Map<
+          string,
+          { name: string; sessionsCount: number; latestSessionAt: string | null; latestStatus: string | null }
+        >();
+        for (const session of sessions) {
+          const name = session.agentName;
+          if (!name) continue;
+          // A hidden agent a flow owns is listed under its flow, not as an agent.
+          if (isFlowOwnedTrace(session.metadata)) continue;
+          const entry = byAgent.get(name) ?? {
+            name,
+            sessionsCount: 0,
+            latestSessionAt: null,
+            latestStatus: null,
+          };
+          entry.sessionsCount += 1;
+          const at = session.startedAt ? new Date(session.startedAt).toISOString() : null;
+          if (at && (!entry.latestSessionAt || at > entry.latestSessionAt)) {
+            entry.latestSessionAt = at;
+            entry.latestStatus = session.status ?? null;
+          }
+          byAgent.set(name, entry);
+        }
 
-    const agents = [...byAgent.values()].sort((a, b) =>
-      (b.latestSessionAt ?? '').localeCompare(a.latestSessionAt ?? ''),
-    );
-    const limit = filters?.limit && filters.limit > 0 ? filters.limit : 50;
-    return { agents: agents.slice(0, limit), total: agents.length };
+        const agents = [...byAgent.values()].sort((a, b) =>
+          (b.latestSessionAt ?? '').localeCompare(a.latestSessionAt ?? ''),
+        );
+        const limit = filters?.limit && filters.limit > 0 ? filters.limit : 50;
+        return { agents: agents.slice(0, limit), total: agents.length };
+    });
   }
 
   /**
@@ -1598,92 +1598,92 @@ export class AgentTracingService {
     modelName: string,
     filters?: { from?: string; to?: string; timezone?: string },
   ) {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
 
-    const query: SessionListQuery = {};
-    if (filters?.from || filters?.to) {
-      query.from = filters.from;
-      query.to = filters.to;
-    }
+        const query: SessionListQuery = {};
+        if (filters?.from || filters?.to) {
+          query.from = filters.from;
+          query.to = filters.to;
+        }
 
-    const allSessions = await fetchAllSessionsBatched(
-      db,
-      projectId,
-      query,
-      MODEL_OVERVIEW_SESSION_PROJECTION,
-    );
-    const sessions = allSessions.filter((s) => (s.modelsUsed || []).includes(modelName));
+        const allSessions = await fetchAllSessionsBatched(
+          db,
+          projectId,
+          query,
+          MODEL_OVERVIEW_SESSION_PROJECTION,
+        );
+        const sessions = allSessions.filter((s) => (s.modelsUsed || []).includes(modelName));
 
-    if (sessions.length === 0) {
-      return {
-        model: {
-          name: modelName,
-          sessionsCount: 0,
-          agentsCount: 0,
-          latestSessionAt: null,
-          latestStatus: null,
-        },
-        analytics: {
-          totals: buildAggregateTotals([]),
-          statuses: [],
-          agents: [],
-          insights: null,
-        },
-      };
-    }
+        if (sessions.length === 0) {
+          return {
+            model: {
+              name: modelName,
+              sessionsCount: 0,
+              agentsCount: 0,
+              latestSessionAt: null,
+              latestStatus: null,
+            },
+            analytics: {
+              totals: buildAggregateTotals([]),
+              statuses: [],
+              agents: [],
+              insights: null,
+            },
+          };
+        }
 
-    const sortedSessions = sessions
-      .slice()
-      .sort(
-        (a, b) =>
-          new Date(b.startedAt || 0).getTime() -
-          new Date(a.startedAt || 0).getTime(),
-      );
+        const sortedSessions = sessions
+          .slice()
+          .sort(
+            (a, b) =>
+              new Date(b.startedAt || 0).getTime() -
+              new Date(a.startedAt || 0).getTime(),
+          );
 
-    const totals = buildAggregateTotals(sessions);
+        const totals = buildAggregateTotals(sessions);
 
-    const statusMap = new Map<string, number>();
-    sortedSessions.forEach((session) => {
-      const status = session.status || 'unknown';
-      statusMap.set(status, (statusMap.get(status) || 0) + 1);
+        const statusMap = new Map<string, number>();
+        sortedSessions.forEach((session) => {
+          const status = session.status || 'unknown';
+          statusMap.set(status, (statusMap.get(status) || 0) + 1);
+        });
+        const statuses = Array.from(statusMap.entries())
+          .map(([status, count]) => ({ status, count }))
+          .sort((a, b) => b.count - a.count);
+
+        const agentMap = new Map<string, number>();
+        sortedSessions.forEach((session) => {
+          const name = session.agentName || 'unknown';
+          agentMap.set(name, (agentMap.get(name) || 0) + 1);
+        });
+        const agents = Array.from(agentMap.entries())
+          .map(([name, sessionsCount]) => ({ name, sessionsCount }))
+          .sort((a, b) => b.sessionsCount - a.sessionsCount);
+
+        const latestSession = sortedSessions[0];
+
+        const insights = await deriveEnterpriseAgentInsights(
+          db,
+          projectId,
+          sortedSessions as unknown as Array<Record<string, unknown>>,
+          { modelName },
+        );
+
+        return {
+          model: {
+            name: modelName,
+            sessionsCount: sessions.length,
+            agentsCount: agents.length,
+            latestSessionAt: latestSession?.startedAt || null,
+            latestStatus: latestSession?.status || null,
+          },
+          analytics: {
+            totals,
+            statuses,
+            agents,
+            insights,
+          },
+        };
     });
-    const statuses = Array.from(statusMap.entries())
-      .map(([status, count]) => ({ status, count }))
-      .sort((a, b) => b.count - a.count);
-
-    const agentMap = new Map<string, number>();
-    sortedSessions.forEach((session) => {
-      const name = session.agentName || 'unknown';
-      agentMap.set(name, (agentMap.get(name) || 0) + 1);
-    });
-    const agents = Array.from(agentMap.entries())
-      .map(([name, sessionsCount]) => ({ name, sessionsCount }))
-      .sort((a, b) => b.sessionsCount - a.sessionsCount);
-
-    const latestSession = sortedSessions[0];
-
-    const insights = await deriveEnterpriseAgentInsights(
-      db,
-      projectId,
-      sortedSessions as unknown as Array<Record<string, unknown>>,
-      { modelName },
-    );
-
-    return {
-      model: {
-        name: modelName,
-        sessionsCount: sessions.length,
-        agentsCount: agents.length,
-        latestSessionAt: latestSession?.startedAt || null,
-        latestStatus: latestSession?.status || null,
-      },
-      analytics: {
-        totals,
-        statuses,
-        agents,
-        insights,
-      },
-    };
   }
 }
