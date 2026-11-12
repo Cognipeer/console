@@ -606,7 +606,9 @@ async function createPendingRun(
           ? 'No dataset items to label with this selection.'
           : target?.kind === 'agent_sessions'
             ? (params.selection?.strategy ?? 'changed') === 'changed'
-              ? 'No conversations to analyze: no agent session is new or changed since its last analysis.'
+              ? 'No conversations to analyze: no agent session is new or changed since its last analysis. '
+                + 'This definition reads agent sessions; to analyze imported conversations, use a definition whose source '
+                + 'is Imported conversations, or run with target {"kind":"conversations"}.'
               : 'No conversations to analyze with this selection.'
             : 'No conversations to analyze — ingest conversations first (Conversations tab → Ingest).',
       );
