@@ -15,7 +15,9 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { createRoot, type Root } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MantineProvider } from '@mantine/core';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { I18nProvider } from '@/lib/i18n';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import { ConfirmProvider } from '@/components/common/confirm';
 import AgentRunSettingsPanel from '@/components/agents/studio/AgentRunSettingsPanel';
 import AgentRunsTable, { ACTIVE_RUN_STATUSES } from '@/components/agents/studio/AgentRunsTable';
@@ -54,7 +56,8 @@ beforeAll(() => {
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 
-const wrap = (node: ReactNode) => h(MantineProvider, null, h(I18nProvider, { locale: 'en', children: h(ConfirmProvider, null, node) }));
+const queryClient = newTestQueryClient();
+const wrap = (node: ReactNode) => h(QueryClientProvider, { client: queryClient }, h(MantineProvider, null, h(I18nProvider, { locale: 'en', children: h(ConfirmProvider, null, node) })));
 
 function mount(node: ReactNode) {
   container = document.createElement('div');
@@ -64,11 +67,18 @@ function mount(node: ReactNode) {
 }
 
 const rerender = (node: ReactNode) => act(() => root!.render(wrap(node)));
-const flush = async () => { await act(async () => { await Promise.resolve(); await Promise.resolve(); }); };
+const flush = async () => {
+  await act(async () => {
+    for (let i = 0; i < 12; i += 1) {
+      if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0);
+      else await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  });
+};
 const text = () => document.body.textContent ?? '';
 const button = (label: string) => [...document.body.querySelectorAll('button')].find((b) => b.textContent?.trim() === label || b.getAttribute('aria-label') === label);
 
-const json = (body: unknown, ok = true) => Promise.resolve({ ok, status: ok ? 200 : 500, json: () => Promise.resolve(body) } as Response);
+const json = (body: unknown, ok = true, status = ok ? 200 : 500) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }));
 let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {

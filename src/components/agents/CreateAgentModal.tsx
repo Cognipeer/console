@@ -10,6 +10,7 @@ import { useTranslations } from '@/lib/i18n';
 import { useFlowAgentCreate } from '@/components/enterprise/EnterpriseFlowAgentUi';
 import InlineModelCreate from '@/components/models/InlineModelCreate';
 import { useCanWriteService } from '@/components/layout/launcher/LauncherContext';
+import { serverErrorOr, useSaveAgent } from '@/lib/api/queries/agents';
 
 interface ModelOption {
   key: string;
@@ -34,6 +35,7 @@ export default function CreateAgentModal({
   const t = useTranslations('agents');
   // The FlowBase choice, where Flows are available (Enterprise): null otherwise.
   const flowCreate = useFlowAgentCreate();
+  const saveAgent = useSaveAgent();
   const [submitting, setSubmitting] = useState(false);
   // "+ Add model": Model Hub's create form over this one, for someone who can add models.
   const canAddModel = useCanWriteService('models');
@@ -72,20 +74,18 @@ export default function CreateAgentModal({
         agentId = created.agentId;
         flowId = created.flowId;
       } else {
-        const res = await fetch('/api/agents', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: values.name,
-            description: values.description || undefined,
-            config: { kind: 'native', modelKey: values.modelKey, temperature: 0.7 },
-          }),
-        });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err.error || t('notifications.createFailed'));
+        let data: { agent: { _id: string } };
+        try {
+          data = await saveAgent.mutateAsync({
+            body: {
+              name: values.name,
+              description: values.description || undefined,
+              config: { kind: 'native', modelKey: values.modelKey, temperature: 0.7 },
+            },
+          });
+        } catch (error) {
+          throw new Error(serverErrorOr(error, t('notifications.createFailed')));
         }
-        const data = await res.json();
         agentId = data.agent._id;
       }
       notifications.show({

@@ -43,6 +43,7 @@ import {
   type UseTemplateForm,
 } from './templatesModel';
 import { useTemplateDetail } from './useTemplateDetail';
+import { apiGet } from '@/lib/api/client';
 
 interface Option { value: string; label: string }
 
@@ -58,8 +59,7 @@ const NO_FACTS: ProjectFacts = { loaded: false, models: [], knowledge: [], guard
 
 async function getList<T>(url: string, pick: (data: Record<string, unknown>) => T[]): Promise<T[]> {
   try {
-    const res = await fetch(url, { cache: 'no-store' });
-    return res.ok ? pick(await res.json()) : [];
+    return pick(await apiGet<Record<string, unknown>>(url));
   } catch {
     return [];
   }

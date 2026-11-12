@@ -39,6 +39,7 @@ import {
 import { useTranslations } from '@/lib/i18n';
 import { describedSelectOption } from './ConfigSection';
 import { cleanException, exceptionIssues, previewToolCall, schemaFieldPaths, type HitlToolRow } from './hitlSettings';
+import { apiGet } from '@/lib/api/client';
 
 export interface AgentToolExceptionsModalProps {
     opened: boolean;
@@ -91,18 +92,13 @@ function useArgumentFields(row: HitlToolRow | null, clientSchema: unknown, opene
         void (async () => {
             try {
                 if (origin === 'tool') {
-                    const res = await fetch('/api/tools?status=active', { cache: 'no-store' });
-                    if (!res.ok) return;
-                    const data = (await res.json()) as { tools?: Array<{ key: string; actions?: Array<{ key: string; inputSchema?: unknown }> }> };
+                    const data = await apiGet<{ tools?: Array<{ key: string; actions?: Array<{ key: string; inputSchema?: unknown }> }> }>('/api/tools?status=active');
                     const action = data.tools?.find((tool) => tool.key === sourceKey)?.actions?.find((a) => a.key === name);
                     if (!cancelled) setFetched(schemaFieldPaths(action?.inputSchema));
                 } else {
-                    const res = await fetch(
+                    const data = await apiGet<{ servers?: Array<{ key: string; tools?: Array<{ name: string; inputSchema?: unknown }> }> }>(
                         `/api/mcp?status=active${agentId ? `&agentId=${encodeURIComponent(agentId)}` : ''}`,
-                        { cache: 'no-store' },
                     );
-                    if (!res.ok) return;
-                    const data = (await res.json()) as { servers?: Array<{ key: string; tools?: Array<{ name: string; inputSchema?: unknown }> }> };
                     const tool = data.servers?.find((server) => server.key === sourceKey)?.tools?.find((t) => t.name === name);
                     if (!cancelled) setFetched(schemaFieldPaths(tool?.inputSchema));
                 }

@@ -22,6 +22,7 @@ import FormShell, {
 } from '@/components/common/ui/FormShell';
 import ConsoleIdentityNote, { type ConsoleIdentityIssuerInfo } from '@/components/iam/ConsoleIdentityNote';
 import { useTranslations } from '@/lib/i18n';
+import { serverErrorOr, useConsoleIdentityInfo, useSaveAgent } from '@/lib/api/queries/agents';
 
 type Protocol = 'a2a' | 'openai-chat' | 'openai-responses';
 /** `console_identity`: a token Console signs for the person behind each call, instead of a stored key. */
@@ -90,7 +91,7 @@ export default function ConnectAgentModal({
   const tIdentity = useTranslations('consoleIdentity');
   const [submitting, setSubmitting] = useState(false);
   const isEdit = Boolean(editAgent);
-  const [identityInfo, setIdentityInfo] = useState<ConsoleIdentityIssuerInfo | null>(null);
+  const saveAgent = useSaveAgent();
   const hasExistingKey = Boolean(editAgent?.config?.connection?.hasApiKey);
 
   const form = useForm<FormValues>({
@@ -147,13 +148,7 @@ export default function ConnectAgentModal({
 
   // Issuer details for the Console identity option, read once it is chosen.
   const consoleIdentityChosen = opened && form.values.authMode === 'console_identity';
-  useEffect(() => {
-    if (!consoleIdentityChosen || identityInfo) return;
-    fetch('/api/agents/console-identity', { cache: 'no-store' })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => { if (data?.issuer && data?.jwksUri) setIdentityInfo(data); })
-      .catch(() => undefined);
-  }, [consoleIdentityChosen, identityInfo]);
+  const identityInfo: ConsoleIdentityIssuerInfo | null = useConsoleIdentityInfo(consoleIdentityChosen).data ?? null;
 
   const handleClose = () => {
     form.reset();
@@ -174,12 +169,11 @@ export default function ConnectAgentModal({
       }, {});
 
     try {
-      const res = await fetch(
-        isEdit ? `/api/agents/${editAgent!._id}` : '/api/agents',
-        {
-          method: isEdit ? 'PATCH' : 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+      let data: { agent: { _id: string } };
+      try {
+        data = await saveAgent.mutateAsync({
+          id: isEdit ? editAgent!._id : undefined,
+          body: {
             name: v.name,
             description: v.description || undefined,
             config: {
@@ -199,14 +193,11 @@ export default function ConnectAgentModal({
                 runtimeHeaders: v.allowRuntimeHeaders ? { allow: true } : undefined,
               },
             },
-          }),
-        },
-      );
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || t('notifications.createFailed'));
+          },
+        });
+      } catch (error) {
+        throw new Error(serverErrorOr(error, t('notifications.createFailed')));
       }
-      const data = await res.json();
       notifications.show({
         title: isEdit ? t('notifications.saved') : t('notifications.created'),
         message: isEdit

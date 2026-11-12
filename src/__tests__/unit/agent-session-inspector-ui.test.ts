@@ -13,7 +13,9 @@ import { join } from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { MantineProvider } from '@mantine/core';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { I18nProvider } from '@/lib/i18n';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import { ConfirmProvider } from '@/components/common/confirm';
 import SessionList, { sessionSourceOf, type SessionListItem } from '@/components/agents/studio/SessionList';
 import SessionDetailDrawer from '@/components/agents/studio/SessionDetailDrawer';
@@ -43,7 +45,8 @@ beforeAll(() => {
 
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
-const wrap = (node: ReactNode) => h(MantineProvider, null, h(I18nProvider, { locale: 'en', children: h(ConfirmProvider, null, node) }));
+const queryClient = newTestQueryClient();
+const wrap = (node: ReactNode) => h(QueryClientProvider, { client: queryClient }, h(MantineProvider, null, h(I18nProvider, { locale: 'en', children: h(ConfirmProvider, null, node) })));
 function mount(node: ReactNode) {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -53,7 +56,7 @@ function mount(node: ReactNode) {
 const rerender = (node: ReactNode) => act(() => root!.render(wrap(node)));
 const flush = async () => { await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); }); };
 const text = () => document.body.textContent ?? '';
-const json = (body: unknown, ok = true, status = ok ? 200 : 500) => Promise.resolve({ ok, status, json: () => Promise.resolve(body) } as Response);
+const json = (body: unknown, ok = true, status = ok ? 200 : 500) => Promise.resolve({ ok, status, headers: new Headers({ 'content-type': 'application/json' }), json: () => Promise.resolve(body) } as Response);
 const buttonByText = (label: string) => [...document.body.querySelectorAll('button')].find((b) => b.textContent?.trim() === label);
 let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -140,7 +143,7 @@ describe('SessionList', () => {
     const stop = document.body.querySelector('[aria-label="Stop run"]') as HTMLButtonElement;
     act(() => stop.click());
     expect(onOpen).not.toHaveBeenCalled();
-    expect(fetchMock).toHaveBeenCalledWith('/api/agents/ag9/runs/run_7/cancel', { method: 'POST' });
+    expect(fetchMock).toHaveBeenCalledWith('/api/agents/ag9/runs/run_7/cancel', expect.objectContaining({ method: 'POST' }));
 
     act(() => (document.body.querySelector('svg.tabler-icon-copy')!.closest('button') as HTMLButtonElement).click());
     expect(onOpen).not.toHaveBeenCalled();
@@ -150,7 +153,7 @@ describe('SessionList', () => {
     fetchMock.mockImplementation(() => json({}));
     mount(h(SessionList, { agentId: 'a1', sessions: [row({ activeRun: { id: 'run_8', status: 'queued' } })], onOpen: () => undefined }));
     act(() => (document.body.querySelector('[aria-label="Stop run"]') as HTMLButtonElement).click());
-    expect(fetchMock).toHaveBeenCalledWith('/api/agents/a1/runs/run_8/cancel', { method: 'POST' });
+    expect(fetchMock).toHaveBeenCalledWith('/api/agents/a1/runs/run_8/cancel', expect.objectContaining({ method: 'POST' }));
   });
 
   it('shows no stop button when neither the row nor the list knows the agent', () => {

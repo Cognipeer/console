@@ -410,8 +410,8 @@ describe('Configure → Files', () => {
   });
 
   it('asks the picker endpoint and reads a 403 as “forbidden”, anything else as an outage', () => {
-    const source = readFileSync(join(__dirname, '../../components/agents/studio/AgentFilesPanel.tsx'), 'utf8');
-    expect(source).toContain('res.status === 403');
+    const source = readFileSync(join(__dirname, '../../lib/api/queries/agents.ts'), 'utf8');
+    expect(source).toContain('error.status === 403');
     expect(source).toContain("status: 'forbidden'");
     expect(source).toContain("'/api/agents/attachments/buckets'");
   });

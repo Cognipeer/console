@@ -65,6 +65,8 @@ import type { AnswerBlockedReason } from '../session/pendingActions';
 import { waitingFor } from '../session/sessionActivityUi';
 import type { SessionOwnerView } from '../session/sessionTypes';
 import { reminderRowHint } from './reminderUi';
+import { apiPost } from '@/lib/api/client';
+import { httpErrorOr } from '@/lib/api/queries/agents';
 import classes from './SessionList.module.css';
 
 
@@ -324,13 +326,11 @@ export default function SessionList({
     const stopRun = async (ownerAgentId: string, runId: string) => {
         setStopping(runId);
         try {
-            const res = await fetch(`/api/agents/${ownerAgentId}/runs/${runId}/cancel`, { method: 'POST' });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : `HTTP ${res.status}`);
+            await apiPost(`/api/agents/${ownerAgentId}/runs/${runId}/cancel`);
             notifications.show({ color: 'teal', message: tr('runStopRequested') });
             onRunStopped?.();
         } catch (error) {
-            notifications.show({ color: 'red', message: `${tr('runStopFailed')}: ${error instanceof Error ? error.message : String(error)}` });
+            notifications.show({ color: 'red', message: `${tr('runStopFailed')}: ${httpErrorOr(error)}` });
         } finally {
             setStopping(null);
         }

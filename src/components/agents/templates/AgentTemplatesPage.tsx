@@ -6,12 +6,13 @@
  * opens the full-screen create form.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Alert, Badge, Button, Loader, TextInput, Tooltip } from '@mantine/core';
 import { IconArrowLeft, IconSearch, IconStar } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { useTranslations } from '@/lib/i18n';
+import { useAgentTemplates } from '@/lib/api/queries/agents';
 import {
   AGENT_TEMPLATE_CAPABILITIES,
   AGENT_TEMPLATE_CATEGORIES,
@@ -31,31 +32,15 @@ const BADGE_COLOR = { ready: 'teal', needs_setup: 'yellow', unavailable: 'gray' 
 export default function AgentTemplatesPage() {
   const router = useRouter();
   const t = useTranslations('agentTemplates');
-  const [templates, setTemplates] = useState<AgentTemplateSummary[]>([]);
-  const [catalogVersion, setCatalogVersion] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [failed, setFailed] = useState(false);
+  const templatesQuery = useAgentTemplates();
+  const templates = useMemo<AgentTemplateSummary[]>(() => templatesQuery.data?.templates ?? [], [templatesQuery.data]);
+  const catalogVersion = templatesQuery.data?.catalogVersion ?? 0;
+  // A retry after a failure shows the loader again, as the first load does.
+  const loading = templatesQuery.isPending || (templatesQuery.isError && templatesQuery.isFetching);
+  const failed = templatesQuery.isError && !templatesQuery.isFetching;
   const [filter, setFilter] = useState<GalleryFilter>(EMPTY_GALLERY_FILTER);
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [useKey, setUseKey] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setFailed(false);
-    try {
-      const res = await fetch('/api/agents/templates', { cache: 'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setTemplates(data.templates ?? []);
-      setCatalogVersion(data.catalogVersion ?? 0);
-    } catch {
-      setFailed(true);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { void load(); }, [load]);
 
   const searchText = useCallback(
     (template: AgentTemplateSummary) =>
@@ -174,7 +159,7 @@ export default function AgentTemplatesPage() {
         <div className="ds-empty"><Loader size="sm" /></div>
       ) : failed ? (
         <Alert color="red" title={t('ui.page.loadFailed')}>
-          <Button size="xs" variant="default" onClick={() => void load()}>{t('ui.page.retry')}</Button>
+          <Button size="xs" variant="default" onClick={() => void templatesQuery.refetch()}>{t('ui.page.retry')}</Button>
         </Alert>
       ) : visible.length === 0 ? (
         <div className="ds-empty">

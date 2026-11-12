@@ -17,6 +17,8 @@ import { IconAlertTriangle, IconInfoCircle, IconRefresh } from '@tabler/icons-re
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { useTranslations } from '@/lib/i18n';
 import { isSessionOngoing } from '@/lib/services/agents/sessionActivityState';
+import { apiGet } from '@/lib/api/client';
+import { httpErrorOr } from '@/lib/api/queries/agents';
 import SessionDetailDrawer from '../studio/SessionDetailDrawer';
 import SessionList, { type SessionListItem } from '../studio/SessionList';
 
@@ -88,9 +90,7 @@ export default function AgentSessionsPage() {
         if (mode === 'initial') setInitialLoading(true);
         if (mode === 'refresh') setRefreshing(true);
         try {
-            const res = await fetch(`/api/agents/sessions?view=${view}&limit=${PAGE_SIZE}`, { cache: 'no-store' });
-            const data = (await res.json().catch(() => ({}))) as SessionsResponse & { error?: string };
-            if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : `HTTP ${res.status}`);
+            const data = await apiGet<SessionsResponse>(`/api/agents/sessions?view=${view}&limit=${PAGE_SIZE}`);
             if (gen !== generation.current) return;
             const fresh = data.sessions ?? [];
             if (mode === 'silent' && view === 'all') {
@@ -110,7 +110,7 @@ export default function AgentSessionsPage() {
         } catch (e) {
             if (gen !== generation.current) return;
             // A failed silent read keeps the rows on screen; the alert says why they may be stale.
-            setError(e instanceof Error ? e.message : String(e));
+            setError(httpErrorOr(e));
         } finally {
             if (gen === generation.current) {
                 if (mode === 'silent') silentInFlight.current = false;
@@ -152,12 +152,9 @@ export default function AgentSessionsPage() {
         const gen = generation.current;
         setLoadingMore(true);
         try {
-            const res = await fetch(
+            const data = await apiGet<SessionsResponse>(
                 `/api/agents/sessions?view=${view}&limit=${PAGE_SIZE}&cursor=${encodeURIComponent(nextCursor)}`,
-                { cache: 'no-store' },
             );
-            const data = (await res.json().catch(() => ({}))) as SessionsResponse & { error?: string };
-            if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : `HTTP ${res.status}`);
             if (gen !== generation.current) return;
             pagedFurther.current = true;
             setRows((shown) => {
@@ -168,7 +165,7 @@ export default function AgentSessionsPage() {
             setNextCursor(data.nextCursor);
             setError(null);
         } catch (e) {
-            if (gen === generation.current) setError(e instanceof Error ? e.message : String(e));
+            if (gen === generation.current) setError(httpErrorOr(e));
         } finally {
             setLoadingMore(false);
         }

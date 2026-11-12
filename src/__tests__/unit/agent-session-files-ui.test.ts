@@ -5,6 +5,8 @@
  * longer in Execution, and that both languages carry the strings.
  */
 
+import { QueryClientProvider } from '@tanstack/react-query';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import React, { createElement as h, type ReactNode } from 'react';
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -30,7 +32,7 @@ import { tr } from '@/lib/i18n/messages/tr';
 
 (globalThis as { React?: typeof React }).React = React;
 
-const render = (node: ReactNode) => renderToStaticMarkup(h(MantineProvider, null, node));
+const render = (node: ReactNode) => renderToStaticMarkup(h(QueryClientProvider, { client: newTestQueryClient() }, h(MantineProvider, null, node)));
 const noop = () => undefined;
 const cfg = resolveAttachmentsConfig({ maxFiles: 2, maxFileSizeMb: 1, allowedMimeTypes: ['application/pdf', 'image/*'] });
 const pdf = { name: 'a.pdf', size: 1000, type: 'application/pdf' };

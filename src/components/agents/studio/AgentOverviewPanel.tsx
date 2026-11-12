@@ -12,7 +12,7 @@
  */
 
 import { FlowOverviewBadge } from '@/components/enterprise/EnterpriseFlowAgentUi';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
     ActionIcon,
     Badge,
@@ -46,6 +46,7 @@ import SectionCard from '@/components/common/SectionCard';
 import type { ResourceEdgeView } from '@/components/resources/ResourceUsagePanel';
 import { tryTranslate } from '@/components/resources/i18nLookup';
 import { useTranslations } from '@/lib/i18n';
+import { useAgentTracingOverview } from '@/lib/api/queries/agents';
 import type { IAgentVariable } from '@/lib/database/provider/types.domain';
 import { formatDuration, formatNumber } from '@/lib/utils/tracingUtils';
 import { chatCompletionsCurl, sampleVariables } from '../agentUsageSnippets';
@@ -220,22 +221,9 @@ export default function AgentOverviewPanel({
     const t = useTranslations('agents.overview.attention');
     const tResources = useTranslations('resources');
     const [windowDays, setWindowDays] = useState<WindowDays>('30');
-    const [overview, setOverview] = useState<TracingOverview | null>(null);
-    const [loading, setLoading] = useState(true);
-
-    useEffect(() => {
-        let cancelled = false;
-        setLoading(true);
-        const from = new Date(Date.now() - Number(windowDays) * 24 * 60 * 60 * 1000).toISOString();
-        fetch(`/api/tracing/agents/${encodeURIComponent(agent.name)}/overview?from=${encodeURIComponent(from)}`, {
-            cache: 'no-store',
-        })
-            .then((res) => (res.ok ? res.json() : null))
-            .then((data) => { if (!cancelled) setOverview(data); })
-            .catch(() => { if (!cancelled) setOverview(null); })
-            .finally(() => { if (!cancelled) setLoading(false); });
-        return () => { cancelled = true; };
-    }, [agent.name, windowDays]);
+    const overviewQuery = useAgentTracingOverview<TracingOverview>(agent.name, Number(windowDays));
+    const overview = overviewQuery.data ?? null;
+    const loading = overviewQuery.isPending;
 
     const totals = overview?.analytics.totals;
     const runs = totals?.sessionsCount ?? 0;

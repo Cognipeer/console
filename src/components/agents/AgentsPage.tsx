@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Badge,
@@ -27,7 +27,13 @@ import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateAgentModal from './CreateAgentModal';
 import ConnectAgentModal from './ConnectAgentModal';
 import ImportAgentShell from './ImportAgentShell';
-import { withoutOwnedAgents } from '@/lib/utils/ownedAgents';
+import {
+  useAgentList,
+  useAgentLlmModels,
+  useDeleteAgent,
+  useTenantProviders,
+  type AgentListItem,
+} from '@/lib/api/queries/agents';
 import { FlowDrivenLabel, FlowKindBadge, useFlowKindFilterOptions } from '@/components/enterprise/EnterpriseFlowAgentUi';
 
 /** The main model and the additional ones an agent offers. */
@@ -35,26 +41,7 @@ function agentModelKeys(config: { modelKey?: string; additionalModels?: Array<{ 
   return [config.modelKey, ...(config.additionalModels ?? []).map((m) => m.modelKey)].filter((k): k is string => Boolean(k));
 }
 
-interface Agent {
-  _id: string;
-  key: string;
-  name: string;
-  description?: string;
-  config: {
-    modelKey?: string;
-    additionalModels?: Array<{ modelKey: string }>;
-    kind?: 'native' | 'external' | 'flow';
-    connection?: { protocol?: string };
-    toolBindings?: Array<{ toolNames?: string[] }>;
-    knowledgeEngineKey?: string;
-    memory?: { enabled?: boolean };
-    subagents?: unknown[];
-  };
-  status: string;
-  publishedVersion?: number | null;
-  createdAt: string;
-  updatedAt?: string;
-}
+type Agent = AgentListItem;
 
 type StatusFilter = 'all' | 'active' | 'inactive' | 'draft';
 /** The stored `config.kind` values (`flow` only where Flows are available). */
@@ -84,21 +71,6 @@ function MenuOption({ title, description }: { title: string; description: string
   );
 }
 
-interface Model {
-  _id: string;
-  key: string;
-  name: string;
-  modelId: string;
-  category: string;
-}
-
-interface Provider {
-  _id?: string;
-  key: string;
-  label?: string;
-  name?: string;
-}
-
 export default function AgentsPage() {
   const router = useRouter();
   const t = useTranslations('agents');
@@ -107,10 +79,16 @@ export default function AgentsPage() {
   const tConfirm = useTranslations('common.confirm');
   const tFeedback = useTranslations('navigationFeedback');
   const deleteResource = useDeleteResource();
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [models, setModels] = useState<Model[]>([]);
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [loading, setLoading] = useState(true);
+  const agentsQuery = useAgentList();
+  const modelsQuery = useAgentLlmModels();
+  const providersQuery = useTenantProviders();
+  const deleteAgent = useDeleteAgent();
+  const agents = useMemo<Agent[]>(() => agentsQuery.data ?? [], [agentsQuery.data]);
+  // The pickers read as empty while their lists load or when a load fails.
+  const models = useMemo(() => modelsQuery.data ?? [], [modelsQuery.data]);
+  const providers = useMemo(() => providersQuery.data ?? [], [providersQuery.data]);
+  // Only the first load shows the table's loading state; a background refetch keeps the rows.
+  const loading = agentsQuery.isPending;
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
@@ -120,52 +98,12 @@ export default function AgentsPage() {
   const [publishFilter, setPublishFilter] = useState<PublishFilter>('all');
   const [modelFilter, setModelFilter] = useState('all');
 
-  const loadAgents = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/agents', { cache: 'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      // Agents a flow owns are never listed (the API already leaves them out).
-      setAgents(withoutOwnedAgents<Agent>(data.agents ?? []));
-    } catch (err) {
-      console.error('Failed to load agents', err);
-      // An empty list would read as "none yet"; say the load failed instead.
-      notifications.show({ color: 'red', message: tFeedback('loadFailed') });
-    } finally {
-      setLoading(false);
-    }
-  }, [tFeedback]);
-
-  const loadModels = async () => {
-    try {
-      const res = await fetch('/api/models?category=llm', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setModels(data.models ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load models', err);
-    }
-  };
-
-  const loadProviders = async () => {
-    try {
-      const res = await fetch('/api/providers?scope=tenant', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setProviders(data.providers ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load providers', err);
-    }
-  };
-
+  const { isError: agentsFailed, errorUpdatedAt: agentsFailedAt, refetch: refetchAgents } = agentsQuery;
   useEffect(() => {
-    void loadAgents();
-    void loadModels();
-    void loadProviders();
-  }, [loadAgents]);
+    if (!agentsFailed) return;
+    // An empty list would read as "none yet"; say the load failed instead.
+    notifications.show({ color: 'red', message: tFeedback('loadFailed') });
+  }, [agentsFailed, agentsFailedAt, tFeedback]);
 
   const handleCreated = (agentId: string, created?: { flowId?: string }) => {
     setCreateModalOpen(false);
@@ -184,10 +122,11 @@ export default function AgentsPage() {
       type: 'agent',
       id: String(target._id),
       action: async () => {
-        const res = await fetch(`/api/agents/${target._id}`, {
-          method: 'DELETE',
-        });
-        if (!res.ok) throw new Error(t('notifications.deleteFailed'));
+        try {
+          await deleteAgent.mutateAsync(String(target._id));
+        } catch {
+          throw new Error(t('notifications.deleteFailed'));
+        }
       },
     });
     if (!deleted) return;
@@ -196,7 +135,6 @@ export default function AgentsPage() {
       message: t('notifications.deletedDesc', { name: target.name }),
       color: 'teal',
     });
-    void loadAgents();
   };
 
   // Model options come from the agents actually listed, so the filter never
@@ -475,8 +413,8 @@ export default function AgentsPage() {
             Clear filters
           </Button>
         ) : undefined}
-        onRefresh={() => void loadAgents()}
-        refreshing={loading}
+        onRefresh={() => void refetchAgents()}
+        refreshing={agentsQuery.isFetching}
         empty={{
           icon: <IconRobot size={26} stroke={1.7} />,
           title: t('empty.title'),

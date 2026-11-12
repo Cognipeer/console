@@ -15,7 +15,6 @@
  * published version.
  */
 
-import { useEffect, useState } from 'react';
 import {
     Alert,
     NumberInput,
@@ -29,6 +28,7 @@ import {
 } from '@mantine/core';
 import { IconInfoCircle } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useRunLimits } from '@/lib/api/queries/agents';
 import type { IAgentCallbackConfig, IAgentConfig } from '@/lib/database/provider/types.domain';
 import { ConfigBlock } from './ConfigSection';
 import { SANDBOX_SECRET_MASK } from './AgentSandboxPanel';
@@ -56,16 +56,7 @@ function compactCallback(next: IAgentCallbackConfig): IAgentCallbackConfig | und
 export default function AgentRunSettingsPanel({ callback, onCallbackChange, budget, onBudgetChange }: AgentRunSettingsPanelProps) {
     const t = useTranslations('agents.runSettings');
     const tb = useTranslations('agents.budget');
-    const [limits, setLimits] = useState<RunLimits | null>(null);
-
-    useEffect(() => {
-        let cancelled = false;
-        fetch('/api/agents/execution/limits', { cache: 'no-store' })
-            .then((res) => (res.ok ? res.json() : null))
-            .then((data: RunLimits | null) => { if (!cancelled) setLimits(data); })
-            .catch(() => undefined);
-        return () => { cancelled = true; };
-    }, []);
+    const limits = useRunLimits<RunLimits>().data ?? null;
 
     const currentCallback = callback ?? {};
     const setCallback = (patch: Partial<IAgentCallbackConfig>) => onCallbackChange(compactCallback({ ...currentCallback, ...patch }));

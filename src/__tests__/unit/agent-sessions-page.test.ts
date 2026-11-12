@@ -11,7 +11,9 @@ import { act } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { MantineProvider } from '@mantine/core';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { I18nProvider } from '@/lib/i18n';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import { ConfirmProvider } from '@/components/common/confirm';
 import AgentSessionsPage from '@/components/agents/sessions/AgentSessionsPage';
 
@@ -39,7 +41,8 @@ beforeAll(() => {
 
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
-const wrap = (node: ReactNode) => h(MantineProvider, null, h(I18nProvider, { locale: 'en', children: h(ConfirmProvider, null, node) }));
+const queryClient = newTestQueryClient();
+const wrap = (node: ReactNode) => h(QueryClientProvider, { client: queryClient }, h(MantineProvider, null, h(I18nProvider, { locale: 'en', children: h(ConfirmProvider, null, node) })));
 function mount() {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -51,7 +54,7 @@ const advance = async (ms: number) => { await act(async () => { vi.advanceTimers
 // Mantine's drawer mounts its content after a transition frame.
 const settle = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); }); };
 const text = () => document.body.textContent ?? '';
-const json = (body: unknown, ok = true, status = ok ? 200 : 500) => Promise.resolve({ ok, status, json: () => Promise.resolve(body) } as Response);
+const json = (body: unknown, ok = true, status = ok ? 200 : 500) => Promise.resolve({ ok, status, headers: new Headers({ 'content-type': 'application/json' }), json: () => Promise.resolve(body) } as Response);
 const buttonByText = (label: string) => [...document.body.querySelectorAll('button')].find((b) => b.textContent?.trim() === label);
 const setVisibility = (state: 'visible' | 'hidden') => Object.defineProperty(document, 'visibilityState', { configurable: true, value: state });
 
@@ -93,7 +96,7 @@ describe('AgentSessionsPage loading', () => {
     mount();
     await flush();
     expect(listCalls()).toEqual(['/api/agents/sessions?view=all&limit=100']);
-    expect(fetchMock).toHaveBeenCalledWith('/api/agents/sessions?view=all&limit=100', { cache: 'no-store' });
+    expect(fetchMock).toHaveBeenCalledWith('/api/agents/sessions?view=all&limit=100', expect.objectContaining({ cache: 'no-store', method: 'GET' }));
     expect(text()).toContain('All sessions');
     expect(text()).toContain('First chat');
     expect(text()).toContain('Beta');

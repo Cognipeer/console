@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
@@ -24,6 +24,7 @@ import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource } from '@/components/common/confirm';
 import CreateToolModal from '@/components/tools/CreateToolModal';
 import type { ToolView } from '@/lib/services/tools';
+import { useDeleteTool, useSetToolStatus, useToolList } from '@/lib/api/queries/tools';
 
 const TYPE_LABEL: Record<string, string> = {
   openapi: 'OpenAPI',
@@ -34,8 +35,12 @@ const TYPE_LABEL: Record<string, string> = {
 const isManaged = (t: ToolView) => Boolean(t.managedBy);
 
 export default function ToolsPage() {
-  const [tools, setTools] = useState<ToolView[]>([]);
-  const [loading, setLoading] = useState(true);
+  const toolsQuery = useToolList();
+  const setToolStatus = useSetToolStatus();
+  const deleteTool = useDeleteTool();
+  const tools = useMemo<ToolView[]>(() => toolsQuery.data ?? [], [toolsQuery.data]);
+  // Only the first load shows the table's loading state; a background refetch keeps the rows.
+  const loading = toolsQuery.isPending;
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState<string>('all');
@@ -46,41 +51,26 @@ export default function ToolsPage() {
   const tm = useTranslations('managedTools');
   const deleteResource = useDeleteResource();
 
-  const loadTools = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/tools', { cache: 'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setTools(data.tools ?? []);
-    } catch (err) {
-      console.error('Failed to load tools', err);
-      // An empty list would read as "none yet"; say the load failed instead.
-      notifications.show({ color: 'red', message: tFeedback('loadFailed') });
-    } finally {
-      setLoading(false);
-    }
-  }, [tFeedback]);
-
+  const { isError: toolsFailed, errorUpdatedAt: toolsFailedAt } = toolsQuery;
   useEffect(() => {
-    void loadTools();
-  }, [loadTools]);
+    if (!toolsFailed) return;
+    // An empty list would read as "none yet"; say the load failed instead.
+    notifications.show({ color: 'red', message: tFeedback('loadFailed') });
+  }, [toolsFailed, toolsFailedAt, tFeedback]);
 
   const handleToggleStatus = async (t: ToolView) => {
     try {
       const newStatus = t.status === 'active' ? 'disabled' : 'active';
-      const res = await fetch(`/api/tools/${t.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
-      });
-      if (!res.ok) throw new Error('Failed to update tool');
+      try {
+        await setToolStatus.mutateAsync({ id: t.id, status: newStatus });
+      } catch {
+        throw new Error('Failed to update tool');
+      }
       notifications.show({
         title: newStatus === 'active' ? 'Tool enabled' : 'Tool disabled',
         message: `"${t.name}" has been ${newStatus === 'active' ? 'enabled' : 'disabled'}`,
         color: newStatus === 'active' ? 'teal' : 'orange',
       });
-      await loadTools();
     } catch (err) {
       notifications.show({
         title: 'Error',
@@ -97,8 +87,11 @@ export default function ToolsPage() {
       type: 'tool',
       id: target.id,
       action: async () => {
-        const res = await fetch(`/api/tools/${target.id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error('Failed to delete');
+        try {
+          await deleteTool.mutateAsync(target.id);
+        } catch {
+          throw new Error('Failed to delete');
+        }
       },
     });
     if (!deleted) return;
@@ -107,7 +100,6 @@ export default function ToolsPage() {
       message: `"${target.name}" was deleted`,
       color: 'red',
     });
-    await loadTools();
   };
 
   const filtered = useMemo(() => {
@@ -283,7 +275,8 @@ export default function ToolsPage() {
             ],
           },
         ]}
-        onRefresh={loadTools}
+        onRefresh={() => void toolsQuery.refetch()}
+        refreshing={toolsQuery.isFetching}
         empty={{
           icon: <IconTool size={26} stroke={1.7} />,
           title: 'No tools yet',
@@ -338,7 +331,7 @@ export default function ToolsPage() {
         opened={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
         onCreated={(t) => {
-          void loadTools();
+          void toolsQuery.refetch();
           router.push(`/dashboard/agents/tools/${t.id}`);
         }}
       />

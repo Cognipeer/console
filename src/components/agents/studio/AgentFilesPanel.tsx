@@ -15,7 +15,7 @@
  * reach portal users when the agent is published.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
     Alert,
@@ -36,6 +36,7 @@ import type { ComboboxItem, ComboboxLikeRenderOptionInput } from '@mantine/core'
 import { IconAlertTriangle, IconCheck, IconFolder, IconInfoCircle } from '@tabler/icons-react';
 import OcrSettingsFields from '@/components/extraction/OcrSettingsFields';
 import { useTranslations } from '@/lib/i18n';
+import { useAttachmentBucketsQuery } from '@/lib/api/queries/agents';
 import { FILE_OUTPUT_EXTENSIONS, SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig';
 import { ConfigBlock } from './ConfigSection';
 import {
@@ -87,30 +88,13 @@ export interface AgentFilesPanelViewProps {
 
 /** The project's buckets for the picker, loaded while files are on (uploads or the agent's own). */
 export function useAttachmentBuckets(enabled: boolean): { state: BucketsState; reload: () => void } {
-    const [state, setState] = useState<BucketsState>({ status: 'loading' });
-    const [attempt, setAttempt] = useState(0);
+    const query = useAttachmentBucketsQuery<AttachmentBucketOption>(enabled);
+    const { refetch } = query;
 
-    useEffect(() => {
-        if (!enabled) return;
-        let cancelled = false;
-        setState({ status: 'loading' });
-        fetch('/api/agents/attachments/buckets', { cache: 'no-store' })
-            .then(async (res) => {
-                if (res.status === 403) {
-                    // Not an outage: the viewer has no access to the Document Store. The server says why.
-                    const body = await res.json().catch(() => ({})) as { error?: unknown };
-                    if (!cancelled) setState({ status: 'forbidden', ...(typeof body.error === 'string' && body.error ? { message: body.error } : {}) });
-                    return;
-                }
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                const data = await res.json() as { buckets?: AttachmentBucketOption[] };
-                if (!cancelled) setState({ status: 'ready', buckets: Array.isArray(data.buckets) ? data.buckets : [] });
-            })
-            .catch(() => { if (!cancelled) setState({ status: 'error' }); });
-        return () => { cancelled = true; };
-    }, [enabled, attempt]);
-
-    const reload = useCallback(() => setAttempt((n) => n + 1), []);
+    // Disabled, or waiting for the first answer: loading. A 403 is a result (the viewer has no access to the
+    // Document Store; the server says why), not an outage.
+    const state: BucketsState = query.data ?? (query.isError && !query.isFetching ? { status: 'error' } : { status: 'loading' });
+    const reload = useCallback(() => { void refetch(); }, [refetch]);
     return { state, reload };
 }
 

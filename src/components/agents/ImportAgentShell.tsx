@@ -30,6 +30,7 @@ import {
 } from '@mantine/core';
 import { IconAlertTriangle, IconFileImport, IconUpload } from '@tabler/icons-react';
 import FormShell, { FormField, FormRow, FormSection, SummaryGroup, SummaryKV } from '@/components/common/ui/FormShell';
+import { httpErrorOr, useImportAgentDocument, usePreviewAgentImport } from '@/lib/api/queries/agents';
 import type { AgentImportPreview as Preview, EmbeddedResourceRow as ResourceRow } from '@/lib/services/agents/import/importService';
 
 type ResourceChoice = {
@@ -88,6 +89,8 @@ export default function ImportAgentShell({ opened, onClose, onImported, target }
     const [skills, setSkills] = useState<Record<string, SkillChoice>>({});
     const [resources, setResources] = useState<Record<string, ResourceChoice>>({});
     const resetRef = useRef<() => void>(null);
+    const previewImport = usePreviewAgentImport<Preview>();
+    const importDocument = useImportAgentDocument();
 
     const reset = () => {
         setContent('');
@@ -107,14 +110,7 @@ export default function ImportAgentShell({ opened, onClose, onImported, target }
         setReading(true);
         setError(null);
         try {
-            const res = await fetch('/api/agents/import/document/preview', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: text, format: formatHint }),
-            });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-            const next = data as Preview;
+            const next = await previewImport.mutateAsync({ content: text, format: formatHint });
             setPreview(next);
             setName(next.agent?.name ?? target?.name ?? '');
             setKey(target?.key ?? next.agent?.key ?? '');
@@ -135,7 +131,7 @@ export default function ImportAgentShell({ opened, onClose, onImported, target }
             } satisfies ResourceChoice])));
         } catch (err) {
             setPreview(null);
-            setError(err instanceof Error ? err.message : String(err));
+            setError(httpErrorOr(err));
         } finally {
             setReading(false);
         }
@@ -171,53 +167,47 @@ export default function ImportAgentShell({ opened, onClose, onImported, target }
         setImporting(true);
         setError(null);
         try {
-            const res = await fetch('/api/agents/import/document', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    content,
-                    format: preview.format.id,
-                    key: (target?.key ?? key).trim() || undefined,
-                    name: name.trim() || undefined,
-                    ...(updating ? { overwrite: true } : {}),
-                    modelKey,
-                    mcp: Object.fromEntries(Object.entries(mcp).map(([ref, choice]) => [ref,
-                        choice.action === 'reuse' ? { action: 'reuse', key: choice.key }
-                            : choice.action === 'skip' ? { action: 'skip' }
-                                : {
-                                    action: 'create',
-                                    transport: choice.transport,
-                                    auth: {
-                                        type: choice.authType,
-                                        ...(choice.authType === 'token' ? { token: choice.token } : {}),
-                                        ...(choice.authType === 'header' ? { headerName: choice.headerName, headerValue: choice.headerValue } : {}),
-                                    },
-                                }])),
-                    skills: Object.fromEntries(Object.entries(skills).map(([ref, choice]) => [ref,
-                        choice.action === 'map' ? { action: 'map', key: choice.key }
-                            : choice.action === 'create' ? { action: 'create', title: choice.title, header: choice.header, body: choice.body ?? '' }
-                                : { action: 'skip' }])),
-                    resources: Object.fromEntries(Object.entries(resources).map(([ref, choice]) => [ref,
-                        choice.action !== 'create' ? { action: choice.action }
+            const data = await importDocument.mutateAsync({
+                content,
+                format: preview.format.id,
+                key: (target?.key ?? key).trim() || undefined,
+                name: name.trim() || undefined,
+                ...(updating ? { overwrite: true } : {}),
+                modelKey,
+                mcp: Object.fromEntries(Object.entries(mcp).map(([ref, choice]) => [ref,
+                    choice.action === 'reuse' ? { action: 'reuse', key: choice.key }
+                        : choice.action === 'skip' ? { action: 'skip' }
                             : {
                                 action: 'create',
+                                transport: choice.transport,
                                 auth: {
-                                    token: choice.token || undefined,
-                                    headerName: choice.headerName || undefined,
-                                    headerValue: choice.headerValue || undefined,
-                                    username: choice.username || undefined,
-                                    password: choice.password || undefined,
+                                    type: choice.authType,
+                                    ...(choice.authType === 'token' ? { token: choice.token } : {}),
+                                    ...(choice.authType === 'header' ? { headerName: choice.headerName, headerValue: choice.headerValue } : {}),
                                 },
-                                ...(choice.env ? { env: choice.env } : {}),
                             }])),
-                }),
+                skills: Object.fromEntries(Object.entries(skills).map(([ref, choice]) => [ref,
+                    choice.action === 'map' ? { action: 'map', key: choice.key }
+                        : choice.action === 'create' ? { action: 'create', title: choice.title, header: choice.header, body: choice.body ?? '' }
+                            : { action: 'skip' }])),
+                resources: Object.fromEntries(Object.entries(resources).map(([ref, choice]) => [ref,
+                    choice.action !== 'create' ? { action: choice.action }
+                        : {
+                            action: 'create',
+                            auth: {
+                                token: choice.token || undefined,
+                                headerName: choice.headerName || undefined,
+                                headerValue: choice.headerValue || undefined,
+                                username: choice.username || undefined,
+                                password: choice.password || undefined,
+                            },
+                            ...(choice.env ? { env: choice.env } : {}),
+                        }])),
             });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
             reset();
             onImported(String(data.agent._id));
         } catch (err) {
-            setError(err instanceof Error ? err.message : String(err));
+            setError(httpErrorOr(err));
         } finally {
             setImporting(false);
         }

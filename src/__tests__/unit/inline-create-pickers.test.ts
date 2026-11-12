@@ -9,7 +9,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createElement as h, type ComponentProps, type ReactNode } from 'react';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import {
   buttonByText,
   click,
@@ -76,7 +78,7 @@ function shell(writable: PermissionService[], child: ReactNode) {
 }
 
 async function render(node: ReactNode) {
-  mounted = await mount(node);
+  mounted = await mount(h(QueryClientProvider, { client: newTestQueryClient() }, node));
   await settle(50);
 }
 

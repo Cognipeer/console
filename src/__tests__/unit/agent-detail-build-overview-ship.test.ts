@@ -9,6 +9,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createElement as h, type ReactNode } from 'react';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buttonByText, click, installApiMock, installDomStubs, mount, q, qa, settle, text, type Mounted } from '../helpers/iamCenterUi';
 
@@ -39,7 +41,7 @@ afterEach(async () => {
 });
 
 async function render(node: ReactNode) {
-  mounted = await mount(node);
+  mounted = await mount(h(QueryClientProvider, { client: newTestQueryClient() }, node));
   await settle(50);
 }
 

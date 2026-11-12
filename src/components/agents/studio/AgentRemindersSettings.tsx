@@ -8,16 +8,15 @@
  * "Limit" hint is the environment's value); an empty field means the default.
  */
 
-import { useEffect, useState } from 'react';
 import { Anchor, Box, Group, NumberInput, Paper, Select, SimpleGrid, Stack, Switch, Text, Textarea } from '@mantine/core';
 import type { IAgentRemindersConfig } from '@/lib/database/provider/types.domain';
 import {
     REMINDER_DEFAULTS,
     REMINDER_INSTRUCTIONS_MAX_CHARS,
     REMINDER_PLATFORM_DEFAULTS,
-    type ReminderPlatformLimits,
 } from '@/lib/services/agents/agentRemindersConfig';
 import { useTranslations } from '@/lib/i18n';
+import { useReminderLimits } from '@/lib/api/queries/agents';
 import { patchReminders } from './reminderUi';
 
 export interface AgentRemindersSettingsProps {
@@ -30,22 +29,10 @@ export interface AgentRemindersSettingsProps {
 export default function AgentRemindersSettings({ value, onChange, onGoToSection }: AgentRemindersSettingsProps) {
     const t = useTranslations('agents.reminders');
     const th = useTranslations('agents.hitl');
-    const [limits, setLimits] = useState<ReminderPlatformLimits>(REMINDER_PLATFORM_DEFAULTS);
     const enabled = value?.enabled === true;
+    // The platform ceilings, for the hints; the defaults stand in until the call answers or when it fails.
+    const limits = useReminderLimits(enabled).data ?? REMINDER_PLATFORM_DEFAULTS;
     const set = (patch: Partial<IAgentRemindersConfig>) => onChange(patchReminders(value, patch));
-
-    // The platform ceilings, for the hints; the defaults stand in when the call fails.
-    useEffect(() => {
-        if (!enabled) return;
-        let cancelled = false;
-        void fetch('/api/agents/reminder-limits', { cache: 'no-store' })
-            .then((res) => (res.ok ? res.json() : null))
-            .then((data: { limits?: ReminderPlatformLimits } | null) => {
-                if (!cancelled && data?.limits) setLimits(data.limits);
-            })
-            .catch(() => undefined);
-        return () => { cancelled = true; };
-    }, [enabled]);
 
     const number = (
         key: 'minDelaySeconds' | 'maxHorizonHours' | 'maxActivePerSession' | 'maxFiresPerSession',

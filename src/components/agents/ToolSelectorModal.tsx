@@ -29,6 +29,7 @@ import {
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { useFlowToolSource } from '@/components/enterprise/EnterpriseFlowAgentUi';
+import { apiGet } from '@/lib/api/client';
 import {
   SYSTEM_TOOLS,
   sourceIdOf,
@@ -139,8 +140,7 @@ export function ToolSelectorModal({
     let cancelled = false;
     const list = async <T,>(url: string, key: string): Promise<T[]> => {
       try {
-        const res = await fetch(url, { cache: 'no-store' });
-        return res.ok ? (((await res.json()) as Record<string, T[]>)[key] ?? []) : [];
+        return (await apiGet<Record<string, T[]>>(url))[key] ?? [];
       } catch {
         return [];
       }

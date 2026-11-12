@@ -53,6 +53,8 @@ import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import FormShell, { FormField, FormSection } from '@/components/common/ui/FormShell';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import type { ToolView, ToolRequestLogView } from '@/lib/services/tools';
+import { apiDelete, apiGet, apiPost, apiPut, isApiError } from '@/lib/api/client';
+import { serverErrorOr } from '@/lib/api/queries/agents';
 import type { IToolAction } from '@/lib/database';
 
 // ── Constants ────────────────────────────────────────────────────────────
@@ -340,15 +342,16 @@ export default function ToolDetailPage() {
   const loadTool = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/tools/${params.id}?includeAggregate=true`, { cache: 'no-store' });
-      if (!res.ok) {
-        if (res.status === 404) {
+      let data: { tool: ToolView; aggregate?: unknown };
+      try {
+        data = await apiGet<{ tool: ToolView; aggregate?: unknown }>(`/api/tools/${params.id}?includeAggregate=true`);
+      } catch (error) {
+        if (isApiError(error) && error.status === 404) {
           router.push('/dashboard/agents/tools');
           return;
         }
         throw new Error('Failed to load tool');
       }
-      const data = await res.json();
       setTool(data.tool);
       setOverviewAggregate((data.aggregate ?? null) as ToolAggregateView | null);
 
@@ -387,21 +390,18 @@ export default function ToolDetailPage() {
       const dd = String(now.getDate()).padStart(2, '0');
       const date = `${yyyy}-${mm}-${dd}`;
 
-      const [totalRes, successRes, errorRes] = await Promise.all([
-        fetch(`/api/tools/${params.id}/logs?page=1&limit=1&from=${date}&to=${date}`, { cache: 'no-store' }),
-        fetch(`/api/tools/${params.id}/logs?page=1&limit=1&status=success&from=${date}&to=${date}`, { cache: 'no-store' }),
-        fetch(`/api/tools/${params.id}/logs?page=1&limit=1&status=error&from=${date}&to=${date}`, { cache: 'no-store' }),
-      ]);
-
-      if (!totalRes.ok || !successRes.ok || !errorRes.ok) {
+      let totalBody: { total?: number };
+      let successBody: { total?: number };
+      let errorBody: { total?: number };
+      try {
+        [totalBody, successBody, errorBody] = await Promise.all([
+          apiGet<{ total?: number }>(`/api/tools/${params.id}/logs?page=1&limit=1&from=${date}&to=${date}`),
+          apiGet<{ total?: number }>(`/api/tools/${params.id}/logs?page=1&limit=1&status=success&from=${date}&to=${date}`),
+          apiGet<{ total?: number }>(`/api/tools/${params.id}/logs?page=1&limit=1&status=error&from=${date}&to=${date}`),
+        ]);
+      } catch {
         throw new Error('Failed to load overview metrics');
       }
-
-      const [totalBody, successBody, errorBody] = await Promise.all([
-        totalRes.json(),
-        successRes.json(),
-        errorRes.json(),
-      ]);
 
       setTodaySummary({
         total: totalBody.total ?? 0,
@@ -430,12 +430,12 @@ export default function ToolDetailPage() {
       if (logsFrom) query.set('from', logsFrom);
       if (logsTo) query.set('to', logsTo);
 
-      const res = await fetch(`/api/tools/${params.id}/logs?${query.toString()}`, {
-        cache: 'no-store',
-      });
-      if (!res.ok) throw new Error('Failed to load request logs');
-
-      const data = await res.json();
+      let data: { logs?: typeof logs; total?: number; totalPages?: number };
+      try {
+        data = await apiGet(`/api/tools/${params.id}/logs?${query.toString()}`);
+      } catch {
+        throw new Error('Failed to load request logs');
+      }
       setLogs(data.logs ?? []);
       setLogsTotal(data.total ?? 0);
       setLogsTotalPages(data.totalPages ?? 1);
@@ -498,15 +498,10 @@ export default function ToolDetailPage() {
         body.upstreamAuth = upstreamAuth;
       }
 
-      const res = await fetch(`/api/tools/${params.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Failed to update tool');
+      try {
+        await apiPut(`/api/tools/${params.id}`, body);
+      } catch (error) {
+        throw new Error(serverErrorOr(error, 'Failed to update tool'));
       }
 
       notifications.show({ title: 'Saved', message: 'Tool updated successfully', color: 'teal' });
@@ -526,12 +521,11 @@ export default function ToolDetailPage() {
   const handleSync = async () => {
     setSyncing(true);
     try {
-      const res = await fetch(`/api/tools/${params.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sync: true }),
-      });
-      if (!res.ok) throw new Error('Failed to sync');
+      try {
+        await apiPut(`/api/tools/${params.id}`, { sync: true });
+      } catch {
+        throw new Error('Failed to sync');
+      }
       notifications.show({ title: 'Synced', message: 'Actions refreshed from source', color: 'teal' });
       await loadTool();
     } catch (err) {
@@ -553,8 +547,11 @@ export default function ToolDetailPage() {
         type: 'tool',
         id: String(params.id),
         action: async () => {
-          const res = await fetch(`/api/tools/${params.id}`, { method: 'DELETE' });
-          if (!res.ok) throw new Error('Failed to delete');
+          try {
+            await apiDelete(`/api/tools/${params.id}`);
+          } catch {
+            throw new Error('Failed to delete');
+          }
         },
       });
       if (!deleted) return;
@@ -583,23 +580,13 @@ export default function ToolDetailPage() {
         return;
       }
 
-      const res = await fetch(`/api/tools/${tool.id}/actions/${testAction}/execute`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          arguments: args,
-          runtime_context: parseRuntimeContextJson(runtimeContextJson),
-        }),
+      const data = await apiPost(`/api/tools/${tool.id}/actions/${testAction}/execute`, {
+        arguments: args,
+        runtime_context: parseRuntimeContextJson(runtimeContextJson),
       });
-
-      const data = await res.json();
-      if (!res.ok) {
-        setTestResult(`Error: ${data.error || 'Unknown error'}`);
-      } else {
-        setTestResult(JSON.stringify(data, null, 2));
-      }
+      setTestResult(JSON.stringify(data, null, 2));
     } catch (err) {
-      setTestResult(`Error: ${err instanceof Error ? err.message : 'Failed to execute'}`);
+      setTestResult(`Error: ${isApiError(err) ? serverErrorOr(err, 'Unknown error') : err instanceof Error ? err.message : 'Failed to execute'}`);
     } finally {
       setTesting(false);
     }
@@ -768,13 +755,9 @@ export default function ToolDetailPage() {
                 onChange={async (event) => {
                   const allow = event.currentTarget.checked;
                   try {
-                    const res = await fetch(`/api/tools/${tool.id}`, {
-                      method: 'PUT',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ runtimeHeaders: allow ? { allow: true } : null }),
+                    const data = await apiPut<{ tool: ToolView }>(`/api/tools/${tool.id}`, {
+                      runtimeHeaders: allow ? { allow: true } : null,
                     });
-                    if (!res.ok) throw new Error('update failed');
-                    const data = await res.json();
                     setTool(data.tool);
                   } catch {
                     notifications.show({
