@@ -220,9 +220,15 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       return docs.map((doc) => this.mapDatasetDoc(doc as unknown as IEvaluationDataset));
     }
 
-    /** Normalise a dataset document: string _id, itemCount defaulting to 0. */
+    /**
+     * Normalise a dataset document: string _id, itemCount defaulting to 0. A dataset header is
+     * metadata only: items live in their own collection, and an `items` field on the document is
+     * never returned with it.
+     */
     private mapDatasetDoc(doc: IEvaluationDataset & { _id?: ObjectId | string }): IEvaluationDataset {
-      return { ...doc, _id: doc._id?.toString(), itemCount: doc.itemCount ?? 0 } as IEvaluationDataset;
+      const header: IEvaluationDataset = { ...doc, _id: doc._id?.toString(), itemCount: doc.itemCount ?? 0 };
+      delete header.items;
+      return header;
     }
 
     // ── Dataset items (separate collection) ─────────────────────────
