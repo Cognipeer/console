@@ -31,15 +31,20 @@ describe('stdio runner default', () => {
     __resetStdioWarningForTests();
   });
 
-  it('is on for every deployment mode, with one notice per process on saas', () => {
+  it('is on for a self-hosted deployment and off for a hosted one, without a notice', () => {
     use({ DEPLOYMENT_MODE: 'onprem' });
     expect(isStdioRunnerEnabled()).toBe(true);
-    expect(warn).not.toHaveBeenCalled();
     use({ DEPLOYMENT_MODE: 'saas' });
+    expect(isStdioRunnerEnabled()).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('can be turned on for a hosted deployment, with one notice per process', () => {
+    use({ DEPLOYMENT_MODE: 'saas', MCP_STDIO_ENABLED: 'true' });
     expect(isStdioRunnerEnabled()).toBe(true);
     expect(isStdioRunnerEnabled()).toBe(true);
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0][0])).toContain('MCP_STDIO_ENABLED=false');
+    expect(String(warn.mock.calls[0][0])).toContain('MCP_STDIO_ENABLED');
   });
 
   it('can be turned off with MCP_STDIO_ENABLED=false, without a notice', () => {

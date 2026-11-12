@@ -126,8 +126,9 @@ describe('CreateTokenModal', () => {
     await settle(80);
     const sections = qa('.form-section-title').map((s) => s.textContent);
     expect(sections[0]).toBe('Lead section');
-    // four sections now (the lead one, the label, the expiry, the network); a finished one shows a tick instead of its number
-    expect(qa('.form-section-num')).toHaveLength(4);
+    // five sections now (the lead one, the label, the expiry, the network, the MCP servers); a finished one shows a
+    // tick instead of its number
+    expect(qa('.form-section-num')).toHaveLength(5);
     expect(qa('.form-section-num').map((n) => n.textContent).slice(0, 2)).toEqual(['1', '2']);
     await setInput(q<HTMLInputElement>('input[placeholder^="Production API"]')!, 'valid-label');
     expect((buttonByText('Create Token') as HTMLButtonElement).disabled).toBe(true);

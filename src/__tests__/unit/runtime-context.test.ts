@@ -105,8 +105,14 @@ describe('resolveRuntimeHeaders (per-target policy)', () => {
   });
 
   it('falls back to global headers for targets without a scoped entry', () => {
-    expect(resolveRuntimeHeaders(ctx, 'mcp', 'other', { allow: true }))
+    expect(resolveRuntimeHeaders(ctx, 'tool', 'other', { allow: true }))
       .toEqual({ Authorization: 'Bearer global' });
+    expect(resolveRuntimeHeaders(ctx, 'mcp', 'other', { allow: true, allowedNames: ['Authorization'] }))
+      .toEqual({ Authorization: 'Bearer global' });
+  });
+
+  it('passes nothing to an MCP server whose policy lists no names', () => {
+    expect(resolveRuntimeHeaders(ctx, 'mcp', 'other', { allow: true })).toBeUndefined();
   });
 
   it('applies the allowedNames allowlist case-insensitively', () => {

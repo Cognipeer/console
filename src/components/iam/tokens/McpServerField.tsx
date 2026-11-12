@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { MultiSelect } from '@mantine/core';
+import { useTranslations } from '@/lib/i18n';
 
 interface McpServerOption {
   value: string;
@@ -20,6 +21,7 @@ export interface McpServerFieldProps {
  * not listed). Leaving it empty means the token may reach every MCP server.
  */
 export default function McpServerField({ value, onChange, disabled }: McpServerFieldProps) {
+  const t = useTranslations('iamTokens');
   const [options, setOptions] = useState<McpServerOption[]>([]);
 
   useEffect(() => {
@@ -53,13 +55,12 @@ export default function McpServerField({ value, onChange, disabled }: McpServerF
       data={data}
       value={value}
       onChange={onChange}
-      placeholder={value.length === 0 ? 'All MCP servers' : undefined}
+      placeholder={value.length === 0 ? t('mcpServers.placeholder') : undefined}
       searchable
       clearable
       disabled={disabled}
-      nothingFoundMessage="No MCP servers found"
-      aria-label="MCP servers"
-      description="Leave empty to allow every MCP server. Select servers to limit this token to them."
+      nothingFoundMessage={t('mcpServers.none')}
+      aria-label={t('mcpServers.title')}
     />
   );
 }

@@ -287,7 +287,7 @@ async function runStdioSession(
   followUp?: (response: JsonRpcResponse) => StdioRequest | null,
 ): Promise<JsonRpcResponse[]> {
   if (!isStdioRunnerEnabled()) {
-    throw new Error('Stdio MCP execution is disabled on this deployment (MCP_STDIO_ENABLED=false)');
+    throw new Error('Stdio MCP execution is disabled on this deployment (see MCP_STDIO_ENABLED)');
   }
 
   const { command, args } = buildCommand(config);

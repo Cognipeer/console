@@ -2413,7 +2413,7 @@ export async function getMcpMonitorSnapshot(
         kind = 'stdio-subprocess';
         if (!isStdioRunnerEnabled()) {
           state = 'unavailable';
-          detail = 'Stdio execution disabled (MCP_STDIO_ENABLED=false)';
+          detail = 'Stdio execution disabled (see MCP_STDIO_ENABLED)';
         }
       }
     } else if (sourceType === 'internal') {

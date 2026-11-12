@@ -19,6 +19,7 @@ const DEFAULT_SSE = {
   keepaliveMs: 25_000,
 };
 
+// An empty source is a self-hosted (SQLite) deployment, where stdio servers run by default.
 const DEFAULT_STDIO = { enabled: true, maxConcurrent: 8, maxConcurrentPerTenant: 4 };
 
 const DEFAULT_PUBLIC = {
@@ -245,6 +246,18 @@ describe('MCP gateway limits', () => {
   });
 
   describe('the stdio pool', () => {
+    it('runs stdio servers by default only on a self-hosted deployment, unless MCP_STDIO_ENABLED says otherwise', () => {
+      const enabled = (values: Record<string, string>) => {
+        setConfigSource(sourceWith(values));
+        return getConfig().mcp.stdio.enabled;
+      };
+      expect(enabled({ DEPLOYMENT_MODE: 'saas' })).toBe(false);
+      expect(enabled({ DEPLOYMENT_MODE: 'onprem' })).toBe(true);
+      expect(enabled({ DEPLOYMENT_MODE: 'saas', MCP_STDIO_ENABLED: '' })).toBe(false);
+      expect(enabled({ DEPLOYMENT_MODE: 'saas', MCP_STDIO_ENABLED: 'true' })).toBe(true);
+      expect(enabled({ DEPLOYMENT_MODE: 'onprem', MCP_STDIO_ENABLED: 'off' })).toBe(false);
+    });
+
     it('shares the pool with each tenant by halves, but never less than one slot', () => {
       for (const [pool, share] of [['8', 4], ['10', 5], ['3', 1], ['1', 1], ['2', 1]] as const) {
         setConfigSource(sourceWith({ MCP_STDIO_MAX_CONCURRENT: pool }));

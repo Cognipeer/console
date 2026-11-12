@@ -282,35 +282,41 @@ export async function buildBoundTools(
                     error?: unknown;
                     latencyMs: number;
                 }) => {
-                    void logMcpRequest(tenantDbName, {
-                        tenantId,
-                        projectId: server.projectId ?? projectId,
-                        serverId: server._id !== undefined && server._id !== null ? String(server._id) : undefined,
-                        serverKey: server.key,
-                        toolName,
-                        status: call.status,
-                        latencyMs: call.latencyMs,
-                        requestPayload: {
-                            tool: toolName,
-                            arguments: call.args,
-                            _agent: {
-                                ...(agentId ? { agentId } : {}),
-                                ...(flowCaller?.conversationId ? { conversationId: flowCaller.conversationId } : {}),
+                    // Logging never fails the call it records.
+                    try {
+                        void logMcpRequest(tenantDbName, {
+                            tenantId,
+                            projectId: server.projectId ?? projectId,
+                            serverId: server._id !== undefined && server._id !== null ? String(server._id) : undefined,
+                            serverKey: server.key,
+                            toolName,
+                            status: call.status,
+                            latencyMs: call.latencyMs,
+                            requestPayload: {
+                                tool: toolName,
+                                arguments: call.args,
+                                _agent: {
+                                    ...(agentId ? { agentId } : {}),
+                                    ...(flowCaller?.conversationId ? { conversationId: flowCaller.conversationId } : {}),
+                                },
                             },
-                        },
-                        ...(call.status === 'success'
-                            ? {
-                                responsePayload: typeof call.result === 'object' && call.result !== null
-                                    ? call.result as Record<string, unknown>
-                                    : { value: call.result },
-                            }
-                            : { errorMessage: call.error instanceof Error ? call.error.message : 'Tool execution failed' }),
-                        callerType: 'agent',
-                        callerUserId: mcpIdentity?.userId,
-                        callerTokenId: mcpIdentity?.tokenId,
-                        transport: 'internal',
-                        sourceType: resolveSourceType(server),
-                    }, mcpRequestSecretValues(server, mcpRuntimeHeaders), { skipUsageEvent: true });
+                            ...(call.status === 'success'
+                                ? {
+                                    responsePayload: typeof call.result === 'object' && call.result !== null
+                                        ? call.result as Record<string, unknown>
+                                        : { value: call.result },
+                                }
+                                : { errorMessage: call.error instanceof Error ? call.error.message : 'Tool execution failed' }),
+                            callerType: 'agent',
+                            callerUserId: mcpIdentity?.userId,
+                            callerTokenId: mcpIdentity?.tokenId,
+                            transport: 'internal',
+                            sourceType: resolveSourceType(server),
+                        }, mcpRequestSecretValues(server, mcpRuntimeHeaders), { skipUsageEvent: true })
+                            .catch(() => undefined);
+                    } catch {
+                        // Nothing to do: the call already has its outcome.
+                    }
                 };
                 const description = mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`;
                 const markings = mcpToolMarkings(

@@ -167,11 +167,13 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
           }
         />
         <SummaryKV
-          label="MCP servers"
+          label={t('mcpServers.title')}
           value={
             token.allowedMcpServerIds && token.allowedMcpServerIds.length > 0
-              ? `${token.allowedMcpServerIds.length} MCP server${token.allowedMcpServerIds.length === 1 ? '' : 's'}`
-              : token.mcpRestricted ? 'Limited' : 'All MCP servers'
+              ? token.allowedMcpServerIds.length === 1
+                ? t('mcpServers.countOne')
+                : t('mcpServers.countMany', { count: token.allowedMcpServerIds.length })
+              : token.mcpRestricted ? t('mcpServers.limited') : t('mcpServers.all')
           }
         />
         <SummaryKV
@@ -252,7 +254,7 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
         <IpAllowlistField text={ipText} onChange={setIpText} policy={policy} disabled={!canEdit} />
       </FormSection>
 
-      <FormSection number={4} title="MCP servers" description="Limit this token to specific MCP servers. Leave empty to allow all of them.">
+      <FormSection number={4} title={t('mcpServers.title')} description={t('mcpServers.description')}>
         <McpServerField value={mcpServerIds} onChange={setMcpServerIds} disabled={!canEdit} />
       </FormSection>
 

@@ -411,8 +411,8 @@ export default function CreateTokenModal({
 
       <FormSection
         number={4 + offset}
-        title="MCP servers"
-        description="Limit this token to specific MCP servers. Leave empty to allow all of them."
+        title={tIam('mcpServers.title')}
+        description={tIam('mcpServers.description')}
         done
       >
         <McpServerField value={mcpServerIds} onChange={setMcpServerIds} />

@@ -1959,6 +1959,16 @@ export const en = {
       label: 'Require a user token on every call',
       hint: 'Calls without a user token (X-Cognipeer-User-Token, or "<api token>~<user token>" in Authorization) are refused with 401 user_token_required; the token\'s owner is never the fallback. Set up "Acting for users" below first, otherwise every call is refused.',
     },
+    mcpServers: {
+      title: 'MCP servers',
+      description: 'Limit the token to specific MCP servers. Leave it empty to allow all of them.',
+      placeholder: 'All MCP servers',
+      none: 'No MCP servers found',
+      all: 'All MCP servers',
+      limited: 'Limited',
+      countOne: '1 MCP server',
+      countMany: '{count} MCP servers',
+    },
     network: {
       title: 'Network access',
       description: 'Limit the token to IP addresses you trust. Calls from anywhere else are refused (403) and recorded in the audit log. Leave it empty for no limit.',
