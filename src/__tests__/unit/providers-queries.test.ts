@@ -83,6 +83,29 @@ describe('provider hooks', () => {
     expect(calls[0]).toMatchObject({ method: 'DELETE', query: { scope: 'tenant' } });
   });
 
+  it('deleting a provider does not read the deleted record or its usage again, but refreshes the lists', async () => {
+    const calls = stubFetch({
+      'GET /api/providers/p1': { provider: record },
+      'GET /api/providers/p1/usage': { projects: [] },
+      'GET /api/providers/p2': { provider: { ...record, _id: 'p2' } },
+      'DELETE /api/providers/p1': { success: true },
+    });
+    const probe = await renderHook(newHookClient(), () => ({
+      detail: useProvider<typeof record>('p1'),
+      usage: useProviderUsageQuery('p1'),
+      other: useProvider<typeof record>('p2'),
+      remove: useDeleteProvider(),
+    }));
+    await settle();
+    await act(async () => {
+      await probe.current.remove.mutateAsync('p1');
+    });
+    await settle();
+    expect(calls.filter((c) => c.method === 'GET' && c.path === '/api/providers/p1')).toHaveLength(1);
+    expect(calls.filter((c) => c.path === '/api/providers/p1/usage')).toHaveLength(1);
+    expect(calls.filter((c) => c.method === 'GET' && c.path === '/api/providers/p2')).toHaveLength(2);
+  });
+
   it('assigning to the active project merges it into the projects read just now', async () => {
     const calls = stubFetch({
       'GET /api/projects': { activeProjectId: 'active' },

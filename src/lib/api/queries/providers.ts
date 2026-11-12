@@ -5,8 +5,8 @@
  *
  * - Every key starts `['providers', <project>, ...]` (`providersKeys`); `<project>` is the marker of `useResourceKey`
  *   (see `projectScope.ts`), so a project switch never shows the old project's providers.
- * - Saving or deleting a provider invalidates the whole `['providers', <project>]` branch: the record, its usage and
- *   the project lists all describe the same assignment.
+ * - Saving a provider invalidates the whole `['providers', <project>]` branch: the record, its usage and the project
+ *   lists all describe the same assignment. Deleting one does the same except for the deleted record's own queries.
  *
  * The routes are the dashboard's `/api/providers` plugin.
  */
@@ -146,11 +146,23 @@ export function useUpdateProvider() {
   });
 }
 
+/**
+ * `DELETE /api/providers/:id`. The deleted record's own queries (the record and its usage) are left alone: the page
+ * still has them mounted, and reading a deleted record again would answer 404 before the page navigates away.
+ */
 export function useDeleteProvider() {
-  const invalidate = useInvalidateProviders();
+  const queryClient = useQueryClient();
+  const project = useProjectScope();
   return useMutation({
     mutationFn: (id: string) => apiDelete<unknown>(providerPath(id)),
-    onSuccess: () => invalidate(),
+    onSuccess: (_result, id) =>
+      queryClient.invalidateQueries({
+        queryKey: providersKeys.project(project),
+        predicate: (query) => {
+          const key = query.queryKey;
+          return !(key[2] === 'detail' && key[3] === id);
+        },
+      }),
   });
 }
 
