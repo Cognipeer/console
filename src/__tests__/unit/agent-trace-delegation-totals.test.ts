@@ -25,7 +25,7 @@ vi.mock('@/lib/database', async (importActual) => {
     deleteAgentTracingEvents: vi.fn(async () => 0),
     createAgentTracingEvent: vi.fn(async (doc: Record<string, unknown>) => { hoisted.events.push(doc); return doc; }),
   };
-  return { ...actual, getDatabase: vi.fn(async () => db) };
+  return { ...actual, getDatabase: vi.fn(async () => db), runWithTenantScope: async (_tenantDbName: string, fn: (d: unknown) => unknown) => fn(db) };
 });
 vi.mock('@/lib/services/tracing/traceEntityMetrics', async (importActual) => ({
   ...(await importActual<typeof import('@/lib/services/tracing/traceEntityMetrics')>()),

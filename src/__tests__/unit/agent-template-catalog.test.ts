@@ -20,6 +20,7 @@ const db = vi.hoisted(() => ({
 vi.mock('@/lib/database', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/database')>()),
   getDatabase: vi.fn(async () => db),
+  runWithTenantScope: async (_tenantDbName: string, fn: (d: unknown) => unknown) => fn(db),
 }));
 vi.mock('@/lib/services/agents/agentSandboxTools', () => ({
   resolveSandboxAvailability: vi.fn(async () => ({

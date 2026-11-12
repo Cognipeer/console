@@ -25,7 +25,10 @@ const hoisted = vi.hoisted(() => ({
   scripted: { content: 'plain answer' } as { content: string; output?: unknown; outputError?: unknown },
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return { getDatabase, runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()) };
+});
 
 vi.mock('@/lib/services/models/modelService', () => ({
   getModelByKey: hoisted.getModelByKey,

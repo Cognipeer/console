@@ -8,7 +8,6 @@
  */
 
 import {
-    getDatabase,
     runWithTenantScope,
     type IAgentResourceOwner,
     type OwnedResourceListFilter,
@@ -64,11 +63,11 @@ export async function resolveOwningAgent(
     projectId: string,
     agentId: string,
 ): Promise<IAgentResourceOwner | null> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const agent = await db.findAgentById(agentId).catch(() => null);
-    if (!agent || String(agent.projectId ?? '') !== String(projectId)) return null;
-    return { kind: 'agent', agentId: String(agent._id) };
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const agent = await db.findAgentById(agentId).catch(() => null);
+        if (!agent || String(agent.projectId ?? '') !== String(projectId)) return null;
+        return { kind: 'agent', agentId: String(agent._id) };
+    });
 }
 
 /**

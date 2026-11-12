@@ -6,7 +6,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { getDatabase, type AgentRevision, type IAgent, type IAgentRunRevision } from '@/lib/database';
+import { runWithTenantScope, type AgentRevision, type DatabaseProvider, type IAgent, type IAgentRunRevision } from '@/lib/database';
 import { stableStringify } from '@/lib/services/alerts/ruleShape';
 
 /**
@@ -38,12 +38,10 @@ export function draftFingerprint(config: IAgent['config'] | undefined): string {
   return createHash('sha256').update(stableStringify(config ?? {})).digest('hex').slice(0, 12);
 }
 
-async function loadAgent(tenantDbName: string, agentKey: string, projectId: string | undefined) {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+async function loadAgent(db: DatabaseProvider, agentKey: string, projectId: string | undefined) {
   const agent = await db.findAgentByKey(agentKey, projectId);
   if (!agent) throw new Error(`Agent "${agentKey}" not found`);
-  return { db, agent };
+  return agent;
 }
 
 /**
@@ -57,10 +55,12 @@ export async function assertAgentRevisionRunnable(
   projectId: string | undefined,
   requested: AgentRevision,
 ): Promise<void> {
-  const { db, agent } = await loadAgent(tenantDbName, agentKey, projectId);
-  if (typeof requested !== 'number') return;
-  const version = await db.findAgentVersion(String(agent._id), requested);
-  if (!version) throw new Error(`Version ${requested} not found for agent "${agentKey}"`);
+  await runWithTenantScope(tenantDbName, async (db) => {
+    const agent = await loadAgent(db, agentKey, projectId);
+    if (typeof requested !== 'number') return;
+    const version = await db.findAgentVersion(String(agent._id), requested);
+    if (!version) throw new Error(`Version ${requested} not found for agent "${agentKey}"`);
+  });
 }
 
 export interface StartedAgentRevision {
@@ -86,35 +86,37 @@ export async function startAgentRevision(
   projectId: string | undefined,
   requested: AgentRevision,
 ): Promise<StartedAgentRevision> {
-  const { db, agent } = await loadAgent(tenantDbName, agentKey, projectId);
-  const agentId = String(agent._id);
+  return runWithTenantScope(tenantDbName, async (db): Promise<StartedAgentRevision> => {
+    const agent = await loadAgent(db, agentKey, projectId);
+    const agentId = String(agent._id);
 
-  let version: number | null = null;
-  if (typeof requested === 'number') {
-    const snapshot = await db.findAgentVersion(agentId, requested);
-    if (!snapshot) throw new Error(`Version ${requested} not found for agent "${agentKey}"`);
-    version = snapshot.version;
-  } else if (requested === 'published' && agent.publishedVersion) {
-    const snapshot = await db.findAgentVersion(agentId, agent.publishedVersion);
-    if (snapshot) version = snapshot.version;
-  }
+    let version: number | null = null;
+    if (typeof requested === 'number') {
+      const snapshot = await db.findAgentVersion(agentId, requested);
+      if (!snapshot) throw new Error(`Version ${requested} not found for agent "${agentKey}"`);
+      version = snapshot.version;
+    } else if (requested === 'published' && agent.publishedVersion) {
+      const snapshot = await db.findAgentVersion(agentId, agent.publishedVersion);
+      if (snapshot) version = snapshot.version;
+    }
 
-  if (version !== null) {
-    const pinned = version;
+    if (version !== null) {
+      const pinned = version;
+      return {
+        revision: { requested, agentKey, version: pinned },
+        selector: { version: pinned },
+        draftChanged: async () => false,
+      };
+    }
+
+    const fingerprint = draftFingerprint(agent.config);
     return {
-      revision: { requested, agentKey, version: pinned },
-      selector: { version: pinned },
-      draftChanged: async () => false,
+      revision: { requested, agentKey, version: null, draftFingerprint: fingerprint },
+      selector: {},
+      draftChanged: async () => {
+        const current = await runWithTenantScope(tenantDbName, (scoped) => loadAgent(scoped, agentKey, projectId)).catch(() => null);
+        return !current || draftFingerprint(current.config) !== fingerprint;
+      },
     };
-  }
-
-  const fingerprint = draftFingerprint(agent.config);
-  return {
-    revision: { requested, agentKey, version: null, draftFingerprint: fingerprint },
-    selector: {},
-    draftChanged: async () => {
-      const current = await loadAgent(tenantDbName, agentKey, projectId).catch(() => null);
-      return !current || draftFingerprint(current.agent.config) !== fingerprint;
-    },
-  };
+  });
 }

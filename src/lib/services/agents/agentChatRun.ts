@@ -28,7 +28,7 @@ import type { IAgentConversationMessage } from '@/lib/database/provider/types.do
 import { buildPromptVariables } from './promptVariables';
 import { hasKnowledgeConfigured } from './agentKnowledgeBindings';
 import { applyServiceAvailability, assertAgentsEnabled } from './agentServiceAvailability';
-import { getDatabase, type AgentResponseFormat, type IAgent, type IAgentConfig, type IAgentConversation } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type DatabaseProvider, type AgentResponseFormat, type IAgent, type IAgentConfig, type IAgentConversation } from '@/lib/database';
 import { KnowledgeExposure, kbReaderOfFollowUp, runWithKnowledgeExposure } from '@/lib/services/rag/access';
 // Imported BY PATH because the barrel does not re-export it. `resolveBindings`
 // is the ONE implementation of "which guardrails run on this hook"; a
@@ -1231,17 +1231,21 @@ export async function executeAgentChatLocal(
     // The last stop for a turn that arrives without the entry above (a queue worker, a background run).
     await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
-    try {
-        return await runWithRoutingCaller(routingCallerOf(request), () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runAgentChatTurn(request, scope)));
-    } catch (error) {
-        await scope.events?.fail(error).catch(() => undefined);
-        throw error;
-    }
+    // One tenant scope for the whole turn, the failure path included.
+    return runWithTenantScope(request.tenantDbName, async (db) => {
+        try {
+            return await runWithRoutingCaller(routingCallerOf(request), () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runAgentChatTurn(request, scope, db)));
+        } catch (error) {
+            await scope.events?.fail(error).catch(() => undefined);
+            throw error;
+        }
+    });
 }
 
 async function runAgentChatTurn(
     request: AgentChatRequest,
     scope: { events?: SessionTurnEvents },
+    db: DatabaseProvider,
 ): Promise<AgentChatResponse> {
     const {
         tenantDbName,
@@ -1269,9 +1273,6 @@ async function runAgentChatTurn(
         : undefined;
 
     // 1. Load agent config (use published version for API/SDK calls)
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-
     let resolvedVersion: number | null = null;
     let agent: IAgent;
     let config: IAgentConfig;

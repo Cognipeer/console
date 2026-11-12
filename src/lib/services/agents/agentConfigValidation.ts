@@ -21,7 +21,7 @@ import { normalizeOcrSettings } from '@/lib/services/extraction/settings';
 import { REMINDER_INSTRUCTIONS_MAX_CHARS } from './agentRemindersConfig';
 import { hasKnowledgeConfigured } from './agentKnowledgeBindings';
 import { getCrawler, crawlerHasCredentials, crawlerHasHostScope } from '@/lib/services/crawler';
-import { getDatabase, type IAgentConfig, type IAgentToolBinding } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider, type IAgentConfig, type IAgentToolBinding } from '@/lib/database';
 import { getDisabledToolNames } from '@/lib/services/mcp/mcpService';
 import { AGENT_SANDBOX_SECRET_MASK } from './agentSandboxSecrets';
 import {
@@ -628,11 +628,7 @@ function hasPrice(pricing: { inputTokenPer1M?: number; outputTokenPer1M?: number
     return (pricing?.inputTokenPer1M ?? 0) > 0 || (pricing?.outputTokenPer1M ?? 0) > 0;
 }
 
-/**
- * The shape checks plus everything that needs the database: every key the
- * config names must resolve, in this project, to something usable.
- */
-export async function validateAgentConfig(input: {
+type AgentConfigValidationInput = {
     tenantDbName: string;
     projectId: string;
     config: IAgentConfig;
@@ -645,7 +641,13 @@ export async function validateAgentConfig(input: {
     agentId?: string;
     /** For the license-gated parts (sandbox access). */
     tenantId?: string;
-}): Promise<AgentConfigValidation> {
+};
+
+/**
+ * The shape checks plus everything that needs the database: every key the
+ * config names must resolve, in this project, to something usable.
+ */
+export async function validateAgentConfig(input: AgentConfigValidationInput): Promise<AgentConfigValidation> {
     const { config, projectId } = input;
     const issues = validateAgentConfigShape(config);
     if (config.kind === 'external') return issues;
@@ -654,8 +656,15 @@ export async function validateAgentConfig(input: {
         return issues;
     }
 
-    const db = await getDatabase();
-    await db.switchToTenant(input.tenantDbName);
+    return runWithTenantScope(input.tenantDbName, (db) => validateAgentConfigInScope(db, input, issues));
+}
+
+async function validateAgentConfigInScope(
+    db: DatabaseProvider,
+    input: AgentConfigValidationInput,
+    issues: Issues,
+): Promise<AgentConfigValidation> {
+    const { config, projectId } = input;
     const agentId = input.agentId
         ?? (input.agentKey ? (await db.findAgentByKey(input.agentKey, projectId).catch(() => null))?._id?.toString() : undefined);
 

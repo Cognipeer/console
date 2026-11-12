@@ -51,7 +51,7 @@ import {
   renderPromptTemplate,
 } from '@/lib/services/agents/promptVariables';
 import {
-  getDatabase,
+  runWithTenantScope,
 } from '@/lib/database';
 import {
   DASHBOARD_AGENT_HITL_DEFAULTS,
@@ -334,9 +334,7 @@ export function registerAgentsCrudRoutes(app: FastifyInstance): void {
   ): Promise<IAgentConfig> {
     let template = config.systemPrompt;
     if (!template && config.promptKey) {
-      const db = await getDatabase();
-      await db.switchToTenant(tenantDbName);
-      const prompt = await db.findPromptByKey(config.promptKey, projectId);
+      const prompt = await runWithTenantScope(tenantDbName, (db) => db.findPromptByKey(config.promptKey!, projectId));
       template = prompt?.template;
     }
     if (!template) return config;
