@@ -1,7 +1,10 @@
 /**
- * Harness for tests of React Query hook files: renders a hook inside a query client, and a fetch stub that answers
- * from a route table and records every call. jsdom only; import from a test file that starts with
- * `// @vitest-environment jsdom`.
+ * Harness for the tests of React Query hook files (jsdom only; import from a test file that starts with
+ * `// @vitest-environment jsdom`):
+ * - `renderHook` mounts a probe that runs the hook inside a query client (`newHookClient` gives one with no
+ *   retries and a cache that stays until the test ends);
+ * - `settle` lets requests and the renders they cause finish, `until` waits for a condition;
+ * - `stubFetch` answers `fetch` from a route table, `stubApi` from a handler; both record every call.
  */
 
 import { act, createElement as h, useReducer } from 'react';
@@ -65,9 +68,34 @@ export async function cleanupHooks(): Promise<void> {
 export interface RecordedCall {
   method: string;
   path: string;
+  /** The query string as parsed pairs. */
   query: Record<string, string>;
+  /** The query string as sent, `?` included (empty when there is none). */
+  search: string;
+  /** The JSON body, parsed; a body that is not JSON is kept as it was sent. */
   body: unknown;
 }
+
+function recordCall(input: string, init?: RequestInit): RecordedCall {
+  const url = new URL(input, 'http://localhost');
+  let body: unknown = init?.body ?? undefined;
+  if (typeof body === 'string') {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      /* not JSON: keep the text */
+    }
+  }
+  return {
+    method: (init?.method ?? 'GET').toUpperCase(),
+    path: url.pathname,
+    query: Object.fromEntries(url.searchParams.entries()),
+    search: url.search,
+    body,
+  };
+}
+
+const notMocked = (call: RecordedCall) => jsonResponse({ error: `no mock for ${call.method} ${call.path}` }, 404);
 
 export type Reply = Response | { status: number; body: unknown } | unknown;
 
@@ -80,16 +108,10 @@ export function stubFetch(routes: Record<string, Reply | ((call: RecordedCall) =
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: string, init?: RequestInit) => {
-      const url = new URL(input, 'http://localhost');
-      const call: RecordedCall = {
-        method: (init?.method ?? 'GET').toUpperCase(),
-        path: url.pathname,
-        query: Object.fromEntries(url.searchParams.entries()),
-        body: init?.body ? JSON.parse(String(init.body)) : undefined,
-      };
+      const call = recordCall(input, init);
       calls.push(call);
       const route = routes[`${call.method} ${call.path}`];
-      if (route === undefined) return jsonResponse({ error: `no mock for ${call.method} ${call.path}` }, 404);
+      if (route === undefined) return notMocked(call);
       const reply = typeof route === 'function' ? (route as (c: RecordedCall) => Reply)(call) : route;
       if (reply instanceof Response) return reply;
       if (reply && typeof reply === 'object' && 'status' in reply && 'body' in reply) {
@@ -97,6 +119,22 @@ export function stubFetch(routes: Record<string, Reply | ((call: RecordedCall) =
         return jsonResponse(body, status);
       }
       return jsonResponse(reply);
+    }),
+  );
+  return calls;
+}
+
+export type ApiHandler = (call: RecordedCall) => Response | undefined | Promise<Response | undefined>;
+
+/** Stubs `fetch` with a handler: every call is recorded; `handler` answers it, or returns undefined for a 404. */
+export function stubApi(handler: ApiHandler): RecordedCall[] {
+  const calls: RecordedCall[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: string, init?: RequestInit) => {
+      const call = recordCall(input, init);
+      calls.push(call);
+      return (await handler(call)) ?? notMocked(call);
     }),
   );
   return calls;

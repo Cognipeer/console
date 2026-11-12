@@ -295,7 +295,7 @@ describe('the pages that edit a provider', () => {
 
   it.each(PAGES)('%s hands the refusal of a save, with its field, to the form', (file) => {
     const source = readFileSync(path.join(ROOT, file), 'utf8');
-    expect(source).toMatch(/throw providerRequestError\(body, 'Failed to update (provider|instance)'\)/);
+    expect(source).toMatch(/throw providerRequestError\((body|error\.payload), 'Failed to update (provider|instance)'\)/);
     // the plain Error of the text alone would drop the field the form needs
     expect(source).not.toMatch(/throw new Error\(body\?\.error \|\| 'Failed to update (provider|instance)'\)/);
   });
