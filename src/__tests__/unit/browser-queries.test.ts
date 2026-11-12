@@ -103,7 +103,9 @@ describe('browser hooks', () => {
   });
 
   it('create refreshes the list; update puts the saved browser in the cache; delete drops it', async () => {
-    const client = newTestQueryClient();
+    // Keeps entries nobody observes: the saved browser's detail entry is read back below, and a
+    // zero gcTime could collect it first on a slow runner.
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0, gcTime: Infinity }, mutations: { retry: false } } });
     const probe = await renderHook(client, () => ({
       list: useBrowsers(),
       create: useCreateBrowser(),
