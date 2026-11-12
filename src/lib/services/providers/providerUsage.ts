@@ -1,4 +1,4 @@
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import type { IAgent, IModel, IProviderRecord } from '@/lib/database';
 
 export interface ProviderUsageProject {
@@ -61,68 +61,67 @@ export async function getProviderUsage(
   record: Pick<IProviderRecord, 'key' | 'projectId' | 'projectIds'>,
   now: Date = new Date(),
 ): Promise<ProviderUsage> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const assigned = new Set(assignedProjectIds(record));
+    const projects = await db.listProjects(tenantId);
 
-  const assigned = new Set(assignedProjectIds(record));
-  const projects = await db.listProjects(tenantId);
+    const rows: ProviderUsageProject[] = projects.map((project) => ({
+      projectId: String(project._id),
+      name: project.name,
+      assigned: assigned.has(String(project._id)),
+      models: [],
+      agents: [],
+    }));
+    const byProject = new Map(rows.map((row) => [row.projectId, row]));
 
-  const rows: ProviderUsageProject[] = projects.map((project) => ({
-    projectId: String(project._id),
-    name: project.name,
-    assigned: assigned.has(String(project._id)),
-    models: [],
-    agents: [],
-  }));
-  const byProject = new Map(rows.map((row) => [row.projectId, row]));
+    if (assigned.size > 0) {
+      const models = (await db.listModels()).filter(
+        (model) => model.projectId && assigned.has(String(model.projectId)) && usesProvider(model, record.key),
+      );
 
-  if (assigned.size > 0) {
-    const models = (await db.listModels()).filter(
-      (model) => model.projectId && assigned.has(String(model.projectId)) && usesProvider(model, record.key),
-    );
+      // project -> keys of its models on this provider
+      const modelKeys = new Map<string, Set<string>>();
+      for (const model of models) {
+        const projectId = String(model.projectId);
+        byProject.get(projectId)?.models.push({ id: String(model._id), name: model.name });
+        if (!modelKeys.has(projectId)) modelKeys.set(projectId, new Set());
+        modelKeys.get(projectId)!.add(model.key);
+      }
 
-    // project -> keys of its models on this provider
-    const modelKeys = new Map<string, Set<string>>();
-    for (const model of models) {
-      const projectId = String(model.projectId);
-      byProject.get(projectId)?.models.push({ id: String(model._id), name: model.name });
-      if (!modelKeys.has(projectId)) modelKeys.set(projectId, new Set());
-      modelKeys.get(projectId)!.add(model.key);
+      if (models.length > 0) {
+        const agents = await db.listAgents();
+        for (const agent of agents) {
+          const projectId = String(agent.projectId);
+          const keys = modelKeys.get(projectId);
+          if (!keys || !agentModelKeys(agent).some((key) => keys.has(key))) continue;
+          byProject.get(projectId)?.agents.push({ id: String(agent._id), name: agent.name });
+        }
+
+        const fromDay = dayString(new Date(now.getTime() - (WINDOW_DAYS - 1) * 86_400_000));
+        const usage = await db.listUsageDaily({
+          service: 'models',
+          fromDay,
+          toDay: dayString(now),
+          limit: USAGE_ROW_LIMIT,
+        });
+        for (const row of usage) {
+          const projectId = String(row.projectId);
+          if (!modelKeys.get(projectId)?.has(row.refKey)) continue;
+          const target = byProject.get(projectId);
+          if (!target) continue;
+          target.requests7d = (target.requests7d ?? 0) + (row.requests ?? 0);
+          if (!target.lastUsedAt || row.day > target.lastUsedAt) target.lastUsedAt = row.day;
+        }
+        // A project with models has a count, zero when nothing ran.
+        for (const [projectId] of modelKeys) {
+          const target = byProject.get(projectId);
+          if (target && target.requests7d === undefined) target.requests7d = 0;
+        }
+      }
     }
 
-    if (models.length > 0) {
-      const agents = await db.listAgents();
-      for (const agent of agents) {
-        const projectId = String(agent.projectId);
-        const keys = modelKeys.get(projectId);
-        if (!keys || !agentModelKeys(agent).some((key) => keys.has(key))) continue;
-        byProject.get(projectId)?.agents.push({ id: String(agent._id), name: agent.name });
-      }
-
-      const fromDay = dayString(new Date(now.getTime() - (WINDOW_DAYS - 1) * 86_400_000));
-      const usage = await db.listUsageDaily({
-        service: 'models',
-        fromDay,
-        toDay: dayString(now),
-        limit: USAGE_ROW_LIMIT,
-      });
-      for (const row of usage) {
-        const projectId = String(row.projectId);
-        if (!modelKeys.get(projectId)?.has(row.refKey)) continue;
-        const target = byProject.get(projectId);
-        if (!target) continue;
-        target.requests7d = (target.requests7d ?? 0) + (row.requests ?? 0);
-        if (!target.lastUsedAt || row.day > target.lastUsedAt) target.lastUsedAt = row.day;
-      }
-      // A project with models has a count, zero when nothing ran.
-      for (const [projectId] of modelKeys) {
-        const target = byProject.get(projectId);
-        if (target && target.requests7d === undefined) target.requests7d = 0;
-      }
-    }
-  }
-
-  // Assigned projects first, each group by name.
-  rows.sort((a, b) => Number(b.assigned) - Number(a.assigned) || a.name.localeCompare(b.name));
-  return { projects: rows };
+    // Assigned projects first, each group by name.
+    rows.sort((a, b) => Number(b.assigned) - Number(a.assigned) || a.name.localeCompare(b.name));
+    return { projects: rows };
+  });
 }

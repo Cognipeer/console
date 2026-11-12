@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase, type ITenant, type IUser } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type ITenant, type IUser } from '@/lib/database';
 import { LicenseManager, type LicenseType } from '@/lib/license/license-manager';
 import { TokenManager } from '@/lib/license/token-manager';
 import { sendEmail } from '@/lib/email/mailer';
@@ -180,28 +180,6 @@ function sendRateLimitHeaders(
 }
 
 /**
- * Binds the tenant DB for the duration of `fn` via a real AsyncLocalStorage
- * scope (`db.runWithTenant`), so a concurrent request for another tenant
- * cannot clobber this request's tenant binding through the process-global
- * `switchToTenant` fallback (CWE-362). These pre-auth routes previously
- * called `db.switchToTenant()` directly and never established a scope for
- * the rest of the handler, which is exactly the race this closes. Falls
- * back to `switchToTenant` only for partial test doubles that don't
- * implement `runWithTenant`.
- */
-async function withTenantScope<T>(
-  db: Awaited<ReturnType<typeof getDatabase>>,
-  tenantDbName: string,
-  fn: () => Promise<T>,
-): Promise<T> {
-  if (typeof db.runWithTenant === 'function') {
-    return db.runWithTenant(tenantDbName, fn);
-  }
-  await db.switchToTenant(tenantDbName);
-  return fn();
-}
-
-/**
  * Issues a session (JWT + cookies) for an already-authenticated user and sends
  * the standard login response. This is the shared tail of every login path —
  * local password, and any external authenticator (LDAP, OIDC/SSO) that has
@@ -242,7 +220,7 @@ export async function issueSessionForAuthenticatedUser(
     return reply.code(401).send({ error: 'Invalid email or password' });
   }
 
-  return withTenantScope(db, authenticatedTenant.dbName, async () => {
+  return runWithTenantScope(authenticatedTenant.dbName, async () => {
     const tenantIdStr =
       typeof authenticatedTenant._id === 'string'
         ? authenticatedTenant._id
@@ -437,7 +415,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         // External directory (LDAP/SSO, enterprise overlay) gets first refusal
         // when the tenant has it configured. 'skip' falls through to the local
         // email + bcrypt path; 'fail' is a rejected external login (no fallback).
-        const slugAuthResult = await withTenantScope(db, tenant.dbName, async () => {
+        const slugAuthResult = await runWithTenantScope(tenant.dbName, async () => {
           const external = await tryExternalAuthenticate({
             email: normalizedEmail,
             password,
@@ -509,8 +487,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
             // Each candidate gets its own isolated tenant scope: nothing
             // about one candidate's DB binding should leak into the next
             // iteration or into a concurrent request for another tenant.
-            const candidateUser = await withTenantScope(
-              db,
+            const candidateUser = await runWithTenantScope(
               candidateTenant.dbName,
               async () => {
                 const foundUser =
@@ -573,8 +550,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
 
             try {
               // Isolated scope per candidate, same reasoning as the loop above.
-              const candidateUser = await withTenantScope(
-                db,
+              const candidateUser = await runWithTenantScope(
                 candidateTenant.dbName,
                 async () => {
                   const foundUser =
@@ -753,7 +729,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         slug,
       });
 
-      return await withTenantScope(db, dbName, async () => {
+      return await runWithTenantScope(dbName, async () => {
         const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
         const tenantIdStr =
@@ -1168,7 +1144,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
           continue;
         }
 
-        const user = await withTenantScope(db, tenant.dbName, () => db.findUserByEmail(email));
+        const user = await runWithTenantScope(tenant.dbName, () => db.findUserByEmail(email));
         // A login-disabled (service) account has no password to reset: treat it
         // exactly like an unknown email — no token minted, no link mailed — so
         // the flow neither burns a reset token nor lets a user-chosen password
@@ -1301,7 +1277,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Invalid reset token' });
       }
 
-      return await withTenantScope(db, tenant.dbName, async () => {
+      return await runWithTenantScope(tenant.dbName, async () => {
         const user = await db.findUserById(payload.sub!);
         // Same generic answer as an invalid token for a login-disabled account:
         // a token minted before `canLogin` was turned off must not be able to

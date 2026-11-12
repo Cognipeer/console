@@ -20,7 +20,13 @@ const config = {
   rateLimit: { provider: 'mongodb' },
 };
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(await getDatabase())),
+  };
+});
 vi.mock('@/lib/core/config', () => ({ getConfig: () => config }));
 vi.mock('@/lib/core/cache', () => ({
   getCache: async () => ({ get: async () => undefined, set: async () => {}, del: async () => {} }),

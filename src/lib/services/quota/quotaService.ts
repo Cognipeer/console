@@ -1,4 +1,4 @@
-import { getDatabase, type IQuotaPolicy } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type IQuotaPolicy } from '@/lib/database';
 import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
 import { LicenseManager } from '@/lib/license/license-manager';
@@ -39,9 +39,10 @@ async function invalidatePolicyCache(
     const named = [...new Set(projectIds.filter((id): id is string => Boolean(id)))];
     let targets = named;
     if (named.length === 0) {
-      const db = await getDatabase();
-      await db.switchToTenant(tenantDbName);
-      targets = (await db.listProjects(tenantId)).map((project) => String(project._id));
+      targets = await runWithTenantScope(
+        tenantDbName,
+        async (db) => (await db.listProjects(tenantId)).map((project) => String(project._id)),
+      );
     }
     await Promise.all(
       targets.map((projectId) => cache.del(quotaPolicyCacheKey(tenantDbName, tenantId, projectId))),
@@ -93,24 +94,24 @@ export async function listQuotaPolicies(
   tenantId: string,
   options?: ListQuotaPoliciesOptions,
 ): Promise<QuotaPolicy[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const allPolicies = await db.listQuotaPolicies(tenantId, options?.projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const allPolicies = await db.listQuotaPolicies(tenantId, options?.projectId);
 
-  let policies = allPolicies;
+    let policies = allPolicies;
 
-  // Apply filters
-  if (options?.domain) {
-    policies = policies.filter(p => p.domain === options.domain || p.domain === 'global');
-  }
-  if (options?.scope) {
-    policies = policies.filter(p => p.scope === options.scope);
-  }
-  if (options?.enabled !== undefined) {
-    policies = policies.filter(p => (p as { enabled?: boolean }).enabled === options.enabled);
-  }
+    // Apply filters
+    if (options?.domain) {
+      policies = policies.filter(p => p.domain === options.domain || p.domain === 'global');
+    }
+    if (options?.scope) {
+      policies = policies.filter(p => p.scope === options.scope);
+    }
+    if (options?.enabled !== undefined) {
+      policies = policies.filter(p => (p as { enabled?: boolean }).enabled === options.enabled);
+    }
 
-  return policies.map(normalizePolicy);
+    return policies.map(normalizePolicy);
+  });
 }
 
 // ── validation ───────────────────────────────────────────────────────────
@@ -172,10 +173,10 @@ async function findExistingPolicy(
   tenantId: string,
   id: string,
 ): Promise<IQuotaPolicy | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const all = await db.listQuotaPolicies(tenantId);
-  return all.find((policy) => String(policy._id) === id) ?? null;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const all = await db.listQuotaPolicies(tenantId);
+    return all.find((policy) => String(policy._id) === id) ?? null;
+  });
 }
 
 /**
@@ -245,25 +246,26 @@ export async function assertValidQuotaPolicy(
   }
 
   // A project this policy is moved to (or created in) must be one of this tenant's.
-  if (typeof patch.projectId === 'string' && patch.projectId !== '' && patch.projectId !== existing?.projectId) {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const project = await db.findProjectById(patch.projectId);
-    if (!project || (project.tenantId && String(project.tenantId) !== String(tenantId))) {
-      throw new QuotaPolicyValidationError('Project not found', 'project_not_found', 404);
-    }
+  const movedToProjectId = patch.projectId;
+  if (typeof movedToProjectId === 'string' && movedToProjectId !== '' && movedToProjectId !== existing?.projectId) {
+    await runWithTenantScope(tenantDbName, async (db) => {
+      const project = await db.findProjectById(movedToProjectId);
+      if (!project || (project.tenantId && String(project.tenantId) !== String(tenantId))) {
+        throw new QuotaPolicyValidationError('Project not found', 'project_not_found', 404);
+      }
+    });
   }
 
   if (scope === 'group') {
     if (typeof scopeId !== 'string' || scopeId.trim() === '') {
       throw new QuotaPolicyValidationError('A group-scoped policy needs the group in scopeId', 'group_required');
     }
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const group = await db.findGroupById(scopeId);
-    if (!group || (group.tenantId && String(group.tenantId) !== String(tenantId))) {
-      throw new QuotaPolicyValidationError('Group not found', 'group_not_found', 404);
-    }
+    await runWithTenantScope(tenantDbName, async (db) => {
+      const group = await db.findGroupById(scopeId);
+      if (!group || (group.tenantId && String(group.tenantId) !== String(tenantId))) {
+        throw new QuotaPolicyValidationError('Group not found', 'group_not_found', 404);
+      }
+    });
   }
 
   if (domain === 'agent' && scope === 'resource' && (typeof scopeId !== 'string' || scopeId.trim() === '')) {
@@ -333,99 +335,98 @@ export async function describeQuotaPolicies(
   tenantId: string,
   policies: readonly QuotaPolicy[],
 ): Promise<QuotaPolicyView[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const userIds = [...new Set(policies.filter((p) => p.scope === 'user' && p.scopeId).map((p) => String(p.scopeId)))];
+    const groupIds = [...new Set(policies.filter((p) => p.scope === 'group' && p.scopeId).map((p) => String(p.scopeId)))];
+    const tokenIds = [...new Set(policies.filter((p) => p.scope === 'token' && p.scopeId).map((p) => String(p.scopeId)))];
+    const needsProjects = policies.some((p) => p.projectId);
 
-  const userIds = [...new Set(policies.filter((p) => p.scope === 'user' && p.scopeId).map((p) => String(p.scopeId)))];
-  const groupIds = [...new Set(policies.filter((p) => p.scope === 'group' && p.scopeId).map((p) => String(p.scopeId)))];
-  const tokenIds = [...new Set(policies.filter((p) => p.scope === 'token' && p.scopeId).map((p) => String(p.scopeId)))];
-  const needsProjects = policies.some((p) => p.projectId);
+    // A policy's scopeId is text the creator typed. Where one physical database serves
+    // every tenant a lookup by id finds any tenant's row, so a row of another tenant is
+    // treated as not found: its name and e-mail must never reach this answer.
+    const own = <T extends { tenantId?: unknown }>(row: T | null): T | null =>
+      row && (!row.tenantId || String(row.tenantId) === String(tenantId)) ? row : null;
 
-  // A policy's scopeId is text the creator typed. Where one physical database serves
-  // every tenant a lookup by id finds any tenant's row, so a row of another tenant is
-  // treated as not found: its name and e-mail must never reach this answer.
-  const own = <T extends { tenantId?: unknown }>(row: T | null): T | null =>
-    row && (!row.tenantId || String(row.tenantId) === String(tenantId)) ? row : null;
+    const [users, groups, tokens, projects] = await Promise.all([
+      mapBounded(userIds, async (id) => [id, own(await db.findUserById(id).catch(() => null))] as const),
+      mapBounded(groupIds, async (id) => [id, own(await db.findGroupById(id).catch(() => null))] as const),
+      // Only the referenced tokens (a tenant can hold thousands), filtered by tenant in the query itself.
+      tokenIds.length > 0 ? loadReferencedTokens(db, tenantId, tokenIds) : Promise.resolve([]),
+      needsProjects ? db.listProjects(tenantId).catch(() => []) : Promise.resolve([]),
+    ]);
 
-  const [users, groups, tokens, projects] = await Promise.all([
-    mapBounded(userIds, async (id) => [id, own(await db.findUserById(id).catch(() => null))] as const),
-    mapBounded(groupIds, async (id) => [id, own(await db.findGroupById(id).catch(() => null))] as const),
-    // Only the referenced tokens (a tenant can hold thousands), filtered by tenant in the query itself.
-    tokenIds.length > 0 ? loadReferencedTokens(db, tenantId, tokenIds) : Promise.resolve([]),
-    needsProjects ? db.listProjects(tenantId).catch(() => []) : Promise.resolve([]),
-  ]);
+    const userById = new Map(users);
+    const groupById = new Map(groups);
+    const tokenById = new Map(tokens.map((token) => [String(token._id), token]));
+    const projectById = new Map(projects.map((project) => [String(project._id), project]));
 
-  const userById = new Map(users);
-  const groupById = new Map(groups);
-  const tokenById = new Map(tokens.map((token) => [String(token._id), token]));
-  const projectById = new Map(projects.map((project) => [String(project._id), project]));
+    // Agents are addressed by key (+ the policy's project), so they are looked up per policy.
+    const agentPolicies = policies.filter((p) => p.domain === 'agent' && p.scope === 'resource' && p.scopeId);
+    const agents = await mapBounded(agentPolicies, async (p) => {
+      const agent = await db.findAgentByKey(String(p.scopeId), p.projectId || undefined).catch(() => null);
+      return [String(p._id), agent] as const;
+    });
+    const agentByPolicy = new Map(agents);
 
-  // Agents are addressed by key (+ the policy's project), so they are looked up per policy.
-  const agentPolicies = policies.filter((p) => p.domain === 'agent' && p.scope === 'resource' && p.scopeId);
-  const agents = await mapBounded(agentPolicies, async (p) => {
-    const agent = await db.findAgentByKey(String(p.scopeId), p.projectId || undefined).catch(() => null);
-    return [String(p._id), agent] as const;
-  });
-  const agentByPolicy = new Map(agents);
-
-  return policies.map((policy): QuotaPolicyView => {
-    const id = policy.scopeId ? String(policy.scopeId) : undefined;
-    let target: QuotaPolicyTarget;
-    switch (policy.scope) {
-      case 'user': {
-        const user = id ? userById.get(id) : undefined;
-        target = user
-          ? { type: 'user', id, label: user.name || user.email || id, sublabel: user.email }
-          : { type: 'user', id, label: id, missing: true };
-        break;
-      }
-      case 'group': {
-        const group = id ? groupById.get(id) : undefined;
-        target = group
-          ? { type: 'group', id, label: group.name, ...(group.description ? { sublabel: group.description } : {}) }
-          : { type: 'group', id, label: id, missing: true };
-        break;
-      }
-      case 'token': {
-        const token = id ? tokenById.get(id) : undefined;
-        target = token
-          ? { type: 'token', id, label: token.label || id }
-          : { type: 'token', id, label: id, missing: true };
-        break;
-      }
-      case 'resource': {
-        if (policy.domain === 'agent') {
-          const agent = agentByPolicy.get(String(policy._id));
-          target = agent
-            ? { type: 'agent', id, label: agent.name || agent.key, sublabel: agent.key }
-            : { type: 'agent', id, label: id, missing: true };
-        } else {
-          target = { type: 'resource', id, label: id };
+    return policies.map((policy): QuotaPolicyView => {
+      const id = policy.scopeId ? String(policy.scopeId) : undefined;
+      let target: QuotaPolicyTarget;
+      switch (policy.scope) {
+        case 'user': {
+          const user = id ? userById.get(id) : undefined;
+          target = user
+            ? { type: 'user', id, label: user.name || user.email || id, sublabel: user.email }
+            : { type: 'user', id, label: id, missing: true };
+          break;
         }
-        break;
+        case 'group': {
+          const group = id ? groupById.get(id) : undefined;
+          target = group
+            ? { type: 'group', id, label: group.name, ...(group.description ? { sublabel: group.description } : {}) }
+            : { type: 'group', id, label: id, missing: true };
+          break;
+        }
+        case 'token': {
+          const token = id ? tokenById.get(id) : undefined;
+          target = token
+            ? { type: 'token', id, label: token.label || id }
+            : { type: 'token', id, label: id, missing: true };
+          break;
+        }
+        case 'resource': {
+          if (policy.domain === 'agent') {
+            const agent = agentByPolicy.get(String(policy._id));
+            target = agent
+              ? { type: 'agent', id, label: agent.name || agent.key, sublabel: agent.key }
+              : { type: 'agent', id, label: id, missing: true };
+          } else {
+            target = { type: 'resource', id, label: id };
+          }
+          break;
+        }
+        case 'provider':
+          target = { type: 'provider', id, label: id };
+          break;
+        case 'ip': {
+          const ranges = Array.isArray(policy.ipRanges) ? policy.ipRanges : [];
+          target = {
+            type: 'ip',
+            label: ranges.length > 1 ? `${ranges[0]} +${ranges.length - 1}` : ranges[0] ?? '',
+            sublabel: ranges.join(', '),
+          };
+          break;
+        }
+        default:
+          target = { type: 'tenant' };
       }
-      case 'provider':
-        target = { type: 'provider', id, label: id };
-        break;
-      case 'ip': {
-        const ranges = Array.isArray(policy.ipRanges) ? policy.ipRanges : [];
-        target = {
-          type: 'ip',
-          label: ranges.length > 1 ? `${ranges[0]} +${ranges.length - 1}` : ranges[0] ?? '',
-          sublabel: ranges.join(', '),
-        };
-        break;
-      }
-      default:
-        target = { type: 'tenant' };
-    }
 
-    const project = policy.projectId ? projectById.get(String(policy.projectId)) : undefined;
-    return {
-      ...policy,
-      target,
-      ...(project ? { projectName: project.name, projectKey: project.key } : {}),
-    };
+      const project = policy.projectId ? projectById.get(String(policy.projectId)) : undefined;
+      return {
+        ...policy,
+        target,
+        ...(project ? { projectName: project.name, projectKey: project.key } : {}),
+      };
+    });
   });
 }
 
@@ -436,20 +437,19 @@ export async function createQuotaPolicy(
   tenantId: string,
   payload: QuotaPolicyInput,
 ): Promise<QuotaPolicy> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const now = new Date();
+    const policy = await db.createQuotaPolicy({
+      ...payload,
+      tenantId,
+      createdAt: now,
+      updatedAt: now,
+    });
 
-  const now = new Date();
-  const policy = await db.createQuotaPolicy({
-    ...payload,
-    tenantId,
-    createdAt: now,
-    updatedAt: now,
+    await invalidatePolicyCache(tenantDbName, tenantId, payload.projectId);
+
+    return normalizePolicy(policy);
   });
-
-  await invalidatePolicyCache(tenantDbName, tenantId, payload.projectId);
-
-  return normalizePolicy(policy);
 }
 
 export async function updateQuotaPolicy(
@@ -459,19 +459,18 @@ export async function updateQuotaPolicy(
   payload: Partial<QuotaPolicyInput>,
   projectId?: string,
 ): Promise<QuotaPolicy | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const updated = await db.updateQuotaPolicy(id, tenantId, {
+      ...payload,
+      updatedAt: new Date(),
+    }, projectId);
 
-  const updated = await db.updateQuotaPolicy(id, tenantId, {
-    ...payload,
-    updatedAt: new Date(),
-  }, projectId);
+    // The policy's own project too: an edit may move it, and a tenant-wide
+    // policy (no project anywhere) must reach every project's cache.
+    await invalidatePolicyCache(tenantDbName, tenantId, projectId, payload.projectId, updated?.projectId);
 
-  // The policy's own project too: an edit may move it, and a tenant-wide
-  // policy (no project anywhere) must reach every project's cache.
-  await invalidatePolicyCache(tenantDbName, tenantId, projectId, payload.projectId, updated?.projectId);
-
-  return updated ? normalizePolicy(updated) : null;
+    return updated ? normalizePolicy(updated) : null;
+  });
 }
 
 export async function deleteQuotaPolicy(
@@ -480,13 +479,13 @@ export async function deleteQuotaPolicy(
   id: string,
   projectId?: string,
 ): Promise<boolean> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const deleted = await db.deleteQuotaPolicy(id, tenantId, projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const deleted = await db.deleteQuotaPolicy(id, tenantId, projectId);
 
-  await invalidatePolicyCache(tenantDbName, tenantId, projectId);
+    await invalidatePolicyCache(tenantDbName, tenantId, projectId);
 
-  return deleted;
+    return deleted;
+  });
 }
 
 /** The stored policy a request refers to, for the validation of a partial update. */

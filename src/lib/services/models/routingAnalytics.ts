@@ -8,7 +8,7 @@
  * decision rows never enter the sums and nothing is counted twice.
  */
 
-import { getDatabase, type IModel, type IModelUsageLog } from '@/lib/database';
+import { runWithTenantScope, type IModel, type IModelUsageLog } from '@/lib/database';
 
 export interface RoutingAnalyticsTotals {
   requests: number;
@@ -346,13 +346,13 @@ export async function getRoutingAnalytics(
   projectId: string,
   window: { from: Date; to: Date },
 ): Promise<RoutingAnalytics> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const logs = await db.listRoutedUsageLogs(
-    router.key,
-    { from: window.from, to: window.to, limit: MAX_ROWS + 1 },
-    projectId,
-  );
-  const truncated = logs.length > MAX_ROWS;
-  return summarizeRoutedUsage(truncated ? logs.slice(0, MAX_ROWS) : logs, window, truncated);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const logs = await db.listRoutedUsageLogs(
+      router.key,
+      { from: window.from, to: window.to, limit: MAX_ROWS + 1 },
+      projectId,
+    );
+    const truncated = logs.length > MAX_ROWS;
+    return summarizeRoutedUsage(truncated ? logs.slice(0, MAX_ROWS) : logs, window, truncated);
+  });
 }

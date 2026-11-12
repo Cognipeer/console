@@ -11,7 +11,10 @@ const db = vi.hoisted(() => ({
   listAgents: vi.fn(),
   listUsageDaily: vi.fn(),
 }));
-vi.mock('@/lib/database', () => ({ getDatabase: async () => db }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: async () => db,
+  runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(db),
+}));
 
 import { assignedProjectIds, getProviderUsage } from '@/lib/services/providers/providerUsage';
 

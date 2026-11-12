@@ -8,7 +8,7 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import type { DatabaseProvider } from '@/lib/database';
 
 const logger = createLogger('user-display-names');
@@ -28,23 +28,26 @@ export function displayNameOf(user: { name?: string; email?: string } | null | u
 export async function resolveUserDisplayNames(
     tenantDbName: string,
     ids: Iterable<string | null | undefined>,
-    options: { db?: Pick<DatabaseProvider, 'findUserById'> & Partial<Pick<DatabaseProvider, 'switchToTenant'>> } = {},
+    options: { db?: Pick<DatabaseProvider, 'findUserById'> } = {},
 ): Promise<Map<string, string>> {
     const unique = [...new Set([...ids].filter((id): id is string => typeof id === 'string' && id.length > 0 && !id.includes(':')))]
         .slice(0, MAX_LOOKUPS);
     const names = new Map<string, string>();
     if (unique.length === 0) return names;
     try {
-        const db = options.db ?? await getDatabase();
-        if (!options.db && typeof db.switchToTenant === 'function') await db.switchToTenant(tenantDbName);
-        await Promise.all(unique.map(async (id) => {
-            try {
-                const name = displayNameOf(await db.findUserById(id));
-                if (name) names.set(id, name);
-            } catch {
-                // not a user id (or not loadable): no name for it
-            }
-        }));
+        const lookup = async (db: Pick<DatabaseProvider, 'findUserById'>) => {
+            await Promise.all(unique.map(async (id) => {
+                try {
+                    const name = displayNameOf(await db.findUserById(id));
+                    if (name) names.set(id, name);
+                } catch {
+                    // not a user id (or not loadable): no name for it
+                }
+            }));
+        };
+        // A caller that already holds a scoped handle passes it; otherwise the lookup opens its own scope.
+        if (options.db) await lookup(options.db);
+        else await runWithTenantScope(tenantDbName, lookup);
     } catch (error) {
         logger.warn('Could not resolve user names', { error: error instanceof Error ? error.message : String(error) });
     }

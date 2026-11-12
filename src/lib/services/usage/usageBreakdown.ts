@@ -13,7 +13,7 @@
  */
 
 import { getFlowsHost } from '@/enterprise/flows';
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type { IUsageDaily } from '@/lib/database';
 
 /**
@@ -290,32 +290,31 @@ const MAX_ROLLUP_ROWS = 20_000;
 export async function getUsageBreakdown(
   options: GetUsageBreakdownOptions,
 ): Promise<UsageBreakdown> {
-  const db = await getDatabase();
-  await db.switchToTenant(options.tenantDbName);
+  return runWithTenantScope(options.tenantDbName, async (db) => {
+    const fromDay = options.from ? toUtcDay(options.from) : undefined;
+    const toDay = options.to ? toUtcDay(options.to) : undefined;
 
-  const fromDay = options.from ? toUtcDay(options.from) : undefined;
-  const toDay = options.to ? toUtcDay(options.to) : undefined;
+    const rows = await db.listUsageDaily({
+      projectId: options.projectId,
+      service: options.service,
+      refKey: options.refKey,
+      agentKey: options.agentKey,
+      fromDay,
+      toDay,
+      limit: MAX_ROLLUP_ROWS,
+    });
 
-  const rows = await db.listUsageDaily({
-    projectId: options.projectId,
-    service: options.service,
-    refKey: options.refKey,
-    agentKey: options.agentKey,
-    fromDay,
-    toDay,
-    limit: MAX_ROLLUP_ROWS,
+    const { totals, entries } = groupUsageDailyRows(rows, options.groupBy);
+    await resolveUsageEntityNames(entries, options.groupBy, options.tenantId);
+
+    return {
+      groupBy: options.groupBy,
+      fromDay,
+      toDay,
+      totals,
+      entries,
+    };
   });
-
-  const { totals, entries } = groupUsageDailyRows(rows, options.groupBy);
-  await resolveUsageEntityNames(entries, options.groupBy, options.tenantId);
-
-  return {
-    groupBy: options.groupBy,
-    fromDay,
-    toDay,
-    totals,
-    entries,
-  };
 }
 
 export interface UsageServiceBreakdownEntry {
@@ -346,33 +345,19 @@ export async function getUsageServiceBreakdown(
   ctx: { tenantDbName: string; tenantId: string; projectId?: string },
   options: { from?: Date; to?: Date } = {},
 ): Promise<UsageServiceBreakdown> {
-  const db = await getDatabase();
-  await db.switchToTenant(ctx.tenantDbName);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const fromDay = options.from ? toUtcDay(options.from) : undefined;
+    const toDay = options.to ? toUtcDay(options.to) : undefined;
 
-  const fromDay = options.from ? toUtcDay(options.from) : undefined;
-  const toDay = options.to ? toUtcDay(options.to) : undefined;
+    const rows = await db.listUsageDaily({
+      projectId: ctx.projectId,
+      fromDay,
+      toDay,
+      limit: MAX_ROLLUP_ROWS,
+    });
 
-  const rows = await db.listUsageDaily({
-    projectId: ctx.projectId,
-    fromDay,
-    toDay,
-    limit: MAX_ROLLUP_ROWS,
-  });
-
-  const byService = new Map<string, UsageServiceBreakdownEntry>();
-  const totals: UsageBreakdownTotals = {
-    requests: 0,
-    errors: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    totalTokens: 0,
-    costUsd: 0,
-  };
-
-  for (const row of rows) {
-    const service = row.service ?? '';
-    const entry = byService.get(service) ?? {
-      service,
+    const byService = new Map<string, UsageServiceBreakdownEntry>();
+    const totals: UsageBreakdownTotals = {
       requests: 0,
       errors: 0,
       inputTokens: 0,
@@ -380,22 +365,35 @@ export async function getUsageServiceBreakdown(
       totalTokens: 0,
       costUsd: 0,
     };
-    entry.requests += row.requests ?? 0;
-    entry.errors += row.errors ?? 0;
-    entry.inputTokens += row.inputTokens ?? 0;
-    entry.outputTokens += row.outputTokens ?? 0;
-    entry.totalTokens += row.totalTokens ?? 0;
-    entry.costUsd += row.costUsd ?? 0;
-    byService.set(service, entry);
 
-    totals.requests += row.requests ?? 0;
-    totals.errors += row.errors ?? 0;
-    totals.inputTokens += row.inputTokens ?? 0;
-    totals.outputTokens += row.outputTokens ?? 0;
-    totals.totalTokens += row.totalTokens ?? 0;
-    totals.costUsd += row.costUsd ?? 0;
-  }
+    for (const row of rows) {
+      const service = row.service ?? '';
+      const entry = byService.get(service) ?? {
+        service,
+        requests: 0,
+        errors: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        costUsd: 0,
+      };
+      entry.requests += row.requests ?? 0;
+      entry.errors += row.errors ?? 0;
+      entry.inputTokens += row.inputTokens ?? 0;
+      entry.outputTokens += row.outputTokens ?? 0;
+      entry.totalTokens += row.totalTokens ?? 0;
+      entry.costUsd += row.costUsd ?? 0;
+      byService.set(service, entry);
 
-  const entries = [...byService.values()].sort((a, b) => b.costUsd - a.costUsd);
-  return { fromDay, toDay, totals, entries };
+      totals.requests += row.requests ?? 0;
+      totals.errors += row.errors ?? 0;
+      totals.inputTokens += row.inputTokens ?? 0;
+      totals.outputTokens += row.outputTokens ?? 0;
+      totals.totalTokens += row.totalTokens ?? 0;
+      totals.costUsd += row.costUsd ?? 0;
+    }
+
+    const entries = [...byService.values()].sort((a, b) => b.costUsd - a.costUsd);
+    return { fromDay, toDay, totals, entries };
+  });
 }

@@ -34,7 +34,10 @@ vi.mock('next/navigation', () => ({
   notFound: () => { throw new Error('NOT_FOUND'); },
 }));
 vi.mock('@/components/layout/DashboardLayout', () => ({ default: () => null }));
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn(async () => h.db) }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: vi.fn(async () => h.db),
+  runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(h.db)),
+}));
 vi.mock('@/lib/services/support/supportHandoff', () => ({ isSupportEntryPointEnabled: () => false }));
 vi.mock('@/lib/services/users/userAuthState', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/services/users/userAuthState')>()),

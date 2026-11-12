@@ -13,7 +13,7 @@
 import bcrypt from 'bcryptjs';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { LicenseManager, type LicenseType } from '@/lib/license/license-manager';
 import { notifyTenantCreated } from '@/enterprise/tenant-lifecycle';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
@@ -66,28 +66,30 @@ export async function ensureBootstrapOrganization(): Promise<void> {
   const tenantIdStr =
     typeof tenant._id === 'string' ? tenant._id : tenant._id!.toString();
 
-  await db.switchToTenant(dbName);
-  const hashedPassword = await bcrypt.hash(bootstrapAdminPassword, BCRYPT_ROUNDS);
+  const userIdStr = await runWithTenantScope(dbName, async (tenantDb) => {
+    const hashedPassword = await bcrypt.hash(bootstrapAdminPassword, BCRYPT_ROUNDS);
 
-  const user = await db.createUser({
-    email,
-    features,
-    licenseId: licenseType,
-    name: bootstrapAdminName || 'Administrator',
-    password: hashedPassword,
-    role: 'owner',
-    tenantId: tenantIdStr,
+    const user = await tenantDb.createUser({
+      email,
+      features,
+      licenseId: licenseType,
+      name: bootstrapAdminName || 'Administrator',
+      password: hashedPassword,
+      role: 'owner',
+      tenantId: tenantIdStr,
+    });
+
+    const createdUserId =
+      typeof user._id === 'string' ? user._id : user._id!.toString();
+
+    const defaultProject = await ensureDefaultProject(dbName, tenantIdStr, createdUserId);
+    void notifyTenantCreated({ tenantId: tenantIdStr, tenantSlug: slug, tenantDbName: dbName });
+    // A new workspace starts with the default alert rules on its default project (best effort).
+    if (defaultProject?._id && defaultAlertRulesOnCreate()) {
+      await seedDefaultAlertRules(dbName, tenantIdStr, String(defaultProject._id), createdUserId);
+    }
+    return createdUserId;
   });
-
-  const userIdStr =
-    typeof user._id === 'string' ? user._id : user._id!.toString();
-
-  const defaultProject = await ensureDefaultProject(dbName, tenantIdStr, userIdStr);
-  void notifyTenantCreated({ tenantId: tenantIdStr, tenantSlug: slug, tenantDbName: dbName });
-  // A new workspace starts with the default alert rules on its default project (best effort).
-  if (defaultProject?._id && defaultAlertRulesOnCreate()) {
-    await seedDefaultAlertRules(dbName, tenantIdStr, String(defaultProject._id), userIdStr);
-  }
   await db.updateTenant(tenantIdStr, { ownerId: userIdStr });
   await db.registerUserInDirectory({
     email,

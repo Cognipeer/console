@@ -13,7 +13,13 @@ const h = vi.hoisted(() => ({
   ensureDefaultProject: vi.fn(),
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(await getDatabase())),
+  };
+});
 vi.mock('bcryptjs', () => ({
   default: { hash: vi.fn().mockResolvedValue('$2a$10$hashed') },
   hash: vi.fn().mockResolvedValue('$2a$10$hashed'),

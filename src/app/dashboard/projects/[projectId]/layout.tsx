@@ -1,6 +1,6 @@
 import { notFound, redirect } from 'next/navigation';
 import { getCurrentIdentity } from '@/lib/auth/serverIdentity';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import { findGroupProjectMembership } from '@/lib/services/projects/accessibleProjects';
 
 export default async function ProjectLayout({
@@ -27,27 +27,33 @@ export default async function ProjectLayout({
     return children;
   }
 
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  // A server component has no request-level tenant scope, so the tenant reads open their own.
+  const access = await runWithTenantScope(tenantDbName, async (db) => {
+    const project = await db.findProjectById(projectId);
+    if (!project || String(project.tenantId) !== String(tenantId)) {
+      return 'missing' as const;
+    }
 
-  const project = await db.findProjectById(projectId);
-  if (!project || String(project.tenantId) !== String(tenantId)) {
-    notFound();
-  }
+    const membership = await db.findUserProject(userId, projectId);
+    if (membership) {
+      return 'allowed' as const;
+    }
 
-  const membership = await db.findUserProject(userId, projectId);
-  if (membership) {
-    return children;
-  }
+    const user = await db.findUserById(userId);
+    const legacyAllowed = (user?.projectIds ?? []).map(String).includes(String(projectId));
+    if (legacyAllowed) {
+      return 'allowed' as const;
+    }
 
-  const user = await db.findUserById(userId);
-  const legacyAllowed = (user?.projectIds ?? []).map(String).includes(String(projectId));
-  if (legacyAllowed) {
-    return children;
-  }
+    // A project reached only through a group the member belongs to is still theirs.
+    if (await findGroupProjectMembership(db, userId, projectId)) {
+      return 'allowed' as const;
+    }
 
-  // A project reached only through a group the member belongs to is still theirs.
-  if (await findGroupProjectMembership(db, userId, projectId)) {
+    return 'missing' as const;
+  });
+
+  if (access === 'allowed') {
     return children;
   }
 

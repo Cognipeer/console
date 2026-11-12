@@ -8,7 +8,11 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 vi.mock('@/lib/database', async (importOriginal) => {
   const original = await importOriginal<typeof import('@/lib/database')>();
-  return { ...original, getDatabase: vi.fn().mockRejectedValue(new Error('no db in unit tests')) };
+  return {
+    ...original,
+    getDatabase: vi.fn().mockRejectedValue(new Error('no db in unit tests')),
+    runWithTenantScope: vi.fn().mockRejectedValue(new Error('no db in unit tests')),
+  };
 });
 
 import {
