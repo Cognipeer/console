@@ -3,9 +3,11 @@
  *
  * Real SQLite provider. Every public function binds its tenant for its whole
  * body (`runWithTenantScope`), so interleaved calls for different tenants each
- * read and write their own tenant database and never the other one's.
+ * read and write their own tenant database and never the other one's. They never
+ * move the shared handle (`switchToTenant`); reverting the services to a bare
+ * switch fails both cases.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -16,7 +18,7 @@ process.env.SQLITE_DATA_DIR = tmpRoot;
 process.env.MAIN_DB_NAME = 'guardrail_scope_main';
 
 import { reloadConfig } from '@/lib/core/config';
-import { disconnectDatabase, getDatabase } from '@/lib/database';
+import { disconnectDatabase, getDatabase, type DatabaseProvider } from '@/lib/database';
 import {
   createGuardrail,
   getGuardrailByKey,
@@ -34,9 +36,11 @@ const TENANTS = [
 ] as const;
 const ROUNDS = 6;
 
+let db: DatabaseProvider;
+
 beforeAll(async () => {
   reloadConfig();
-  const db = await getDatabase();
+  db = await getDatabase();
   for (const tenant of TENANTS) {
     await db.createTenant({
       companyName: tenant.slug,
@@ -48,6 +52,10 @@ beforeAll(async () => {
   }
 }, 60_000);
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 afterAll(async () => {
   await disconnectDatabase();
   rmSync(tmpRoot, { recursive: true, force: true });
@@ -55,6 +63,7 @@ afterAll(async () => {
 
 describe('guardrail services keep two tenants apart under concurrency', () => {
   it('writes and reads guardrails interleaved across tenants without crossing', async () => {
+    const switches = vi.spyOn(db, 'switchToTenant');
     await Promise.all(
       Array.from({ length: ROUNDS }, (_, round) =>
         TENANTS.map((tenant) =>
@@ -86,9 +95,11 @@ describe('guardrail services keep two tenants apart under concurrency', () => {
     expect(aRow?.tenantId).toBe('tenant-a');
     expect(bRow?.tenantId).toBe('tenant-b');
     expect(await getGuardrailByKey(TENANTS[0].dbName, `${TENANTS[1].slug}-guardrail-0`)).toBeNull();
+    expect(switches).not.toHaveBeenCalled();
   });
 
   it('resolves the same word-list key to each tenant\'s own words', async () => {
+    const switches = vi.spyOn(db, 'switchToTenant');
     await Promise.all(
       TENANTS.map((tenant) =>
         createWordList(tenant.dbName, tenant.id, 'user', {
@@ -113,5 +124,6 @@ describe('guardrail services keep two tenants apart under concurrency', () => {
       expect(summaries).toHaveLength(1);
       expect(summaries[0].tenantId).toBe(tenant.id);
     }
+    expect(switches).not.toHaveBeenCalled();
   });
 });
