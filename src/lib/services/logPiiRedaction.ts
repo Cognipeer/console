@@ -19,9 +19,79 @@
  * design later — not the default for every usage log row.
  */
 
+import { createHash } from 'node:crypto';
 import { redactPii } from '@/lib/services/pii/piiService';
 
 const MAX_DEPTH = 8;
+
+// ── Work the detector does not need to repeat ─────────────────────────────
+
+/** Below this a string cannot hold any category the detector finds (the shortest is `a@b.c`, five characters). */
+const MIN_SCANNED_LENGTH = 4;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** A hash or an object id: 16+ hex digits holding at least one letter. All-digit strings are NOT skipped: a card or phone number is one. */
+const HEX_ID_PATTERN = /^(?=[0-9a-f]*[a-f])[0-9a-f]{16,}$/i;
+
+/** True for strings that carry nothing the detector looks for: too short, or an identifier. */
+function needsNoScan(str: string): boolean {
+  return str.length < MIN_SCANNED_LENGTH || UUID_PATTERN.test(str) || HEX_ID_PATTERN.test(str);
+}
+
+/**
+ * Results by exact string content. An agent step logs the whole conversation so far, so most strings of a payload were
+ * already scanned for the previous step; the detector's answer for a string never depends on anything but the string.
+ * Bounded LRU: a hit moves the entry to the end, the first key is the least recently used.
+ */
+const MEMO_MAX_ENTRIES = 2000;
+/** Upper bound on the characters the memo holds (redacted values and inline keys), about 16 MB of UTF-16. */
+const MEMO_MAX_CHARS = 8_000_000;
+/** A redacted value larger than this is not kept: one long document must not push out the rest of the history. */
+const MEMO_MAX_VALUE_CHARS = 500_000;
+/** Strings shorter than this are their own key; longer ones are keyed by digest so the map does not hold a copy. */
+const MEMO_INLINE_KEY_CHARS = 256;
+/** The value of a string the detector left as it was: nothing to store beside the key. */
+const UNCHANGED = null;
+const memo = new Map<string, string | typeof UNCHANGED>();
+let memoChars = 0;
+
+/** The prefixes keep the two kinds of key apart: no short string can spell a digest key. */
+function memoKeyOf(str: string): string {
+  return str.length < MEMO_INLINE_KEY_CHARS ? `s:${str}` : `h:${createHash('sha256').update(str).digest('hex')}`;
+}
+
+function memoEntryChars(key: string, value: string | typeof UNCHANGED): number {
+  return key.length + (value === UNCHANGED ? 0 : value.length);
+}
+
+function memoDelete(key: string): void {
+  const value = memo.get(key);
+  if (value === undefined) return;
+  memo.delete(key);
+  memoChars -= memoEntryChars(key, value);
+}
+
+function memoStore(key: string, value: string | typeof UNCHANGED): void {
+  if (value !== UNCHANGED && value.length > MEMO_MAX_VALUE_CHARS) return;
+  memoDelete(key);
+  memo.set(key, value);
+  memoChars += memoEntryChars(key, value);
+  while (memo.size > MEMO_MAX_ENTRIES || memoChars > MEMO_MAX_CHARS) {
+    const oldest = memo.keys().next().value;
+    if (oldest === undefined) break;
+    memoDelete(oldest);
+  }
+}
+
+/** Test only. */
+export function clearLogPiiMemoForTests(): void {
+  memo.clear();
+  memoChars = 0;
+}
+
+/** Test only. */
+export function logPiiMemoStatsForTests(): { entries: number; chars: number } {
+  return { entries: memo.size, chars: memoChars };
+}
 
 async function scrubPiiValue(value: unknown, depth: number, seen: WeakSet<object>): Promise<unknown> {
   if (value === null || value === undefined) return value;
@@ -61,8 +131,19 @@ export async function redactPiiFromLogPayload<T>(payload: T): Promise<T> {
 /** Same scan, for a single free-text field (e.g. an error message). */
 export async function redactPiiFromLogString(str: string | undefined): Promise<string | undefined> {
   if (!str) return str;
+  if (needsNoScan(str)) return str;
+  const memoKey = memoKeyOf(str);
+  const known = memo.get(memoKey);
+  if (known !== undefined) {
+    // Re-inserting moves the key to the end: the Map's first key is the least recently used.
+    memo.delete(memoKey);
+    memo.set(memoKey, known);
+    return known === UNCHANGED ? str : known;
+  }
   try {
-    return (await redactPii({ text: str })).outputText;
+    const redacted = (await redactPii({ text: str })).outputText;
+    memoStore(memoKey, redacted === str ? UNCHANGED : redacted);
+    return redacted;
   } catch {
     // A detector failure must never block or corrupt the write path --
     // fall back to the untouched string rather than throw.

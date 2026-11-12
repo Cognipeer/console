@@ -1,5 +1,5 @@
 import {
-  getDatabase,
+  runWithTenantScope,
   IModel,
   IModelPricing,
   IModelUsageLog,
@@ -207,9 +207,6 @@ export async function logModelUsage(
     costOverride?: UsageCostResult;
   },
 ) {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-
   const usage = payload.usage;
   // reasoningTokens is a SUBSET of outputTokens (e.g. OpenAI
   // `completion_tokens_details.reasoning_tokens`) — recorded below for
@@ -305,7 +302,9 @@ export async function logModelUsage(
     redactPiiFromLogString(redactLogString(payload.errorMessage)),
   ]);
 
-  await db.createModelUsageLog({
+  // The only database work of this function; everything above opens its own scope (or needs none), including the
+  // fire-and-forget routing write.
+  await runWithTenantScope(tenantDbName, (db) => db.createModelUsageLog({
     userId: attribution.userId,
     apiTokenId: attribution.apiTokenId,
     actorType: attribution.actorType,
@@ -339,7 +338,7 @@ export async function logModelUsage(
     ...(payload.channel ? { channel: payload.channel } : {}),
     ...runColumns(payload.run),
     ...(kbRestricted.length > 0 ? { kbRestricted } : {}),
-  });
+  }));
 }
 
 /** The run attribution's string fields, as row columns. */

@@ -15,7 +15,10 @@ const hoisted = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: async () => hoisted.db }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: async () => hoisted.db,
+  runWithTenantScope: async (_tenant: string, fn: (db: unknown) => unknown) => fn(hoisted.db),
+}));
 // Readable stand-ins for the sealed blob: `enc:<json>`; anything else cannot be opened (a rotated key).
 vi.mock('@/lib/utils/crypto', () => ({
   encryptObject: vi.fn((value: unknown) => `enc:${JSON.stringify(value)}`),

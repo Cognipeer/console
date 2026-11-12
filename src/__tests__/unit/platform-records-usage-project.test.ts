@@ -10,7 +10,10 @@ const hoisted = vi.hoisted(() => ({
   events: [] as Array<Record<string, unknown>>,
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: async () => hoisted.db }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: async () => hoisted.db,
+  runWithTenantScope: async (_tenant: string, fn: (db: unknown) => unknown) => fn(hoisted.db),
+}));
 vi.mock('@/lib/services/entityMetrics/entityMetricsRollup', () => ({ recordEntityMetric: hoisted.recordEntityMetric }));
 vi.mock('@/lib/services/usage/usageEvents', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/services/usage/usageEvents')>();

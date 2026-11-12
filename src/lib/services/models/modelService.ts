@@ -2,7 +2,7 @@ import slugify from 'slugify';
 import { createLogger } from '@/lib/core/logger';
 import { getCache } from '@/lib/core/cache';
 import {
-  getDatabase,
+  runWithTenantScope,
   IDynamicRoutingConfig,
   IDynamicRoutingGuards,
   IDynamicRoutingTarget,
@@ -177,9 +177,9 @@ export async function listModels(
   projectId: string,
   filters?: { category?: ModelCategory; providerKey?: string; providerDriver?: string },
 ): Promise<IModel[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.listModels({ ...filters, projectId });
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.listModels({ ...filters, projectId });
+  });
 }
 
 async function generateUniqueKey(
@@ -187,27 +187,27 @@ async function generateUniqueKey(
   projectId: string,
   desiredKey: string,
 ): Promise<string> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
 
-  const base = normalizeKeyCandidate(desiredKey);
-  // Reserved: a tenant model under it would shadow a platform model of that name and re-run platform seeding.
-  if (base.startsWith(PLATFORM_MODEL_KEY_PREFIX)) {
-    throw new ModelCapabilityValidationError(`Model keys starting with "${PLATFORM_MODEL_KEY_PREFIX}" are reserved for platform models.`);
-  }
-  let attempt = 0;
-  let candidate = base;
-
-  while (attempt < MAX_KEY_ATTEMPTS) {
-    const existing = await db.findModelByKey(candidate, projectId);
-    if (!existing) {
-      return candidate;
+    const base = normalizeKeyCandidate(desiredKey);
+    // Reserved: a tenant model under it would shadow a platform model of that name and re-run platform seeding.
+    if (base.startsWith(PLATFORM_MODEL_KEY_PREFIX)) {
+      throw new ModelCapabilityValidationError(`Model keys starting with "${PLATFORM_MODEL_KEY_PREFIX}" are reserved for platform models.`);
     }
-    attempt += 1;
-    candidate = `${base}-${attempt + 1}`;
-  }
+    let attempt = 0;
+    let candidate = base;
 
-  throw new Error('Could not generate unique model key');
+    while (attempt < MAX_KEY_ATTEMPTS) {
+      const existing = await db.findModelByKey(candidate, projectId);
+      if (!existing) {
+        return candidate;
+      }
+      attempt += 1;
+      candidate = `${base}-${attempt + 1}`;
+    }
+
+    throw new Error('Could not generate unique model key');
+  });
 }
 
 function assertUpstreamApi(settings: unknown, driver: string | undefined): void {
@@ -227,62 +227,62 @@ export async function createModel(
   userId: string,
   payload: CreateModelInput,
 ): Promise<IModel> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
 
-  const provider = await requireModelProvider(
-    tenantDbName,
-    tenantId,
-    payload.providerKey,
-    projectId,
-  );
+    const provider = await requireModelProvider(
+      tenantDbName,
+      tenantId,
+      payload.providerKey,
+      projectId,
+    );
 
-  if (provider.platform || isManagedProviderRecord(provider)) {
-    throw new PlatformRecordReadOnlyError('Models cannot be added to a platform provider.');
-  }
+    if (provider.platform || isManagedProviderRecord(provider)) {
+      throw new PlatformRecordReadOnlyError('Models cannot be added to a platform provider.');
+    }
 
-  ensureProviderSupportsCategory(provider, payload.category);
-  assertUpstreamApi(payload.settings, provider.driver);
-  assertPromptCaching(payload.settings);
-  validateSettingsDynamicConfig(payload.settings);
-  const createDynamic = settingsDynamicConfig(payload.settings);
-  if (createDynamic) {
-    await validateDynamicConfigReferences(tenantDbName, projectId, createDynamic, payload.key);
-  }
+    ensureProviderSupportsCategory(provider, payload.category);
+    assertUpstreamApi(payload.settings, provider.driver);
+    assertPromptCaching(payload.settings);
+    validateSettingsDynamicConfig(payload.settings);
+    const createDynamic = settingsDynamicConfig(payload.settings);
+    if (createDynamic) {
+      await validateDynamicConfigReferences(tenantDbName, projectId, createDynamic, payload.key);
+    }
 
-  // A key the caller named is theirs to keep: a clash is a 409. A key derived from the name is suffixed (-2, -3 ...).
-  const namedKey = payload.key?.trim();
-  if (namedKey && await db.findModelByKey(normalizeKeyCandidate(namedKey), projectId)) {
-    throw new ModelKeyConflictError(normalizeKeyCandidate(namedKey));
-  }
-  const keyCandidate = namedKey || payload.name;
-  const key = await generateUniqueKey(tenantDbName, projectId, keyCandidate);
+    // A key the caller named is theirs to keep: a clash is a 409. A key derived from the name is suffixed (-2, -3 ...).
+    const namedKey = payload.key?.trim();
+    if (namedKey && await db.findModelByKey(normalizeKeyCandidate(namedKey), projectId)) {
+      throw new ModelKeyConflictError(normalizeKeyCandidate(namedKey));
+    }
+    const keyCandidate = namedKey || payload.name;
+    const key = await generateUniqueKey(tenantDbName, projectId, keyCandidate);
 
-  const newModel: Omit<IModel, '_id' | 'createdAt' | 'updatedAt'> = {
-    tenantId,
-    projectId,
-    name: payload.name,
-    description: payload.description,
-    key,
-    providerKey: provider.key,
-    providerDriver: provider.driver,
-    category: payload.category,
-    modelId: payload.modelId,
-    pricing: ensureCurrency(payload.pricing),
-    settings: payload.settings,
-    isMultimodal: payload.isMultimodal ?? false,
-    supportsToolCalls:
-      payload.supportsToolCalls ??
-      Boolean(provider.driverCapabilities?.['model.supports.tool_calls']),
-    metadata: applyModelCapabilityOverrides(payload.metadata, payload.capabilities),
-    createdBy: userId,
-    updatedBy: userId,
-  };
+    const newModel: Omit<IModel, '_id' | 'createdAt' | 'updatedAt'> = {
+      tenantId,
+      projectId,
+      name: payload.name,
+      description: payload.description,
+      key,
+      providerKey: provider.key,
+      providerDriver: provider.driver,
+      category: payload.category,
+      modelId: payload.modelId,
+      pricing: ensureCurrency(payload.pricing),
+      settings: payload.settings,
+      isMultimodal: payload.isMultimodal ?? false,
+      supportsToolCalls:
+        payload.supportsToolCalls ??
+        Boolean(provider.driverCapabilities?.['model.supports.tool_calls']),
+      metadata: applyModelCapabilityOverrides(payload.metadata, payload.capabilities),
+      createdBy: userId,
+      updatedBy: userId,
+    };
 
-  const created = await db.createModel(newModel);
-  // The gateway caches 'not priced' (null) entries; drop them for the new key.
-  await invalidateModelMetaCache(tenantDbName, projectId, [created.key]);
-  return created;
+    const created = await db.createModel(newModel);
+    // The gateway caches 'not priced' (null) entries; drop them for the new key.
+    await invalidateModelMetaCache(tenantDbName, projectId, [created.key]);
+    return created;
+  });
 }
 
 // ── Dynamic LLM models ──────────────────────────────────────────────────────
@@ -529,46 +529,46 @@ export async function validateDynamicConfigReferences(
   previous?: IDynamicRoutingConfig,
 ): Promise<void> {
   const keys = new Set(configModelKeys(config));
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const missing: string[] = [];
-  for (const key of keys) {
-    if (selfKey && key === selfKey) {
-      throw new Error(`A Dynamic LLM cannot route to itself ("${key}")`);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const missing: string[] = [];
+    for (const key of keys) {
+      if (selfKey && key === selfKey) {
+        throw new Error(`A Dynamic LLM cannot route to itself ("${key}")`);
+      }
+      const model = await db.findModelByKey(key, projectId);
+      if (!model) {
+        missing.push(key);
+      } else if (model.category !== 'llm') {
+        throw new Error(`"${key}" is not an LLM model and cannot be a routing target`);
+      }
     }
-    const model = await db.findModelByKey(key, projectId);
-    if (!model) {
-      missing.push(key);
-    } else if (model.category !== 'llm') {
-      throw new Error(`"${key}" is not an LLM model and cannot be a routing target`);
+    // Deciders and the complexity scorer are decision models. A chat (`llm`)
+    // decider is the pre-decision-model form: allowed only while it is the very
+    // decider the config already had.
+    const roles: Array<{ key?: string; what: string; allowLegacyLlm: boolean }> = [
+      {
+        key: config.decider?.modelKey,
+        what: 'decider',
+        allowLegacyLlm: Boolean(previous?.decider && previous.decider.modelKey === config.decider?.modelKey),
+      },
+      { key: config.complexity?.modelKey, what: 'complexity scorer', allowLegacyLlm: false },
+    ];
+    for (const { key, what, allowLegacyLlm } of roles) {
+      if (!key) continue;
+      if (selfKey && key === selfKey) throw new Error(`A Dynamic LLM cannot route to itself ("${key}")`);
+      const model = await db.findModelByKey(key, projectId);
+      if (!model) {
+        missing.push(key);
+      } else if (model.category === 'decision') {
+        continue;
+      } else if (!(allowLegacyLlm && model.category === 'llm')) {
+        throw new Error(`"${key}" is not a decision model and cannot be the ${what}`);
+      }
     }
-  }
-  // Deciders and the complexity scorer are decision models. A chat (`llm`)
-  // decider is the pre-decision-model form: allowed only while it is the very
-  // decider the config already had.
-  const roles: Array<{ key?: string; what: string; allowLegacyLlm: boolean }> = [
-    {
-      key: config.decider?.modelKey,
-      what: 'decider',
-      allowLegacyLlm: Boolean(previous?.decider && previous.decider.modelKey === config.decider?.modelKey),
-    },
-    { key: config.complexity?.modelKey, what: 'complexity scorer', allowLegacyLlm: false },
-  ];
-  for (const { key, what, allowLegacyLlm } of roles) {
-    if (!key) continue;
-    if (selfKey && key === selfKey) throw new Error(`A Dynamic LLM cannot route to itself ("${key}")`);
-    const model = await db.findModelByKey(key, projectId);
-    if (!model) {
-      missing.push(key);
-    } else if (model.category === 'decision') {
-      continue;
-    } else if (!(allowLegacyLlm && model.category === 'llm')) {
-      throw new Error(`"${key}" is not a decision model and cannot be the ${what}`);
+    if (missing.length > 0) {
+      throw new Error(`Unknown model key${missing.length > 1 ? 's' : ''} in routing config: ${missing.join(', ')}`);
     }
-  }
-  if (missing.length > 0) {
-    throw new Error(`Unknown model key${missing.length > 1 ? 's' : ''} in routing config: ${missing.join(', ')}`);
-  }
+  });
 }
 
 function settingsDynamicConfig(settings: Record<string, unknown> | undefined): IDynamicRoutingConfig | undefined {
@@ -593,33 +593,33 @@ export async function createDynamicModel(
 ): Promise<IModel> {
   validateDynamicConfig(payload.dynamic);
 
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
 
-  const keyCandidate = payload.key || payload.name;
-  const key = await generateUniqueKey(tenantDbName, projectId, keyCandidate);
-  await validateDynamicConfigReferences(tenantDbName, projectId, payload.dynamic, key);
+    const keyCandidate = payload.key || payload.name;
+    const key = await generateUniqueKey(tenantDbName, projectId, keyCandidate);
+    await validateDynamicConfigReferences(tenantDbName, projectId, payload.dynamic, key);
 
-  const newModel: Omit<IModel, '_id' | 'createdAt' | 'updatedAt'> = {
-    tenantId,
-    projectId,
-    name: payload.name,
-    description: payload.description,
-    key,
-    providerKey: DYNAMIC_PROVIDER_KEY,
-    providerDriver: DYNAMIC_PROVIDER_KEY,
-    category: 'llm',
-    modelId: 'dynamic-router',
-    pricing: { currency: 'USD', inputTokenPer1M: 0, outputTokenPer1M: 0 },
-    settings: { dynamic: payload.dynamic },
-    isMultimodal: false,
-    supportsToolCalls: true,
-    metadata: payload.metadata || {},
-    createdBy: userId,
-    updatedBy: userId,
-  };
+    const newModel: Omit<IModel, '_id' | 'createdAt' | 'updatedAt'> = {
+      tenantId,
+      projectId,
+      name: payload.name,
+      description: payload.description,
+      key,
+      providerKey: DYNAMIC_PROVIDER_KEY,
+      providerDriver: DYNAMIC_PROVIDER_KEY,
+      category: 'llm',
+      modelId: 'dynamic-router',
+      pricing: { currency: 'USD', inputTokenPer1M: 0, outputTokenPer1M: 0 },
+      settings: { dynamic: payload.dynamic },
+      isMultimodal: false,
+      supportsToolCalls: true,
+      metadata: payload.metadata || {},
+      createdBy: userId,
+      updatedBy: userId,
+    };
 
-  return db.createModel(newModel);
+    return db.createModel(newModel);
+  });
 }
 
 export async function updateModel(
@@ -629,105 +629,105 @@ export async function updateModel(
   updates: UpdateModelInput,
   userId?: string,
 ): Promise<IModel | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
 
-  const existing = await db.findModelById(modelId, projectId);
-  if (!existing) {
-    return null;
-  }
-  if (existing.platform) throw new PlatformRecordReadOnlyError();
-
-  const { capabilities, ...modelUpdates } = updates;
-  const updatePayload: UpdateModelInput & { updatedBy?: string } = { ...modelUpdates };
-  // Tenant-wide is set by the deployment only: never taken from a caller's payload.
-  delete (updatePayload as { platform?: unknown }).platform;
-  if (capabilities !== undefined) {
-    updatePayload.metadata = applyModelCapabilityOverrides(
-      updates.metadata ?? existing.metadata,
-      capabilities,
-    );
-  }
-  if (updates.pricing) {
-    updatePayload.pricing = ensureCurrency(updates.pricing);
-  }
-
-  if (updates.key && updates.key !== existing.key) {
-    updatePayload.key = await generateUniqueKey(tenantDbName, projectId, updates.key);
-  }
-
-  if (updates.providerKey && updates.providerKey !== existing.providerKey) {
-    const provider = await requireModelProvider(
-      tenantDbName,
-      existing.tenantId,
-      updates.providerKey,
-      projectId,
-    );
-
-    if (provider.platform || isManagedProviderRecord(provider)) {
-      throw new PlatformRecordReadOnlyError('Models cannot be added to a platform provider.');
+    const existing = await db.findModelById(modelId, projectId);
+    if (!existing) {
+      return null;
     }
-    ensureProviderSupportsCategory(provider, updates.category ?? existing.category);
+    if (existing.platform) throw new PlatformRecordReadOnlyError();
 
-    updatePayload.providerKey = provider.key;
-    updatePayload.providerDriver = provider.driver;
-    updatePayload.supportsToolCalls =
-      updates.supportsToolCalls ??
-      Boolean(provider.driverCapabilities?.['model.supports.tool_calls']);
-  }
+    const { capabilities, ...modelUpdates } = updates;
+    const updatePayload: UpdateModelInput & { updatedBy?: string } = { ...modelUpdates };
+    // Tenant-wide is set by the deployment only: never taken from a caller's payload.
+    delete (updatePayload as { platform?: unknown }).platform;
+    if (capabilities !== undefined) {
+      updatePayload.metadata = applyModelCapabilityOverrides(
+        updates.metadata ?? existing.metadata,
+        capabilities,
+      );
+    }
+    if (updates.pricing) {
+      updatePayload.pricing = ensureCurrency(updates.pricing);
+    }
 
-  // A replica names a provider by key; it must not route a tenant model onto a platform provider.
-  if (Array.isArray(updatePayload.replicas)) {
-    for (const replica of updatePayload.replicas) {
-      if (!replica?.providerKey || replica.providerKey === existing.providerKey) continue;
-      const target = await getProviderConfigByKey(
+    if (updates.key && updates.key !== existing.key) {
+      updatePayload.key = await generateUniqueKey(tenantDbName, projectId, updates.key);
+    }
+
+    if (updates.providerKey && updates.providerKey !== existing.providerKey) {
+      const provider = await requireModelProvider(
         tenantDbName,
         existing.tenantId,
-        replica.providerKey,
+        updates.providerKey,
         projectId,
       );
-      if (target && (target.platform || isManagedProviderRecord(target))) {
-        throw new PlatformRecordReadOnlyError('Replicas cannot use a platform provider.');
+
+      if (provider.platform || isManagedProviderRecord(provider)) {
+        throw new PlatformRecordReadOnlyError('Models cannot be added to a platform provider.');
+      }
+      ensureProviderSupportsCategory(provider, updates.category ?? existing.category);
+
+      updatePayload.providerKey = provider.key;
+      updatePayload.providerDriver = provider.driver;
+      updatePayload.supportsToolCalls =
+        updates.supportsToolCalls ??
+        Boolean(provider.driverCapabilities?.['model.supports.tool_calls']);
+    }
+
+    // A replica names a provider by key; it must not route a tenant model onto a platform provider.
+    if (Array.isArray(updatePayload.replicas)) {
+      for (const replica of updatePayload.replicas) {
+        if (!replica?.providerKey || replica.providerKey === existing.providerKey) continue;
+        const target = await getProviderConfigByKey(
+          tenantDbName,
+          existing.tenantId,
+          replica.providerKey,
+          projectId,
+        );
+        if (target && (target.platform || isManagedProviderRecord(target))) {
+          throw new PlatformRecordReadOnlyError('Replicas cannot use a platform provider.');
+        }
       }
     }
-  }
 
-  if (userId) {
-    updatePayload.updatedBy = userId;
-  }
+    if (userId) {
+      updatePayload.updatedBy = userId;
+    }
 
-  // Checked when the settings or the provider change: the saved value has to
-  // stay legal for the driver that will serve it.
-  if (updatePayload.settings !== undefined || updatePayload.providerDriver !== undefined) {
-    assertUpstreamApi(
-      updatePayload.settings ?? existing.settings,
-      updatePayload.providerDriver ?? existing.providerDriver,
-    );
-  }
-
-  if (updatePayload.settings !== undefined) assertPromptCaching(updatePayload.settings);
-
-  // `updates.settings` may attach a brand-new `dynamic` config or (via a
-  // caller's shallow merge, e.g. the `PUT /models/:id` route) wholesale
-  // replace an existing one — validate whatever is about to be persisted
-  // here, the single place every `updateModel` caller funnels through.
-  if (updatePayload.settings !== undefined) {
-    validateSettingsDynamicConfig(updatePayload.settings);
-    const updateDynamic = settingsDynamicConfig(updatePayload.settings);
-    if (updateDynamic) {
-      await validateDynamicConfigReferences(
-        tenantDbName,
-        projectId,
-        updateDynamic,
-        updatePayload.key ?? existing.key,
-        settingsDynamicConfig(existing.settings),
+    // Checked when the settings or the provider change: the saved value has to
+    // stay legal for the driver that will serve it.
+    if (updatePayload.settings !== undefined || updatePayload.providerDriver !== undefined) {
+      assertUpstreamApi(
+        updatePayload.settings ?? existing.settings,
+        updatePayload.providerDriver ?? existing.providerDriver,
       );
     }
-  }
 
-  const updated = await db.updateModel(modelId, updatePayload as Partial<IModel>);
-  await invalidateModelMetaCache(tenantDbName, projectId, [existing.key, updated?.key]);
-  return updated;
+    if (updatePayload.settings !== undefined) assertPromptCaching(updatePayload.settings);
+
+    // `updates.settings` may attach a brand-new `dynamic` config or (via a
+    // caller's shallow merge, e.g. the `PUT /models/:id` route) wholesale
+    // replace an existing one — validate whatever is about to be persisted
+    // here, the single place every `updateModel` caller funnels through.
+    if (updatePayload.settings !== undefined) {
+      validateSettingsDynamicConfig(updatePayload.settings);
+      const updateDynamic = settingsDynamicConfig(updatePayload.settings);
+      if (updateDynamic) {
+        await validateDynamicConfigReferences(
+          tenantDbName,
+          projectId,
+          updateDynamic,
+          updatePayload.key ?? existing.key,
+          settingsDynamicConfig(existing.settings),
+        );
+      }
+    }
+
+    const updated = await db.updateModel(modelId, updatePayload as Partial<IModel>);
+    await invalidateModelMetaCache(tenantDbName, projectId, [existing.key, updated?.key]);
+    return updated;
+  });
 }
 
 export async function deleteModel(
@@ -735,16 +735,16 @@ export async function deleteModel(
   projectId: string,
   modelId: string,
 ): Promise<boolean> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const existing = await db.findModelById(modelId, projectId);
-  if (!existing) {
-    return false;
-  }
-  if (existing.platform) throw new PlatformRecordReadOnlyError();
-  const deleted = await db.deleteModel(modelId);
-  await invalidateModelMetaCache(tenantDbName, projectId, [existing.key]);
-  return deleted;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const existing = await db.findModelById(modelId, projectId);
+    if (!existing) {
+      return false;
+    }
+    if (existing.platform) throw new PlatformRecordReadOnlyError();
+    const deleted = await db.deleteModel(modelId);
+    await invalidateModelMetaCache(tenantDbName, projectId, [existing.key]);
+    return deleted;
+  });
 }
 
 function providerAssignedTo(config: { projectId?: unknown; projectIds?: unknown }, projectId: string): boolean {
@@ -765,46 +765,46 @@ export async function addPlatformModelsToProject(
   actor?: string,
 ): Promise<string[]> {
   const wanted = [...new Set(keys.map((k) => String(k).trim()).filter(Boolean))];
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const platformModels = (await db.listModels({})).filter((m) => m.platform && m.tenantId === tenantId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const platformModels = (await db.listModels({})).filter((m) => m.platform && m.tenantId === tenantId);
 
-  const targets: IModel[] = [];
-  const assignment = new Map<string, boolean>();
-  for (const key of wanted) {
-    const model = platformModels.find((m) => m.key === key);
-    if (!model) {
-      throw new PlatformModelSelectionError('platform_model_not_found', 'Model not found.', 404, key);
+    const targets: IModel[] = [];
+    const assignment = new Map<string, boolean>();
+    for (const key of wanted) {
+      const model = platformModels.find((m) => m.key === key);
+      if (!model) {
+        throw new PlatformModelSelectionError('platform_model_not_found', 'Model not found.', 404, key);
+      }
+      if (!assignment.has(model.providerKey)) {
+        const provider = await getProviderConfigByKey(tenantDbName, tenantId, model.providerKey);
+        assignment.set(
+          model.providerKey,
+          Boolean(provider?.platform && provider.tenantId === tenantId && providerAssignedTo(provider, projectId)),
+        );
+      }
+      if (!assignment.get(model.providerKey)) {
+        throw new PlatformModelSelectionError(
+          'provider_not_in_project',
+          'Make the provider available in this project first.',
+          409,
+          key,
+        );
+      }
+      if (model.metadata?.inactive === true) {
+        throw new PlatformModelSelectionError('model_unavailable', 'This model is not available.', 409, key);
+      }
+      targets.push(model);
     }
-    if (!assignment.has(model.providerKey)) {
-      const provider = await getProviderConfigByKey(tenantDbName, tenantId, model.providerKey);
-      assignment.set(
-        model.providerKey,
-        Boolean(provider?.platform && provider.tenantId === tenantId && providerAssignedTo(provider, projectId)),
-      );
-    }
-    if (!assignment.get(model.providerKey)) {
-      throw new PlatformModelSelectionError(
-        'provider_not_in_project',
-        'Make the provider available in this project first.',
-        409,
-        key,
-      );
-    }
-    if (model.metadata?.inactive === true) {
-      throw new PlatformModelSelectionError('model_unavailable', 'This model is not available.', 409, key);
-    }
-    targets.push(model);
-  }
 
-  for (const model of targets) {
-    const current = Array.isArray(model.projectIds) ? model.projectIds.map(String) : [];
-    if (current.includes(projectId)) continue;
-    await db.updateModel(String(model._id), { projectIds: [...current, projectId] });
-  }
-  await invalidateModelMetaCache(tenantDbName, projectId, wanted);
-  logger.info('Platform models added to a project', { projectId, count: wanted.length, actor });
-  return wanted;
+    for (const model of targets) {
+      const current = Array.isArray(model.projectIds) ? model.projectIds.map(String) : [];
+      if (current.includes(projectId)) continue;
+      await db.updateModel(String(model._id), { projectIds: [...current, projectId] });
+    }
+    await invalidateModelMetaCache(tenantDbName, projectId, wanted);
+    logger.info('Platform models added to a project', { projectId, count: wanted.length, actor });
+    return wanted;
+  });
 }
 
 /** Takes a platform model out of a project. The record stays, so it can be added again. Idempotent. */
@@ -815,22 +815,48 @@ export async function removePlatformModelFromProject(
   key: string,
   actor?: string,
 ): Promise<void> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const model = (await db.listModels({})).find((m) => m.platform && m.tenantId === tenantId && m.key === key);
-  if (!model) {
-    throw new PlatformModelSelectionError('platform_model_not_found', 'Model not found.', 404, key);
-  }
-  const current = Array.isArray(model.projectIds) ? model.projectIds.map(String) : [];
-  if (current.includes(projectId)) {
-    await db.updateModel(String(model._id), { projectIds: current.filter((id) => id !== projectId) });
-  }
-  await invalidateModelMetaCache(tenantDbName, projectId, [key]);
-  logger.info('Platform model removed from a project', { projectId, key, actor });
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const model = (await db.listModels({})).find((m) => m.platform && m.tenantId === tenantId && m.key === key);
+    if (!model) {
+      throw new PlatformModelSelectionError('platform_model_not_found', 'Model not found.', 404, key);
+    }
+    const current = Array.isArray(model.projectIds) ? model.projectIds.map(String) : [];
+    if (current.includes(projectId)) {
+      await db.updateModel(String(model._id), { projectIds: current.filter((id) => id !== projectId) });
+    }
+    await invalidateModelMetaCache(tenantDbName, projectId, [key]);
+    logger.info('Platform model removed from a project', { projectId, key, actor });
+  });
 }
 
 function modelMetaCacheKey(tenantDbName: string, projectId: string, key: string): string {
   return `model-meta:${tenantDbName}:${projectId}:${key}`;
+}
+
+/**
+ * A few seconds of in-process memory in front of the shared cache for `getModelByKey`. An agent turn looks the same
+ * model up on every step; with a networked shared cache each of those is a round trip plus a JSON parse of the whole
+ * record. Dropped at the place the shared entries are dropped (`invalidateModelMetaCache`); a node that did not see
+ * the edit serves the old record for at most `MODEL_MEMO_TTL_MS`.
+ */
+const MODEL_MEMO_TTL_MS = 3_000;
+const MODEL_MEMO_MAX_ENTRIES = 500;
+const modelMemo = new Map<string, { model: IModel; expiresAt: number }>();
+
+function rememberModel(cacheKey: string, model: IModel): void {
+  // Re-inserting moves the key to the end, so the first key is always the oldest entry.
+  modelMemo.delete(cacheKey);
+  modelMemo.set(cacheKey, { model, expiresAt: Date.now() + MODEL_MEMO_TTL_MS });
+  while (modelMemo.size > MODEL_MEMO_MAX_ENTRIES) {
+    const oldest = modelMemo.keys().next().value;
+    if (oldest === undefined) break;
+    modelMemo.delete(oldest);
+  }
+}
+
+/** Test only: empties the in-process memo of `getModelByKey`. */
+export function clearModelMemoForTests(): void {
+  modelMemo.clear();
 }
 
 /**
@@ -847,6 +873,9 @@ export async function invalidateModelMetaCache(
   projectId: string,
   keys: Array<string | undefined>,
 ): Promise<void> {
+  for (const key of keys) {
+    if (key) modelMemo.delete(modelMetaCacheKey(tenantDbName, projectId, key));
+  }
   try {
     const cache = await getCache();
     await Promise.all(
@@ -870,13 +899,13 @@ export async function invalidatePlatformProviderModelCaches(
   projectIds: readonly string[],
 ): Promise<void> {
   try {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const keys = (await db.listModels({ providerKey })).filter((m) => m.platform).map((m) => m.key);
-    if (keys.length === 0) return;
-    for (const projectId of new Set(['', ...projectIds.map(String)])) {
-      await invalidateModelMetaCache(tenantDbName, projectId, keys);
-    }
+    await runWithTenantScope(tenantDbName, async (db) => {
+      const keys = (await db.listModels({ providerKey })).filter((m) => m.platform).map((m) => m.key);
+      if (keys.length === 0) return;
+      for (const projectId of new Set(['', ...projectIds.map(String)])) {
+        await invalidateModelMetaCache(tenantDbName, projectId, keys);
+      }
+    });
   } catch { /* best effort — the 120s TTL bounds staleness */ }
 }
 
@@ -886,22 +915,31 @@ export async function getModelByKey(
   projectId: string,
 ): Promise<IModel | null> {
   const cacheKey = modelMetaCacheKey(tenantDbName, projectId, key);
+  const memoized = modelMemo.get(cacheKey);
+  if (memoized) {
+    if (memoized.expiresAt > Date.now()) return memoized.model;
+    modelMemo.delete(cacheKey);
+  }
   try {
     const cache = await getCache();
     const cached = await cache.get<IModel>(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      rememberModel(cacheKey, cached);
+      return cached;
+    }
   } catch { /* cache miss / unavailable — fall through to DB */ }
 
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const model = await db.findModelByKey(key, projectId);
-  if (model) {
-    try {
-      const cache = await getCache();
-      await cache.set(cacheKey, model, 120);
-    } catch { /* best-effort cache write */ }
-  }
-  return model;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const model = await db.findModelByKey(key, projectId);
+    if (model) {
+      rememberModel(cacheKey, model);
+      try {
+        const cache = await getCache();
+        await cache.set(cacheKey, model, 120);
+      } catch { /* best-effort cache write */ }
+    }
+    return model;
+  });
 }
 
 export async function getModelById(
@@ -909,9 +947,9 @@ export async function getModelById(
   id: string,
   projectId: string,
 ): Promise<IModel | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.findModelById(id, projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.findModelById(id, projectId);
+  });
 }
 
 export async function listUsageLogs(
@@ -920,9 +958,9 @@ export async function listUsageLogs(
   projectId: string,
   options?: { limit?: number; skip?: number; from?: Date; to?: Date },
 ): Promise<IModelUsageLog[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.listModelUsageLogs(modelKey, options, projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.listModelUsageLogs(modelKey, options, projectId);
+  });
 }
 
 export async function getUsageAggregate(
@@ -931,9 +969,9 @@ export async function getUsageAggregate(
   projectId: string,
   options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
 ): Promise<IModelUsageAggregate> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.aggregateModelUsage(modelKey, options, projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.aggregateModelUsage(modelKey, options, projectId);
+  });
 }
 
 /**

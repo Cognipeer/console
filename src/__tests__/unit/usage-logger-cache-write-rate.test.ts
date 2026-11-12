@@ -8,6 +8,7 @@ const createModelUsageLog = vi.fn();
 
 vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(async () => ({ switchToTenant: vi.fn(), createModelUsageLog })),
+  runWithTenantScope: async (_tenant: string, fn: (db: unknown) => unknown) => fn({ createModelUsageLog }),
 }));
 vi.mock('@/lib/services/usage/usageEvents', () => ({ recordUsageEvent: vi.fn(() => ({})) }));
 vi.mock('@/lib/services/entityMetrics/entityMetricsRollup', () => ({ recordEntityMetric: vi.fn() }));

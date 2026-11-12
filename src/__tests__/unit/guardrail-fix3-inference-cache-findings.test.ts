@@ -20,6 +20,7 @@ import {
   handleChatCompletion,
 } from '@/lib/services/models/inferenceService';
 import type { ModelProviderRuntime } from '@/lib/providers/domains/model';
+import { clearOutputGuardrailVersionsMemoForTests } from '@/lib/services/models/gatewayCore';
 import { completion, json, openAiRuntime, stubUpstream } from '../helpers/nativeGateway';
 
 const hoisted = vi.hoisted(() => ({
@@ -109,6 +110,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearOutputGuardrailVersionsMemoForTests();
   vi.unstubAllGlobals();
   (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime });
   stubUpstream(() => json(completion({ content: RAW_ANSWER })));
@@ -159,6 +161,40 @@ describe('#5 the semantic cache and the output guardrail', () => {
     const variant = (buildCacheVariantKey as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>;
     // Only the OUTPUT keys: the input policy already shaped the cached prompt.
     expect(variant.__outputGuardrails).toEqual(['gr-secrets@2026-08-30T10:00:00.000Z']);
+  });
+
+  it('reads the bound policies\' records once for the calls of the next few seconds, then again', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
+      model({ guardrails: [{ key: 'gr-secrets', hooks: ['output.pre'] }] }),
+    );
+    hoisted.getCachedGuardrail.mockImplementation(async (_db: string, key: string) => ({
+      key,
+      updatedAt: new Date('2026-08-30T10:00:00.000Z'),
+    }));
+    const body = { messages: [{ role: 'user', content: 'hi' }] };
+    const now = vi.spyOn(Date, 'now');
+    try {
+      const start = Date.now();
+      now.mockReturnValue(start);
+      await handleChatCompletion({ ...PARAMS, body });
+      now.mockReturnValue(start + 2_900);
+      await handleChatCompletion({ ...PARAMS, body });
+      expect(hoisted.getCachedGuardrail).toHaveBeenCalledTimes(1);
+
+      // The edit shows once the memo has expired.
+      hoisted.getCachedGuardrail.mockImplementation(async (_db: string, key: string) => ({
+        key,
+        updatedAt: new Date('2026-08-31T10:00:00.000Z'),
+      }));
+      now.mockReturnValue(start + 3_100);
+      (buildCacheVariantKey as ReturnType<typeof vi.fn>).mockClear();
+      await handleChatCompletion({ ...PARAMS, body });
+      expect(hoisted.getCachedGuardrail).toHaveBeenCalledTimes(2);
+      const variant = (buildCacheVariantKey as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>;
+      expect(variant.__outputGuardrails).toEqual(['gr-secrets@2026-08-31T10:00:00.000Z']);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('an unguarded model keys on an EMPTY output policy, so it cannot share entries with a guarded one', async () => {
