@@ -5,10 +5,10 @@
  */
 
 import { ObjectId } from 'mongodb';
-import type { Db } from 'mongodb';
 import type { IAlertRule, IAlertEvent, IAlertDelivery, AlertEventStatus } from '../provider.interface';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { ensureTenantCollectionIndexes } from './indexManifest';
 import { clampLimit, clampSkip } from '../provider/paging';
 
 const toRule = (doc: Record<string, unknown>): IAlertRule => ({ ...doc, _id: String(doc._id) }) as unknown as IAlertRule;
@@ -26,28 +26,6 @@ const toDelivery = (doc: Record<string, unknown>): IAlertDelivery => ({ ...doc, 
 
 export function AlertMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class AlertOps extends Base {
-    private alertDeliveryIndexesReady = new Set<string>();
-
-    /**
-     * Ensured on the write path as well as in the boot manifest (which is
-     * existence-guarded). Names/keys are IDENTICAL to the manifest's.
-     */
-    private async ensureAlertDeliveryIndexes(db: Db): Promise<void> {
-      const dbName = db.databaseName;
-      if (this.alertDeliveryIndexesReady.has(dbName)) return;
-      const coll = db.collection(COLLECTIONS.alertDeliveries);
-      await Promise.all([
-        coll.createIndex(
-          { tenantId: 1, incidentId: 1, attemptAt: -1 },
-          { name: 'idx_alert_deliveries_incident_attemptAt' },
-        ),
-        coll.createIndex(
-          { tenantId: 1, ruleId: 1, attemptAt: -1 },
-          { name: 'idx_alert_deliveries_rule_attemptAt' },
-        ),
-      ]);
-      this.alertDeliveryIndexesReady.add(dbName);
-    }
 
     // ── Alert rule operations ────────────────────────────────────────
 
@@ -225,9 +203,7 @@ export function AlertMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
     async createAlertDeliveries(rows: Array<Omit<IAlertDelivery, '_id'>>): Promise<void> {
       if (rows.length === 0) return;
       const db = this.getTenantDb();
-      await this.ensureAlertDeliveryIndexes(db).catch((error) => {
-        logger.warn('Could not ensure alert_deliveries indexes', { dbName: db.databaseName, error });
-      });
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.alertDeliveries);
       await db.collection(COLLECTIONS.alertDeliveries).insertMany(
         rows.map((row) => ({
           ...row,

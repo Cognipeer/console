@@ -5,53 +5,16 @@
  * (ok / pending / firing). Keyed by the unique (tenantId, ruleId, entityKey).
  */
 
-import type { Db } from 'mongodb';
 import type { IAlertState, IAlertStateFilter } from '../provider/types.domain';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { ensureTenantCollectionIndexes } from './indexManifest';
 import { isDuplicateKeyError } from './errors';
 
 const toState = (doc: Record<string, unknown>): IAlertState => ({ ...doc, _id: String(doc._id) }) as unknown as IAlertState;
 
 export function AlertStateMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class AlertStateOps extends Base {
-    private alertStateIndexesReady = new Set<string>();
-    private alertStateIndexInit = new Map<string, Promise<void>>();
-
-    /**
-     * Ensured on the write path as well as in the boot manifest (which is
-     * existence-guarded). Names/keys are IDENTICAL to the manifest's;
-     * memoized only after success, keyed by database name.
-     */
-    private async ensureAlertStateIndexes(db: Db): Promise<void> {
-      const dbName = db.databaseName;
-      if (this.alertStateIndexesReady.has(dbName)) return;
-      const inflight = this.alertStateIndexInit.get(dbName);
-      if (inflight) return inflight;
-
-      const coll = db.collection(COLLECTIONS.alertStates);
-      const pending = Promise.all([
-        coll.createIndex(
-          { tenantId: 1, ruleId: 1, entityKey: 1 },
-          { name: 'uniq_alert_states_rule_entity', unique: true },
-        ),
-        coll.createIndex(
-          { tenantId: 1, projectId: 1, phase: 1 },
-          { name: 'idx_alert_states_project_phase' },
-        ),
-        // listAlertStates() filters inside the per-tenant database without tenantId.
-        coll.createIndex({ ruleId: 1 }, { name: 'idx_alert_states_rule' }),
-        coll.createIndex({ projectId: 1, phase: 1 }, { name: 'idx_alert_states_project_phase_notenant' }),
-      ])
-        .then(() => {
-          this.alertStateIndexesReady.add(dbName);
-        })
-        .finally(() => {
-          this.alertStateIndexInit.delete(dbName);
-        });
-      this.alertStateIndexInit.set(dbName, pending);
-      return pending;
-    }
 
     async listAlertStates(filter: IAlertStateFilter): Promise<IAlertState[]> {
       const db = this.getTenantDb();
@@ -85,9 +48,7 @@ export function AlertStateMixin<TBase extends Constructor<MongoDBProviderBase>>(
       state: Omit<IAlertState, '_id' | 'updatedAt'>,
     ): Promise<IAlertState> {
       const db = this.getTenantDb();
-      await this.ensureAlertStateIndexes(db).catch((error) => {
-        logger.warn('Could not ensure alert_states indexes', { dbName: db.databaseName, error });
-      });
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.alertStates);
       const entityKey = state.entityKey ?? '';
       const { tenantId, ruleId } = state;
       const now = new Date();

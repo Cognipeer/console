@@ -7,44 +7,19 @@
 import { ObjectId, type Filter } from 'mongodb';
 import type { IProviderRecord, ProviderDomain } from '../provider.interface';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { ensureTenantCollectionIndexes } from './indexManifest';
 
 export function ProviderRecordMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class ProviderRecordOps extends Base {
-    // Per-tenant-DB memo so the unique-index ensure runs at most once per
-    // process per database, regardless of success.
-    private providerIndexesReady = new Set<string>();
 
     // ── Provider CRUD ────────────────────────────────────────────────
-
-    /**
-     * Best-effort: create the unique (tenantId, key) index so concurrent
-     * duplicate creates fail at the DB layer (matching the SQLite schema's
-     * `idx_providers_key`). Never throws — if pre-existing duplicates block the
-     * index it is logged and skipped so provider creation still works.
-     */
-    private async ensureProviderIndexes(): Promise<void> {
-      const db = this.getTenantDb();
-      const dbName = db.databaseName;
-      if (this.providerIndexesReady.has(dbName)) return;
-      this.providerIndexesReady.add(dbName);
-      try {
-        await db
-          .collection(COLLECTIONS.providers)
-          .createIndex({ tenantId: 1, key: 1 }, { unique: true, name: 'uniq_provider_tenant_key' });
-      } catch (error) {
-        logger.warn('Could not ensure unique provider key index (pre-existing duplicates?)', {
-          dbName,
-          error,
-        });
-      }
-    }
 
     async createProvider(
       provider: Omit<IProviderRecord, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IProviderRecord> {
-      await this.ensureProviderIndexes();
       const db = this.getTenantDb();
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.providers);
       const now = new Date();
       const document: Omit<IProviderRecord, '_id'> & {
         createdAt: Date;

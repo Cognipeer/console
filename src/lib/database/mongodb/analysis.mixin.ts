@@ -5,7 +5,7 @@
  * nested structures natively. Mirrors the evaluation mixin conventions.
  */
 
-import { ObjectId, type Db } from 'mongodb';
+import { ObjectId } from 'mongodb';
 import type {
   IAnalysisDefinition,
   IAnalysisConversation,
@@ -18,6 +18,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { ensureTenantCollectionIndexes } from './indexManifest';
 import { isDuplicateKeyError } from './errors';
 
 /** IAnalysisResult fields a re-analysis may drop; removed when the new result lacks them. */
@@ -27,8 +28,6 @@ const ANALYSIS_RESULT_OPTIONAL_FIELDS = [
 
 export function AnalysisMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class AnalysisOps extends Base {
-    private analysisResultIndexesReady = new Set<string>();
-    private analysisResultIndexInit = new Map<string, Promise<void>>();
 
     // ── Definitions ──────────────────────────────────────────────────
 
@@ -213,44 +212,6 @@ export function AnalysisMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
 
     // ── Results (latest decision per conversation) ───────────────────
 
-    /**
-     * Created lazily on the write path: the unique key must hold from the very first upsert, and the
-     * boot-time manifest only runs at process start. Names/keys are identical to indexManifest.ts.
-     */
-    private async ensureAnalysisResultIndexes(db: Db): Promise<void> {
-      const dbName = db.databaseName;
-      if (this.analysisResultIndexesReady.has(dbName)) return;
-      const existing = this.analysisResultIndexInit.get(dbName);
-      if (existing) {
-        await existing;
-        return;
-      }
-      const coll = db.collection(COLLECTIONS.analysisResults);
-      const setup = Promise.all([
-        coll.createIndex(
-          { projectId: 1, definitionKey: 1, sourceKind: 1, sourceId: 1 },
-          { name: 'uniq_analysis_result_source', unique: true },
-        ),
-        coll.createIndex(
-          { projectId: 1, definitionKey: 1, needsReview: 1, minConfidence: 1, analyzedAt: -1 },
-          { name: 'idx_analysis_result_review' },
-        ),
-        coll.createIndex(
-          { projectId: 1, definitionKey: 1, analyzedAt: -1 },
-          { name: 'idx_analysis_result_definition' },
-        ),
-        coll.createIndex({ projectId: 1, analyzedAt: -1 }, { name: 'idx_analysis_result_project' }),
-      ])
-        .then(() => {
-          this.analysisResultIndexesReady.add(dbName);
-        })
-        .finally(() => {
-          this.analysisResultIndexInit.delete(dbName);
-        });
-      this.analysisResultIndexInit.set(dbName, setup);
-      await setup;
-    }
-
     private buildAnalysisResultFilter(filters: AnalysisResultFilter): Record<string, unknown> {
       const filter: Record<string, unknown> = { projectId: filters.projectId };
       if (filters.definitionKey !== undefined) filter.definitionKey = filters.definitionKey;
@@ -279,7 +240,7 @@ export function AnalysisMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       result: Omit<IAnalysisResult, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IAnalysisResult> {
       const db = this.getTenantDb();
-      await this.ensureAnalysisResultIndexes(db);
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.analysisResults);
       const now = new Date();
       const set: Record<string, unknown> = { ...result, review: result.review ?? null, updatedAt: now };
       delete set._id;

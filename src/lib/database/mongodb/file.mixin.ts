@@ -4,10 +4,11 @@
  * Includes file records, file buckets, and vector counters.
  */
 
-import { ObjectId, type Db } from 'mongodb';
+import { ObjectId } from 'mongodb';
 import type { IFileRecord, IFileBucketRecord, IFileBucketStats, IFileEntriesPage, FileListPurpose, FileRecordPatch, FileTypeFilter } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { ensureTenantCollectionIndexes } from './indexManifest';
 import { keyPrefixUpperBound, walkFileEntries, type KeyRange } from '../fileEntryWalk';
 import { FILE_KIND_RULES, type FileKindRule } from '../fileTypeFilter';
 
@@ -37,27 +38,6 @@ function fileNamePatternSource(text: string): string {
 
 export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class FileOps extends Base {
-    /** Per-process memo: the file indexes are ensured on the first file written per tenant DB. */
-    private fileIndexesReady = new Set<string>();
-
-    /**
-     * Ensured on the write path as well as in the boot manifest: the manifest
-     * only indexes collections that exist when a tenant DB is first bound, so a
-     * tenant whose first file is written later would otherwise run the object
-     * lookup, the folder listing, the retention sweep and the per-session listing
-     * unindexed until a restart. Names/keys are IDENTICAL to the manifest's.
-     */
-    private async ensureFileIndexes(db: Db): Promise<void> {
-      const dbName = db.databaseName;
-      if (this.fileIndexesReady.has(dbName)) return;
-      const coll = db.collection(COLLECTIONS.files);
-      await Promise.all([
-        coll.createIndex({ providerKey: 1, bucketKey: 1, key: 1 }, { name: 'idx_provider_bucket_key' }),
-        coll.createIndex({ purpose: 1, expiresAt: 1 }, { name: 'idx_purpose_expiresAt' }),
-        coll.createIndex({ conversationId: 1 }, { name: 'idx_conversationId' }),
-      ]);
-      this.fileIndexesReady.add(dbName);
-    }
 
     // ── File records ─────────────────────────────────────────────────
 
@@ -65,7 +45,7 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
       record: Omit<IFileRecord, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IFileRecord> {
       const db = this.getTenantDb();
-      await this.ensureFileIndexes(db).catch(() => undefined);
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.files);
       const now = new Date();
       const document: Omit<IFileRecord, '_id'> & {
         createdAt: Date;

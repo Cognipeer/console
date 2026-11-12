@@ -20,6 +20,11 @@
  * exist) so community deployments never get empty enterprise collections and
  * no work happens for features a tenant never uses.
  *
+ * This file is the only place an index is defined: a mixin whose collection its
+ * first write creates calls `ensureTenantCollectionIndexes(db, name)` before that
+ * write (the boot/bind pass above skips collections that do not exist yet), and
+ * a unit test fails when a mixin calls createIndex itself.
+ *
  * Collection names are string literals (not the COLLECTIONS map) on purpose:
  * it keeps this module free of a circular import with base.ts.
  */
@@ -32,6 +37,13 @@ const logger = createLogger('mongodb-index');
 interface IndexDef {
   key: IndexSpecification;
   options: CreateIndexesOptions;
+  /**
+   * The index is a belt, not a requirement: a backend that rejects it (a partial
+   * index on Cosmos DB, a unique key over rows that already hold duplicates)
+   * is logged and does not keep ensureTenantCollectionIndexes from memoising
+   * the collection, so the write path does not retry it on every write.
+   */
+  bestEffort?: boolean;
 }
 
 /** Control-plane (main) DB — these collections always exist. */
@@ -60,9 +72,10 @@ export const MAIN_DB_INDEXES: Record<string, IndexDef[]> = {
 };
 
 /**
- * Per-tenant DB — existence-guarded. Collections already owning indexes via
- * their own ensure* routines (agent_tracing_*, providers, models) are
- * intentionally omitted to avoid duplicate/conflicting index names.
+ * Per-tenant DB — existence-guarded for the boot/bind pass. Every index of a
+ * tenant collection is defined here and nowhere else: a mixin whose collection
+ * is created by its first write calls ensureTenantCollectionIndexes(db, name)
+ * before that write instead of listing the indexes itself.
  */
 export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   // Sign-in, SSO and invitations resolve a member by email (emailLower, or email
@@ -104,14 +117,19 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     // Agent run ledger: the model calls of one turn (conversation + turn), newest first.
     { key: { conversationId: 1, turnId: 1, createdAt: -1 }, options: { name: 'idx_conversation_turn_createdAt' } },
   ],
-  // usage_daily's unique dimension index is created by the usage mixin's own
-  // ensure routine; these are the report-query indexes.
+  // The unique dimension index is the upsert guard of the rollup (v3 adds the
+  // metadataKey dimension; the usage mixin drops the superseded v1/v2 keys
+  // before it ensures these); the rest are the report-query indexes.
   usage_daily: [
+    {
+      key: { tenantId: 1, projectId: 1, userId: 1, apiTokenId: 1, source: 1, service: 1, refKey: 1, agentKey: 1, metadataKey: 1, day: 1 },
+      options: { name: 'uniq_usage_daily_dims_v3', unique: true },
+    },
     { key: { tenantId: 1, day: -1 }, options: { name: 'idx_usage_daily_day' } },
     { key: { tenantId: 1, userId: 1, day: -1 }, options: { name: 'idx_usage_daily_user_day' } },
+    { key: { tenantId: 1, agentKey: 1, day: -1 }, options: { name: 'idx_usage_daily_agent_day' } },
   ],
-  // Entity health rollup. Created lazily by the entity-metrics mixin on its
-  // first write (names/keys identical); the TTL pairs with the retention sweep.
+  // Entity health rollup. The entity-metrics mixin ensures these on its first write; the TTL pairs with the retention sweep.
   entity_metrics: [
     { key: { tenantId: 1, projectId: 1, entityType: 1, entityKey: 1, source: 1, bucketMs: 1 }, options: { name: 'uniq_entity_metrics_dims', unique: true } },
     { key: { tenantId: 1, projectId: 1, entityType: 1, bucketMs: 1 }, options: { name: 'idx_entity_metrics_type_bucket' } },
@@ -169,12 +187,17 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
         unique: true,
         partialFilterExpression: { status: { $in: ['queued', 'running'] } },
       },
+      // Cosmos DB (Mongo API) rejects partial indexes; the lock documents
+      // (agent_run_locks) carry the one-active-run guarantee there.
+      bestEffort: true,
     },
     { key: { status: 1, heartbeatAt: 1 }, options: { name: 'idx_status_heartbeat' } },
+    { key: { status: 1, createdAt: 1 }, options: { name: 'idx_status_createdAt' } },
     { key: { expiresAt: 1 }, options: { name: 'idx_expiresAt' } },
     // The reconciler's sweep for callbacks that never settled.
     { key: { callbackStatus: 1, updatedAt: 1 }, options: { name: 'idx_callbackStatus_updatedAt' } },
     { key: { tenantId: 1, projectId: 1, idempotencyKey: 1 }, options: { name: 'idx_tenant_project_idempotencyKey' } },
+    { key: { tenantId: 1, projectId: 1, agentKey: 1, createdAt: -1 }, options: { name: 'idx_tenant_project_agent_createdAt' } },
     // A caller who may not see other people's sessions lists only the runs they queued, newest first.
     { key: { tenantId: 1, projectId: 1, agentKey: 1, userId: 1, createdAt: -1 }, options: { name: 'idx_tenant_project_agent_user_createdAt' } },
     // Per-class queue visibility, the deferred dispatcher and the expiry sweep.
@@ -183,6 +206,8 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { status: 1, notBefore: 1 }, options: { name: 'idx_status_notBefore' } },
     { key: { tenantId: 1, triggerId: 1, createdAt: -1 }, options: { name: 'idx_tenant_trigger_createdAt' } },
   ],
+  // Lease documents behind the one-active-run guarantee; expired ones are swept by expiresAt.
+  agent_run_locks: [{ key: { expiresAt: 1 }, options: { name: 'idx_expiresAt' } }],
   rag_chunks: [
     { key: { documentId: 1, chunkIndex: 1 }, options: { name: 'idx_doc_chunk' } },
     { key: { vectorId: 1 }, options: { name: 'idx_vectorId' } },
@@ -306,7 +331,7 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { projectId: 1, agentKey: 1, createdBy: 1, transcriptHash: 1, updatedAt: -1 }, options: { name: 'idx_transcript_hash' } },
   ],
   // Latest analysis of one conversation per definition. The unique key is the upsert guard (the analysis mixin
-  // also ensures all of these on its first write - names/keys IDENTICAL); the rest serve the review queue and lists.
+  // ensures all of these before its first write); the rest serve the review queue and lists.
   analysis_results: [
     { key: { projectId: 1, definitionKey: 1, sourceKind: 1, sourceId: 1 }, options: { name: 'uniq_analysis_result_source', unique: true } },
     { key: { projectId: 1, definitionKey: 1, needsReview: 1, minConfidence: 1, analyzedAt: -1 }, options: { name: 'idx_analysis_result_review' } },
@@ -320,7 +345,7 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   rate_limits: [{ key: { resetAt: 1 }, options: { name: 'ttl_resetAt', expireAfterSeconds: 300 } }],
   // Append-only session event log. The unique pair is the sequence guard; the
   // TTL index (expireAfterSeconds 0 = "at expiresAt") is the retention. The
-  // agent mixin also ensures both on its first write — names/keys IDENTICAL.
+  // agent mixin ensures both before its first write.
   agent_session_events: [
     { key: { conversationId: 1, seq: 1 }, options: { name: 'uniq_conversation_seq', unique: true } },
     { key: { expiresAt: 1 }, options: { name: 'ttl_expiresAt', expireAfterSeconds: 0 } },
@@ -363,9 +388,8 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   // ── Evaluation service — key lookups + run listings were full scans ──
   evaluation_targets: [{ key: { projectId: 1, key: 1 }, options: { name: 'idx_project_key' } }],
   evaluation_datasets: [{ key: { projectId: 1, key: 1 }, options: { name: 'idx_project_key' } }],
-  // The item collection also ensures these itself on the first write (the
-  // manifest only covers collections that already exist at tenant bind);
-  // names/keys are IDENTICAL so the two paths never conflict.
+  // The evaluation mixin ensures these before the first item write (the boot
+  // pass only covers collections that already exist at tenant bind).
   evaluation_dataset_items: [
     { key: { datasetId: 1, position: 1 }, options: { name: 'idx_dataset_position' } },
     { key: { datasetId: 1, id: 1 }, options: { name: 'uniq_dataset_itemId', unique: true } },
@@ -432,6 +456,42 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   sandbox_volumes: [{ key: { id: 1 }, options: { name: 'idx_id' } }],
   gpu_fleet_commands: [{ key: { hostId: 1, status: 1, issuedAt: 1 }, options: { name: 'idx_host_status_issued' } }],
   gpu_fleet_events: [{ key: { hostId: 1, sequence: -1 }, options: { name: 'idx_host_sequence' } }],
+  // Unique keys the SQLite schema has too (idx_models_key / idx_providers_key), so a duplicate create fails at the
+  // DB layer. Best-effort: a tenant that already holds duplicates cannot build them, which must not block a create.
+  models: [{ key: { key: 1 }, options: { name: 'uniq_model_key', unique: true }, bestEffort: true }],
+  providers: [{ key: { tenantId: 1, key: 1 }, options: { name: 'uniq_provider_tenant_key', unique: true }, bestEffort: true }],
+  external_model_pricing: [
+    { key: { tenantId: 1, projectId: 1, normalizedName: 1 }, options: { name: 'uniq_external_model_pricing', unique: true } },
+  ],
+  // Tracing. Upserting a session on (projectId, sessionId) only collapses concurrent inserts if the key is unique,
+  // otherwise two simultaneous /start requests both create one and every aggregation counts the session twice.
+  // Best-effort: a tenant that already accumulated duplicates keeps the old double-count until they are merged.
+  // MongoDB holds one index per key pattern, so only one of the two (projectId, sessionId) entries can exist:
+  // the unique one on a new tenant, the plain one on a tenant indexed before it. Both are best-effort, so the
+  // one that is refused does not keep the collection from memoising.
+  agent_tracing_sessions: [
+    { key: { projectId: 1, sessionId: 1 }, options: { name: 'uniq_project_sessionId', unique: true }, bestEffort: true },
+    { key: { sessionId: 1 }, options: { name: 'idx_sessionId' } },
+    { key: { projectId: 1, sessionId: 1 }, options: { name: 'idx_project_sessionId' }, bestEffort: true },
+    { key: { projectId: 1, startedAt: -1 }, options: { name: 'idx_project_startedAt' } },
+    { key: { projectId: 1, threadId: 1, startedAt: -1 }, options: { name: 'idx_project_thread_startedAt' } },
+    { key: { projectId: 1, status: 1, startedAt: -1 }, options: { name: 'idx_project_status_startedAt' } },
+    { key: { projectId: 1, agentName: 1, startedAt: -1 }, options: { name: 'idx_project_agent_startedAt' } },
+    // Stale-session finalizer: status 'in_progress' and updatedAt older than a cutoff, tenant-wide
+    // (the project-first indexes above cannot serve it).
+    { key: { status: 1, updatedAt: 1 }, options: { name: 'idx_status_updatedAt' } },
+  ],
+  agent_tracing_events: [
+    { key: { sessionId: 1, sequence: 1, timestamp: 1 }, options: { name: 'idx_session_sequence_timestamp' } },
+    { key: { projectId: 1, sessionId: 1, sequence: 1, timestamp: 1 }, options: { name: 'idx_project_session_sequence_timestamp' } },
+    { key: { projectId: 1, sessionId: 1, id: 1 }, options: { name: 'idx_project_session_eventId' } },
+  ],
+  agent_tracing_threads: [
+    { key: { threadId: 1 }, options: { name: 'idx_threadId' } },
+    { key: { projectId: 1, threadId: 1 }, options: { name: 'idx_project_threadId' } },
+    { key: { projectId: 1, startedAt: -1 }, options: { name: 'idx_project_startedAt' } },
+    { key: { projectId: 1, latestStatus: 1, startedAt: -1 }, options: { name: 'idx_project_latestStatus_startedAt' } },
+  ],
 };
 
 // Per-process state. Key is scope-prefixed so a tenant DB that happens to share
@@ -453,13 +513,22 @@ export const TENANT_INDEX_RECHECK_MS = 15 * 60_000;
 const tenantPasses = new Map<string, { indexed: Set<string>; checkedAt: number }>();
 
 /**
+ * How long a tenant collection whose required index failed waits before a write
+ * tries it again (instead of every write re-running the whole set).
+ */
+export const TENANT_COLLECTION_RETRY_MS = 60_000;
+
+/** Per tenant collection whose required index failed: when the next attempt may run. */
+const collectionRetryAt = new Map<string, number>();
+
+/**
  * The retention engine (src/lib/retention) selects expired rows by their age
  * field alone, in batches; without an index leading on that field every batch
  * (and every preview count) is a collection scan. One ascending index per
  * engine target, added only where no manifest index already leads on the
  * field; retention-registry-coverage.test.ts keeps the list in step with the
- * registry. `incidents` is left out: a handful of rows per alert, and its
- * mixin owns the collection's index set (mongodb-index-manifest-entity-health).
+ * registry. `incidents` is left out: it holds a handful of rows per alert,
+ * so its retention batches stay cheap without one.
  */
 export const RETENTION_AGE_INDEXES: ReadonlyArray<readonly [collection: string, field: string]> = [
   ['model_usage_logs', 'createdAt'],
@@ -600,22 +669,43 @@ export function ensureTenantDbIndexes(db: Db, dbName: string): Promise<void> {
  * before that write: the indexes come from
  * the manifest itself, so the two paths can never disagree.
  *
- * Best-effort like the tenant pass: the returned promise never rejects, a
- * failure is logged, and nothing is memoised, so the next write tries again.
+ * Best-effort like the tenant pass: the returned promise never rejects and a
+ * failure is logged. A required index that fails leaves the collection
+ * un-memoised: the first write after TENANT_COLLECTION_RETRY_MS tries again
+ * (the next write already, when the client was not connected yet).
  */
 export function ensureTenantCollectionIndexes(db: Db, collection: string): Promise<void> {
   const defs = TENANT_DB_INDEXES[collection];
   if (!defs || defs.length === 0) return Promise.resolve();
-  return ensureOnce(`tenant-collection:${db.databaseName}:${collection}`, async () => {
+  const memoKey = `tenant-collection:${db.databaseName}:${collection}`;
+  const retryAt = collectionRetryAt.get(memoKey);
+  if (retryAt !== undefined && Date.now() < retryAt) return Promise.resolve();
+  return ensureOnce(memoKey, async () => {
     const failed: string[] = [];
+    let onlyNotConnected = true;
     for (const def of defs) {
       try {
         await db.collection(collection).createIndex(def.key, def.options);
       } catch (error) {
-        failed.push(`${def.options.name ?? 'unnamed'}: ${String(error)}`);
+        if (def.bestEffort) {
+          logger.warn('createIndex skipped', { coll: collection, name: def.options.name, error: String(error) });
+        } else {
+          failed.push(`${def.options.name ?? 'unnamed'}: ${String(error)}`);
+          if (!isNotConnected(error)) onlyNotConnected = false;
+        }
       }
     }
+    if (failed.length === 0) {
+      collectionRetryAt.delete(memoKey);
+      return;
+    }
+    if (!onlyNotConnected) collectionRetryAt.set(memoKey, Date.now() + TENANT_COLLECTION_RETRY_MS);
     // Rejecting keeps the collection un-memoised (ensureOnce logs it once).
-    if (failed.length > 0) throw new Error(`createIndex failed on ${collection}: ${failed.join('; ')}`);
+    throw new Error(`createIndex failed on ${collection}: ${failed.join('; ')}`);
   });
+}
+
+/** ensureTenantCollectionIndexes for several collections (one write path touching more than one). */
+export async function ensureTenantCollectionsIndexes(db: Db, collections: readonly string[]): Promise<void> {
+  await Promise.all(collections.map((collection) => ensureTenantCollectionIndexes(db, collection)));
 }

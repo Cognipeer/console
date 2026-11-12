@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { ObjectId, type Db } from 'mongodb';
+import { ObjectId } from 'mongodb';
 import type {
   IAgent,
   AgentStatus,
@@ -28,6 +28,7 @@ import { AgentSessionEventSeqConflictError } from '../provider/errors';
 import { buildMongoConversationSearchCondition, findConversationSearchMatch, normalizeConversationSearch } from '../provider/conversationSearch';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { ensureTenantCollectionIndexes } from './indexManifest';
 import { definedFields } from './definedFields';
 import { isDuplicateKeyError } from './errors';
 
@@ -215,35 +216,11 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     // ── Agent Conversation operations ────────────────────────────
 
-    /** Per-process memo: the session-list indexes are ensured on the first conversation written per tenant DB. */
-    private conversationListIndexesReady = new Set<string>();
-
-    /**
-     * The client API's session list (a project's sessions newest first, optionally
-     * one agent's or one status) and the dashboard's (by last activity). Ensured on the write path as well as in the boot
-     * manifest, for a tenant whose first conversation is created after it was bound.
-     * Names/keys are IDENTICAL to the manifest's.
-     */
-    private async ensureConversationListIndexes(db: Db): Promise<void> {
-      const dbName = db.databaseName;
-      if (this.conversationListIndexesReady.has(dbName)) return;
-      const coll = db.collection(COLLECTIONS.agentConversations);
-      await Promise.all([
-        coll.createIndex({ agentKey: 1, createdBy: 1, updatedAt: -1 }, { name: 'idx_agent_creator_updatedAt' }),
-        coll.createIndex({ projectId: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_createdAt' }),
-        coll.createIndex({ projectId: 1, agentKey: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_agent_createdAt' }),
-        coll.createIndex({ projectId: 1, runtimeStatus: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_status_createdAt' }),
-        coll.createIndex({ projectId: 1, updatedAt: -1, _id: -1 }, { name: 'idx_project_updatedAt' }),
-        coll.createIndex({ projectId: 1, agentKey: 1, createdBy: 1, transcriptHash: 1, updatedAt: -1 }, { name: 'idx_transcript_hash' }),
-      ]);
-      this.conversationListIndexesReady.add(dbName);
-    }
-
     async createAgentConversation(
       conversation: Omit<IAgentConversation, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IAgentConversation> {
       const db = this.getTenantDb();
-      await this.ensureConversationListIndexes(db).catch(() => undefined);
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.agentConversations);
       const now = new Date();
       const doc = { ...conversation, createdAt: now, updatedAt: now };
       const result = await db
@@ -284,7 +261,7 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       }
       if (Object.keys(set).length === 0) return true;
       // The lookup by this field is served by an index; it is created on the write path, like the list indexes.
-      if (set.transcriptHash !== undefined) await this.ensureConversationListIndexes(this.getTenantDb()).catch(() => undefined);
+      if (set.transcriptHash !== undefined) await ensureTenantCollectionIndexes(this.getTenantDb(), COLLECTIONS.agentConversations);
       // The condition is part of the filter, so "is it still my turn?" and the write are one atomic step.
       const filter: Record<string, unknown> = { _id: new ObjectId(id) };
       if (options?.onlyIfTurn !== undefined) {
@@ -675,42 +652,10 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     // ── Agent session event log ──────────────────────────────────
 
-    /** Per-process memo: the unique/TTL indexes are ensured on the first write per tenant DB. */
-    private sessionEventIndexesReady = new Set<string>();
-    private sessionEventIndexInit = new Map<string, Promise<void>>();
-
-    /**
-     * Ensured on the WRITE path as well as in the boot manifest: the manifest is
-     * existence-guarded, so a collection created after the tenant's first bind
-     * would stay without its unique (conversationId, seq) guard until a restart.
-     */
-    private async ensureSessionEventIndexes(db: Db): Promise<void> {
-      const dbName = db.databaseName;
-      if (this.sessionEventIndexesReady.has(dbName)) return;
-      const existing = this.sessionEventIndexInit.get(dbName);
-      if (existing) {
-        await existing;
-        return;
-      }
-      const coll = db.collection(COLLECTIONS.agentSessionEvents);
-      const setup = Promise.all([
-        coll.createIndex({ conversationId: 1, seq: 1 }, { name: 'uniq_conversation_seq', unique: true }),
-        coll.createIndex({ expiresAt: 1 }, { name: 'ttl_expiresAt', expireAfterSeconds: 0 }),
-      ])
-        .then(() => {
-          this.sessionEventIndexesReady.add(dbName);
-        })
-        .finally(() => {
-          this.sessionEventIndexInit.delete(dbName);
-        });
-      this.sessionEventIndexInit.set(dbName, setup);
-      await setup;
-    }
-
     async appendAgentSessionEvents(events: NewAgentSessionEvent[]): Promise<void> {
       if (events.length === 0) return;
       const db = this.getTenantDb();
-      await this.ensureSessionEventIndexes(db);
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.agentSessionEvents);
       const docs = events.map((event) => ({ ...event, _id: event._id ?? `sevt_${randomUUID().replace(/-/g, '').slice(0, 24)}` }));
       const collection = db.collection(COLLECTIONS.agentSessionEvents);
       try {
@@ -782,32 +727,12 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     // ── Agent pending actions ────────────────────────────────────
 
-    /** Per-process memo: the pending-action indexes are ensured on the first write per tenant DB. */
-    private pendingActionIndexesReady = new Set<string>();
-
-    /**
-     * Ensured on the write path as well as in the boot manifest, for the same
-     * reason as the event indexes: the manifest only covers collections that
-     * exist when a tenant DB is first bound. Names/keys are IDENTICAL to it.
-     */
-    private async ensurePendingActionIndexes(db: Db): Promise<void> {
-      const dbName = db.databaseName;
-      if (this.pendingActionIndexesReady.has(dbName)) return;
-      const coll = db.collection(COLLECTIONS.agentPendingActions);
-      await Promise.all([
-        coll.createIndex({ conversationId: 1, status: 1 }, { name: 'idx_conversation_status' }),
-        coll.createIndex({ status: 1, expiresAt: 1 }, { name: 'idx_status_expiresAt' }),
-        coll.createIndex({ tenantId: 1, projectId: 1, status: 1 }, { name: 'idx_tenant_project_status' }),
-      ]);
-      this.pendingActionIndexesReady.add(dbName);
-    }
-
     async createAgentPendingActions(
       actions: Array<Omit<IAgentPendingAction, '_id'>>,
     ): Promise<IAgentPendingAction[]> {
       if (actions.length === 0) return [];
       const db = this.getTenantDb();
-      await this.ensurePendingActionIndexes(db).catch(() => undefined);
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.agentPendingActions);
       const docs = actions.map((action) => ({ ...action, _id: `act_${randomUUID().replace(/-/g, '').slice(0, 24)}` }));
       await db.collection(COLLECTIONS.agentPendingActions).insertMany(docs as never[]);
       return docs as unknown as IAgentPendingAction[];
@@ -865,21 +790,6 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     // ── Message feedback ─────────────────────────────────────────
 
-    private feedbackIndexesReady = new Set<string>();
-
-    /** Same indexes as the boot manifest (which skips collections that do not exist yet); the unique one makes the upsert race-free. */
-    private async ensureFeedbackIndexes(db: Db): Promise<void> {
-      const dbName = db.databaseName;
-      if (this.feedbackIndexesReady.has(dbName)) return;
-      const coll = db.collection(COLLECTIONS.agentMessageFeedback);
-      await Promise.all([
-        coll.createIndex({ conversationId: 1, messageId: 1, userId: 1 }, { name: 'idx_message_user', unique: true }),
-        coll.createIndex({ projectId: 1, agentKey: 1, createdAt: -1 }, { name: 'idx_agent_createdAt' }),
-        coll.createIndex({ portalId: 1, createdAt: -1 }, { name: 'idx_portal_createdAt' }),
-      ]);
-      this.feedbackIndexesReady.add(dbName);
-    }
-
     private toFeedback(doc: Record<string, unknown>): IAgentMessageFeedback {
       return { ...doc, _id: String(doc._id) } as unknown as IAgentMessageFeedback;
     }
@@ -900,7 +810,7 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       feedback: Omit<IAgentMessageFeedback, '_id' | 'createdAt' | 'updatedAt' | 'removedAt'>,
     ): Promise<{ feedback: IAgentMessageFeedback; created: boolean }> {
       const db = this.getTenantDb();
-      await this.ensureFeedbackIndexes(db).catch(() => undefined);
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.agentMessageFeedback);
       const now = new Date();
       const { conversationId, messageId, userId } = feedback;
       const set: Record<string, unknown> = {

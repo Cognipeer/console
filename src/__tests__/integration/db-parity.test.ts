@@ -11,7 +11,7 @@
  * is automatically duplicated across both backends.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -26,6 +26,7 @@ import type {
 import {
   ensureTenantCollectionIndexes,
   ensureTenantDbIndexes,
+  TENANT_COLLECTION_RETRY_MS,
   TENANT_DB_INDEXES,
 } from '@/lib/database/mongodb/indexManifest';
 import { clampRagAclLabelsLimit } from '@/lib/database/provider/ragAccess';
@@ -5457,18 +5458,29 @@ describe('MongoDB index manifest: collections created by their first write', () 
     expect(calls).toHaveLength(3);
   });
 
-  it('does not reject when an index fails, still tries the rest, and asks again at the next write', async () => {
-    const { db, calls, failing } = fakeTenantDb();
-    failing.add('idx_domain_extId');
-    await expect(ensureTenantCollectionIndexes(db, 'rag_identity_users')).resolves.toBeUndefined();
-    // The unique one failed and the two behind it were still tried...
-    expect(calls.map((call) => call.name)).toEqual(['idx_domain_extId', 'idx_domain_email', 'idx_domain_upn']);
-    // ...and nothing was remembered: the next write asks again, and once the store accepts it that is done for good.
-    failing.clear();
-    await ensureTenantCollectionIndexes(db, 'rag_identity_users');
-    expect(calls).toHaveLength(6);
-    await ensureTenantCollectionIndexes(db, 'rag_identity_users');
-    expect(calls).toHaveLength(6);
+  it('does not reject when an index fails, still tries the rest, and asks again once the retry interval has passed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const { db, calls, failing } = fakeTenantDb();
+      failing.add('idx_domain_extId');
+      await expect(ensureTenantCollectionIndexes(db, 'rag_identity_users')).resolves.toBeUndefined();
+      // The unique one failed and the two behind it were still tried...
+      expect(calls.map((call) => call.name)).toEqual(['idx_domain_extId', 'idx_domain_email', 'idx_domain_upn']);
+      // ...the writes right after it do not run the set again...
+      failing.clear();
+      await ensureTenantCollectionIndexes(db, 'rag_identity_users');
+      expect(calls).toHaveLength(3);
+      // ...nothing was remembered: once the interval has passed a write asks again, and once the store accepts it
+      // that is done for good.
+      vi.setSystemTime(Date.now() + TENANT_COLLECTION_RETRY_MS);
+      await ensureTenantCollectionIndexes(db, 'rag_identity_users');
+      expect(calls).toHaveLength(6);
+      vi.setSystemTime(Date.now() + TENANT_COLLECTION_RETRY_MS);
+      await ensureTenantCollectionIndexes(db, 'rag_identity_users');
+      expect(calls).toHaveLength(6);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('leaves a collection the manifest does not list alone', async () => {

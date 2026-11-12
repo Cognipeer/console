@@ -9,7 +9,7 @@
  * hourly purge sweep covers deployments whose TTL monitor is off.
  */
 
-import { MongoBulkWriteError, type AnyBulkWriteOperation, type Db, type Document } from 'mongodb';
+import { MongoBulkWriteError, type AnyBulkWriteOperation, type Document } from 'mongodb';
 import {
   ENTITY_METRIC_BUCKET_MS,
   ENTITY_METRIC_COUNTER_FIELDS,
@@ -18,7 +18,8 @@ import {
   type IEntityMetricIncrement,
 } from '../provider/types.base';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { ensureTenantCollectionIndexes } from './indexManifest';
 
 const CHUNK_SIZE = 500;
 const DEFAULT_AGGREGATE_LIMIT = 10_000;
@@ -34,50 +35,11 @@ function num(value: unknown): number {
 
 export function EntityMetricsMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class EntityMetricsOps extends Base {
-    private entityMetricsIndexesReady = new Set<string>();
-    private entityMetricsIndexInit = new Map<string, Promise<void>>();
-
-    /**
-     * Ensured on the write path as well as in the boot manifest: the manifest
-     * is existence-guarded, so a collection created after the tenant's first
-     * bind would stay unindexed until a restart. Names/keys are IDENTICAL to
-     * the manifest's. Memoized only AFTER success, keyed by database name.
-     */
-    private async ensureEntityMetricsIndexes(db: Db): Promise<void> {
-      const dbName = db.databaseName;
-      if (this.entityMetricsIndexesReady.has(dbName)) return;
-      const inflight = this.entityMetricsIndexInit.get(dbName);
-      if (inflight) return inflight;
-
-      const coll = db.collection(COLLECTIONS.entityMetrics);
-      const pending = Promise.all([
-        coll.createIndex(
-          { tenantId: 1, projectId: 1, entityType: 1, entityKey: 1, source: 1, bucketMs: 1 },
-          { name: 'uniq_entity_metrics_dims', unique: true },
-        ),
-        coll.createIndex(
-          { tenantId: 1, projectId: 1, entityType: 1, bucketMs: 1 },
-          { name: 'idx_entity_metrics_type_bucket' },
-        ),
-        coll.createIndex({ bucketMs: 1 }, { name: 'idx_entity_metrics_bucket' }),
-        coll.createIndex({ expiresAt: 1 }, { name: 'ttl_entity_metrics_expiresAt', expireAfterSeconds: 0 }),
-      ])
-        .then(() => {
-          this.entityMetricsIndexesReady.add(dbName);
-        })
-        .finally(() => {
-          this.entityMetricsIndexInit.delete(dbName);
-        });
-      this.entityMetricsIndexInit.set(dbName, pending);
-      return pending;
-    }
 
     async incrementEntityMetrics(rows: IEntityMetricIncrement[]): Promise<void> {
       if (rows.length === 0) return;
       const db = this.getTenantDb();
-      await this.ensureEntityMetricsIndexes(db).catch((error) => {
-        logger.warn('Could not ensure entity_metrics indexes', { dbName: db.databaseName, error });
-      });
+      await ensureTenantCollectionIndexes(db, COLLECTIONS.entityMetrics);
       const coll = db.collection(COLLECTIONS.entityMetrics);
       const now = new Date();
 
