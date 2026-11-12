@@ -87,7 +87,7 @@ describeForEachProvider('Incident inbox store features', (getDb) => {
   it('q is a case/Turkish-i-insensitive literal substring over ruleName, entityKey and metric', async () => {
     const db = getDb();
     await db.createIncident(incident(seed, { ruleName: 'Latency_p95 100%', entityKey: 'Isparta Agent' }));
-    await db.createIncident(incident(seed, { ruleName: 'Other', entityKey: 'plain', metric: 'avg_latency_ms' }));
+    await db.createIncident(incident(seed, { ruleName: 'Other', entityKey: 'plain', metric: 'guardrail_avg_latency_ms' }));
     expect(await list({ q: 'LATENCY_P95' })).toEqual(['Latency_p95 100%']);
     expect(await list({ q: 'ency_p9' })).toEqual(['Latency_p95 100%']);
     expect(await list({ q: '100%' })).toEqual(['Latency_p95 100%']);

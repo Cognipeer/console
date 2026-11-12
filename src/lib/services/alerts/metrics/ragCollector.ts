@@ -1,8 +1,7 @@
 /**
  * RAG metric collector.
  *
- * Queries `rag_query_logs` for latency and query count metrics,
- * and `rag_documents` for failed document count over a rolling window.
+ * Queries `rag_documents` for the failed document count over a rolling window.
  *
  * Supports both MongoDB and SQLite backends.
  */
@@ -14,8 +13,6 @@ import { getRawDb } from './dbHelper';
 
 export class RagCollector implements IMetricCollector {
   readonly supportedMetrics: AlertMetric[] = [
-    'rag_avg_latency_ms',
-    'rag_total_queries',
     'rag_failed_documents',
   ];
 
@@ -44,45 +41,6 @@ export class RagCollector implements IMetricCollector {
     now: Date,
   ): MetricResult {
     switch (query.metric) {
-      case 'rag_avg_latency_ms': {
-        const clauses: string[] = [
-          'tenantId = @tenantId',
-          'createdAt >= @from',
-          'createdAt <= @to',
-          'latencyMs IS NOT NULL',
-        ];
-        const params: Record<string, unknown> = {
-          tenantId: query.tenantId,
-          from: from.toISOString(),
-          to: now.toISOString(),
-        };
-        if (query.scope?.projectId) { clauses.push('projectId = @projectId'); params.projectId = query.scope.projectId; }
-        if (query.scope?.ragModuleKey) { clauses.push('ragModuleKey = @ragModuleKey'); params.ragModuleKey = query.scope.ragModuleKey; }
-
-        const row = db.prepare(`
-          SELECT AVG(latencyMs) as avgLatency, COUNT(*) as count
-          FROM rag_query_logs WHERE ${clauses.join(' AND ')}
-        `).get(params) as { avgLatency: number | null; count: number } | undefined;
-        return { value: row?.avgLatency || 0, sampleCount: row?.count || 0 };
-      }
-
-      case 'rag_total_queries': {
-        const clauses: string[] = ['tenantId = @tenantId', 'createdAt >= @from', 'createdAt <= @to'];
-        const params: Record<string, unknown> = {
-          tenantId: query.tenantId,
-          from: from.toISOString(),
-          to: now.toISOString(),
-        };
-        if (query.scope?.projectId) { clauses.push('projectId = @projectId'); params.projectId = query.scope.projectId; }
-        if (query.scope?.ragModuleKey) { clauses.push('ragModuleKey = @ragModuleKey'); params.ragModuleKey = query.scope.ragModuleKey; }
-
-        const row = db.prepare(`
-          SELECT COUNT(*) as count FROM rag_query_logs WHERE ${clauses.join(' AND ')}
-        `).get(params) as { count: number } | undefined;
-        const count = row?.count || 0;
-        return { value: count, sampleCount: count };
-      }
-
       case 'rag_failed_documents': {
         const clauses: string[] = [
           'tenantId = @tenantId',
@@ -119,46 +77,6 @@ export class RagCollector implements IMetricCollector {
     now: Date,
   ): Promise<MetricResult> {
     switch (query.metric) {
-      case 'rag_avg_latency_ms': {
-        const filter: Record<string, unknown> = {
-          tenantId: query.tenantId,
-          createdAt: { $gte: from, $lte: now },
-          latencyMs: { $exists: true, $ne: null },
-        };
-        if (query.scope?.projectId) filter.projectId = query.scope.projectId;
-        if (query.scope?.ragModuleKey) filter.ragModuleKey = query.scope.ragModuleKey;
-
-        const pipeline = [
-          { $match: filter },
-          {
-            $group: {
-              _id: null,
-              avgLatency: { $avg: '$latencyMs' },
-              count: { $sum: 1 },
-            },
-          },
-        ];
-        const [result] = await tenantDb
-          .collection('rag_query_logs')
-          .aggregate(pipeline)
-          .toArray();
-        return { value: (result?.avgLatency as number) || 0, sampleCount: (result?.count as number) || 0 };
-      }
-
-      case 'rag_total_queries': {
-        const filter: Record<string, unknown> = {
-          tenantId: query.tenantId,
-          createdAt: { $gte: from, $lte: now },
-        };
-        if (query.scope?.projectId) filter.projectId = query.scope.projectId;
-        if (query.scope?.ragModuleKey) filter.ragModuleKey = query.scope.ragModuleKey;
-
-        const count = await tenantDb
-          .collection('rag_query_logs')
-          .countDocuments(filter);
-        return { value: count, sampleCount: count };
-      }
-
       case 'rag_failed_documents': {
         const filter: Record<string, unknown> = {
           tenantId: query.tenantId,

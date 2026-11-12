@@ -1,7 +1,7 @@
 /**
  * The metric catalog is the single source of truth for alertable metrics:
  * every id of the AlertMetric union has a definition, every metric the alert
- * service offers per module resolves, and legacy metrics keep their collectors.
+ * service offers per module resolves, and collector metrics keep their collectors.
  */
 
 import { readFileSync } from 'node:fs';
@@ -28,13 +28,23 @@ function unionMembers(typeName: string): string[] {
   return [...body.matchAll(/'([^']+)'/g)].map((m) => m[1]!);
 }
 
-const ALL_METRICS = unionMembers('AlertMetric');
+/**
+ * Union members whose metric (and collector) was removed from the catalog:
+ * module-wide duplicates of the per-entity metrics. Drop this list together
+ * with the members in the AlertMetric union.
+ */
+const RETIRED_METRICS = [
+  'error_rate', 'avg_latency_ms', 'p95_latency_ms', 'total_cost', 'total_requests',
+  'rag_avg_latency_ms', 'rag_total_queries', 'mcp_error_rate', 'mcp_avg_latency_ms', 'mcp_total_requests',
+];
+
+const ALL_METRICS = unionMembers('AlertMetric').filter((id) => !RETIRED_METRICS.includes(id));
 const ALL_MODULES = unionMembers('AlertModule');
 
 describe('alert metric catalog', () => {
   it('reads the AlertMetric union (sanity)', () => {
-    expect(ALL_METRICS.length).toBeGreaterThanOrEqual(57);
-    expect(ALL_METRICS).toContain('error_rate');
+    expect(ALL_METRICS.length).toBeGreaterThanOrEqual(47);
+    expect(ALL_METRICS).toContain('agent_error_rate');
     expect(ALL_METRICS).toContain('tool_p95_latency_ms');
   });
 
@@ -45,9 +55,10 @@ describe('alert metric catalog', () => {
     expect(ids.filter((id) => !ALL_METRICS.includes(id))).toEqual([]);
   });
 
-  it('covers the 33 metrics that existed before entity health', () => {
-    const legacy = ALERT_METRIC_CATALOG.filter((d) => d.source === 'legacy');
-    expect(legacy).toHaveLength(33);
+  it('offers no retired module-wide duplicate', () => {
+    expect(ALERT_METRIC_CATALOG.filter((d) => RETIRED_METRICS.includes(d.id))).toEqual([]);
+    expect(ALERT_METRIC_CATALOG.filter((d) => d.source === 'collector')).toHaveLength(23);
+    expect(ALERT_METRIC_CATALOG.some((d) => 'hiddenForNewRules' in d)).toBe(false);
   });
 
   it('gives every metric a label, a module of the union and a valid mode list', () => {
@@ -59,21 +70,13 @@ describe('alert metric catalog', () => {
     }
   });
 
-  it('keeps the legacy units the email and UI maps used', () => {
-    expect(getMetricDef('error_rate')).toMatchObject({ unit: '%', module: 'models' });
-    expect(getMetricDef('total_cost')?.unit).toBe('$');
-    expect(getMetricDef('p95_latency_ms')?.unit).toBe('ms');
+  it('keeps the units the email and UI maps use', () => {
+    expect(getMetricDef('guardrail_fail_rate')).toMatchObject({ unit: '%', module: 'guardrails' });
+    expect(getMetricDef('model_cost')?.unit).toBe('$');
+    expect(getMetricDef('model_p95_latency_ms')?.unit).toBe('ms');
     expect(getMetricDef('guardrail_avg_risk_score')?.unit).toBe('');
     expect(getMetricDef('evaluation_avg_score')?.unit).toBe('%');
     expect(getMetricDef('guardrail_block_rate')).toMatchObject({ module: 'guardrails' });
-  });
-
-  it('marks exactly the legacy duplicates as hidden for new rules', () => {
-    const hidden = ALERT_METRIC_CATALOG.filter((d) => d.hiddenForNewRules).map((d) => d.id).sort();
-    expect(hidden).toEqual([
-      'avg_latency_ms', 'error_rate', 'mcp_avg_latency_ms', 'mcp_error_rate', 'mcp_total_requests',
-      'p95_latency_ms', 'rag_avg_latency_ms', 'rag_total_queries', 'total_cost', 'total_requests',
-    ].sort());
   });
 
   it('gives entity metrics an entity type consistent with their module, and baseline + absence modes', () => {
@@ -84,7 +87,7 @@ describe('alert metric catalog', () => {
       expect(MODULE_ENTITY_TYPE[def.module], def.id).toBe(def.entityType);
       expect(def.modes, def.id).toEqual(expect.arrayContaining(['threshold', 'baseline', 'absence']));
     }
-    for (const def of ALERT_METRIC_CATALOG.filter((d) => d.source === 'legacy')) {
+    for (const def of ALERT_METRIC_CATALOG.filter((d) => d.source === 'collector')) {
       expect(def.modes, def.id).toEqual(['threshold']);
     }
   });
@@ -150,9 +153,9 @@ describe('module to metrics table', () => {
     for (const id of guardrailIds) expect(getMetricDef(id)?.module, id).toBe('guardrails');
   });
 
-  it('resolves a collector for every legacy metric that ships in the community build', () => {
+  it('resolves a collector for every collector metric that ships in the community build', () => {
     const unresolved = ALERT_METRIC_CATALOG
-      .filter((d) => d.source === 'legacy')
+      .filter((d) => d.source === 'collector')
       .filter((d) => !getCollectorForMetric(d.id))
       .map((d) => d.id)
       .sort();

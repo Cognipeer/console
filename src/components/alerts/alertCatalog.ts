@@ -134,15 +134,10 @@ export function getDef(catalog: AlertCatalog, metric: string | undefined | null)
   return metric ? catalog.byId.get(metric) : undefined;
 }
 
-/**
- * Metrics offered for a module. Legacy duplicates (`hiddenForNewRules`) are left
- * out unless `keep` names the one a rule being edited already uses.
- */
-export function metricsForModule(catalog: AlertCatalog, module: string, keep?: string | null): AlertMetricDef[] {
+/** Metrics offered for a module. */
+export function metricsForModule(catalog: AlertCatalog, module: string): AlertMetricDef[] {
   const normalized = normalizeModule(module);
-  return catalog.metrics.filter(
-    (def) => normalizeModule(def.module) === normalized && (!def.hiddenForNewRules || def.id === keep),
-  );
+  return catalog.metrics.filter((def) => normalizeModule(def.module) === normalized);
 }
 
 /** Translated metric label: `alerts.metrics.<id>`, then the catalog's English label, then the raw id. */

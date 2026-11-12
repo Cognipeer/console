@@ -151,7 +151,7 @@ export interface RuleKpisDto {
 /** `POST /alerts/rules/backtest` */
 export interface BacktestResultDto {
   supported: boolean;
-  reason?: 'legacy_metric' | 'mode_not_replayable';
+  reason?: 'collector_metric' | 'mode_not_replayable';
   message?: string;
   days: number;
   stepMinutes: number;

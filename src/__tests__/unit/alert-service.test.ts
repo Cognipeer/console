@@ -52,8 +52,8 @@ const ROUTING_KEY = 'R0123456789abcdefghijklmnopqrstu';
 
 const legacyInput = {
   name: 'High Error Rate',
-  module: 'models' as const,
-  metric: 'error_rate' as const,
+  module: 'guardrails' as const,
+  metric: 'guardrail_fail_rate' as const,
   condition: { operator: 'gt' as const, threshold: 5 },
   windowMinutes: 15,
 };
@@ -421,7 +421,7 @@ describe('validateRuleInput', () => {
   describe('update', () => {
     it('overlays the given fields on the stored rule and revalidates the whole', () => {
       const rule = validateRuleInput({ name: 'Renamed' }, { mode: 'update', existing: storedRule });
-      expect(rule).toMatchObject({ name: 'Renamed', metric: 'error_rate', windowMinutes: 15, condition: { threshold: 5 } });
+      expect(rule).toMatchObject({ name: 'Renamed', metric: 'guardrail_fail_rate', windowMinutes: 15, condition: { threshold: 5 } });
       expect(rule.channels).toBeUndefined();
     });
 
@@ -458,7 +458,7 @@ describe('validateRuleInput', () => {
       const toModel = validateRuleInput({ module: 'models', metric: 'model_error_rate' }, { mode: 'update', existing: agent });
       expect(toModel.entity).toEqual({ entityType: 'model', mode: 'all' });
       // entity metric -> legacy metric
-      const toLegacy = validateRuleInput({ module: 'models', metric: 'error_rate' }, { mode: 'update', existing: agent });
+      const toLegacy = validateRuleInput({ module: 'guardrails', metric: 'guardrail_fail_rate' }, { mode: 'update', existing: agent });
       expect(toLegacy.entity).toBeNull();
       // legacy (with scope) -> entity metric
       const scoped: IAlertRule = { ...storedRule, scope: { modelKey: 'gpt' } };
@@ -647,7 +647,7 @@ describe('AlertService', () => {
 
     describe('state reset', () => {
       it.each([
-        ['metric', { module: 'models', metric: 'avg_latency_ms' }],
+        ['metric', { module: 'guardrails', metric: 'guardrail_avg_latency_ms' }],
         ['window', { windowMinutes: 30 }],
         ['condition', { condition: { operator: 'gt', threshold: 9 } }],
         ['condition forMinutes', { condition: { operator: 'gt', threshold: 5, forMinutes: 10 } }],
@@ -903,7 +903,7 @@ describe('AlertService', () => {
       expect(db.findAlertRuleById).toHaveBeenCalledWith('rule-1', PROJECT_ID);
       const [notification, channels] = (dispatchNotification as ReturnType<typeof vi.fn>).mock.calls[0];
       expect(channels).toEqual([stored]);
-      expect(notification.rule).toMatchObject({ id: 'rule-1', name: 'High Error Rate', metric: 'error_rate' });
+      expect(notification.rule).toMatchObject({ id: 'rule-1', name: 'High Error Rate', metric: 'guardrail_fail_rate' });
     });
 
     it('404s an unknown rule or channel and 400s a malformed body', async () => {

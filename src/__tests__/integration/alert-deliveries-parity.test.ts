@@ -47,9 +47,9 @@ describeForEachProvider('Alert rule mute fields and delivery log', (getDb) => {
       tenantId: seed.tenantId,
       projectId: seed.projectId,
       name: 'Rule',
-      module: 'models',
+      module: 'guardrails',
       enabled: true,
-      metric: 'error_rate',
+      metric: 'guardrail_fail_rate',
       condition: { operator: 'gt', threshold: 5 },
       windowMinutes: 15,
       cooldownMinutes: 15,
@@ -121,7 +121,7 @@ describeForEachProvider('Alert rule mute fields and delivery log', (getDb) => {
   it('lists fire timestamps per rule since a date, newest first', async () => {
     const db = getDb();
     const base = {
-      tenantId: seed.tenantId, projectId: seed.projectId, ruleName: 'R', metric: 'error_rate' as const,
+      tenantId: seed.tenantId, projectId: seed.projectId, ruleName: 'R', metric: 'guardrail_fail_rate' as const,
       threshold: 5, actualValue: 9, status: 'fired' as const, channels: [],
     };
     await db.createAlertEvent({ ...base, ruleId: 'r1', firedAt: new Date('2026-10-01T00:00:00.000Z') });

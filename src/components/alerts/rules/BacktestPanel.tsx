@@ -84,7 +84,7 @@ export default function BacktestPanel({ requestKey, ready, onApplyThreshold }: B
       ) : null}
       {result && !result.supported ? (
         <Text size="xs" c="dimmed" role="status">
-          {t(`rulesUx.backtest.unsupported.${result.reason === 'legacy_metric' ? 'legacy_metric' : 'mode_not_replayable'}`)}
+          {t(`rulesUx.backtest.unsupported.${result.reason === 'collector_metric' ? 'collector_metric' : 'mode_not_replayable'}`)}
         </Text>
       ) : null}
       {result?.supported ? (

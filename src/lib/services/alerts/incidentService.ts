@@ -82,7 +82,7 @@ export function deriveSeverity(
   const ratio = threshold !== 0 ? actualValue / threshold : 1;
 
   // Error-rate based metrics are critical if ≥ 2× threshold
-  if (metric === 'error_rate' || metric === 'guardrail_fail_rate') {
+  if (metric === 'guardrail_fail_rate') {
     if (ratio >= 2) return 'critical';
     return 'warning';
   }

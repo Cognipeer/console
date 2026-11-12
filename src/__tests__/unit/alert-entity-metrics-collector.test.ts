@@ -53,7 +53,7 @@ describe('EntityMetricsCollector', () => {
     expect(expected.length).toBeGreaterThan(0);
     expect([...collector.supportedMetrics].sort()).toEqual([...expected].sort());
     expect(getCollectorForMetric('agent_error_rate')).toBeInstanceOf(EntityMetricsCollector);
-    expect(getCollectorForMetric('error_rate')).not.toBeInstanceOf(EntityMetricsCollector);
+    expect(getCollectorForMetric('guardrail_fail_rate')).not.toBeInstanceOf(EntityMetricsCollector);
   });
 
   describe('collectByEntity', () => {
@@ -93,8 +93,8 @@ describe('EntityMetricsCollector', () => {
       expect(db.aggregateEntityMetrics.mock.calls[0][0]).toMatchObject({ entityKeys: ['a', 'b'] });
     });
 
-    it('answers an empty map for a legacy metric or when the project is unknown', async () => {
-      expect((await collector.collectByEntity({ metric: 'error_rate', windowMinutes: 5, tenantDbName: 'd', tenantId: 't', scope: { projectId: 'p' } } as never)).size).toBe(0);
+    it('answers an empty map for a collector metric or when the project is unknown', async () => {
+      expect((await collector.collectByEntity({ metric: 'guardrail_fail_rate', windowMinutes: 5, tenantDbName: 'd', tenantId: 't', scope: { projectId: 'p' } } as never)).size).toBe(0);
       expect((await collector.collectByEntity({ metric: 'agent_error_rate', windowMinutes: 5, tenantDbName: 'd', tenantId: 't' } as never)).size).toBe(0);
       expect(db.aggregateEntityMetrics).not.toHaveBeenCalled();
     });
@@ -123,7 +123,7 @@ describe('EntityMetricsCollector', () => {
       db.aggregateEntityMetrics.mockResolvedValue([]);
       expect(await collector.collect({ metric: 'agent_error_rate', windowMinutes: 5, tenantDbName: 'd', tenantId: 't', scope: { projectId: 'p' } } as never))
         .toEqual({ value: 0, sampleCount: 0 });
-      expect(await collector.collect({ metric: 'error_rate', windowMinutes: 5, tenantDbName: 'd', tenantId: 't', scope: { projectId: 'p' } } as never))
+      expect(await collector.collect({ metric: 'guardrail_fail_rate', windowMinutes: 5, tenantDbName: 'd', tenantId: 't', scope: { projectId: 'p' } } as never))
         .toEqual({ value: 0, sampleCount: 0 });
       expect(await collector.collect({ metric: 'agent_error_rate', windowMinutes: 5, tenantDbName: 'd', tenantId: 't' } as never))
         .toEqual({ value: 0, sampleCount: 0 });

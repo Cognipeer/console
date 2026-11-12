@@ -55,13 +55,13 @@ const ctx = {
 const T0 = Date.UTC(2026, 9, 15, 12, 2, 30); // 12:02:30 UTC
 const MIN = 60_000;
 
-const legacyRule: IAlertRule = {
+const collectorRule: IAlertRule = {
   _id: 'rule-1',
   tenantId: 'tenant-1',
   projectId: 'proj-1',
   name: 'High Error Rate',
-  module: 'models',
-  metric: 'error_rate',
+  module: 'guardrails',
+  metric: 'guardrail_fail_rate',
   condition: { operator: 'gt', threshold: 5 },
   windowMinutes: 15,
   cooldownMinutes: 60,
@@ -71,7 +71,7 @@ const legacyRule: IAlertRule = {
 };
 
 const agentRule: IAlertRule = {
-  ...legacyRule,
+  ...collectorRule,
   _id: 'rule-agents',
   name: 'Agent errors',
   module: 'agents',
@@ -307,11 +307,11 @@ describe('advanceAlertState', () => {
   });
 });
 
-// ── Legacy single-scope rules ───────────────────────────────────────────────
+// ── Collector (single-scope) rules ───────────────────────────────────────────────
 
-describe('evaluateTenantAlerts: legacy rules', () => {
+describe('evaluateTenantAlerts: collector rules', () => {
   beforeEach(() => {
-    h.rules = [legacyRule];
+    h.rules = [collectorRule];
   });
 
   it('returns 0 when no rules exist', async () => {
@@ -332,18 +332,18 @@ describe('evaluateTenantAlerts: legacy rules', () => {
       ruleId: 'rule-1', status: 'fired', kind: 'fired', actualValue: 10, threshold: 5, entityKey: null,
     });
     expect([...h.incidents.values()][0]).toMatchObject({
-      ruleId: 'rule-1', module: 'models', status: 'open', alertEventId: 'event-1',
+      ruleId: 'rule-1', module: 'guardrails', status: 'open', alertEventId: 'event-1',
     });
     expect(kinds()).toEqual(['fired']);
     expect(dispatched()[0]).toMatchObject({
-      rule: { id: 'rule-1', operator: 'gt', threshold: 5, mode: 'threshold', metricLabel: 'Error Rate', unit: '%' },
+      rule: { id: 'rule-1', operator: 'gt', threshold: 5, mode: 'threshold', metricLabel: 'Guardrail Fail Rate', unit: '%' },
       projectName: 'Main Project',
       incidentUrl: expect.stringContaining('/dashboard/alerts/incidents?highlight=incident-1'),
     });
     expect(publishWebhookEvent).toHaveBeenCalledWith(expect.objectContaining({
       type: 'alert.fired',
       projectId: 'proj-1',
-      data: expect.objectContaining({ ruleId: 'rule-1', metric: 'error_rate', incidentId: 'incident-1' }),
+      data: expect.objectContaining({ ruleId: 'rule-1', metric: 'guardrail_fail_rate', incidentId: 'incident-1' }),
     }));
     expect(h.states.get(stateKey('rule-1', ''))).toMatchObject({
       phase: 'firing', incidentId: 'incident-1', eventId: 'event-1', peakValue: 10,
@@ -371,7 +371,7 @@ describe('evaluateTenantAlerts: legacy rules', () => {
     expect(h.events[0]).toMatchObject({ status: 'resolved', kind: 'resolved', resolvedAt: new Date(T0 + 2 * MIN) });
     expect([...h.incidents.values()][0]).toMatchObject({
       status: 'resolved', autoResolved: true, resolvedBy: 'system',
-      notes: [expect.objectContaining({ userId: 'system', content: 'Automatically resolved: Error Rate back to 2%' })],
+      notes: [expect.objectContaining({ userId: 'system', content: 'Automatically resolved: Guardrail Fail Rate back to 2%' })],
     });
     expect(kinds()).toEqual(['fired', 'resolved']);
     expect(publishWebhookEvent).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -382,7 +382,7 @@ describe('evaluateTenantAlerts: legacy rules', () => {
   });
 
   it('does not notify on resolve when notifyOnResolve is false', async () => {
-    h.rules = [{ ...legacyRule, notifyOnResolve: false }];
+    h.rules = [{ ...collectorRule, notifyOnResolve: false }];
     await tick();
     (collectMetric as ReturnType<typeof vi.fn>).mockResolvedValue({ value: 2, sampleCount: 5 });
     await tick(1);
@@ -407,7 +407,7 @@ describe('evaluateTenantAlerts: legacy rules', () => {
   });
 
   it('holds a re-breach inside the cooldown, then fires a new incident once it passed', async () => {
-    h.rules = [{ ...legacyRule, cooldownMinutes: 60 }];
+    h.rules = [{ ...collectorRule, cooldownMinutes: 60 }];
     await tick();
     (collectMetric as ReturnType<typeof vi.fn>).mockResolvedValue({ value: 1, sampleCount: 5 });
     await tick(1);
@@ -421,7 +421,7 @@ describe('evaluateTenantAlerts: legacy rules', () => {
   });
 
   it('waits forMinutes in pending before firing', async () => {
-    h.rules = [{ ...legacyRule, condition: { operator: 'gt', threshold: 5, forMinutes: 5 } }];
+    h.rules = [{ ...collectorRule, condition: { operator: 'gt', threshold: 5, forMinutes: 5 } }];
     expect(await tick()).toBe(0);
     expect(h.states.get(stateKey('rule-1', ''))).toMatchObject({ phase: 'pending' });
     expect(await tick(3)).toBe(0);
@@ -429,7 +429,7 @@ describe('evaluateTenantAlerts: legacy rules', () => {
   });
 
   it('re-notifies after renotifyMinutes, but not while a person has acknowledged', async () => {
-    h.rules = [{ ...legacyRule, renotifyMinutes: 30 }];
+    h.rules = [{ ...collectorRule, renotifyMinutes: 30 }];
     await tick();
     await tick(29);
     expect(kinds()).toEqual(['fired']);
@@ -449,23 +449,23 @@ describe('evaluateTenantAlerts: legacy rules', () => {
   it('skips a rule with no data, a rule with too few samples and a rule that is not breached', async () => {
     (collectMetric as ReturnType<typeof vi.fn>).mockResolvedValue({ value: 0, sampleCount: 0 });
     expect(await tick()).toBe(0);
-    h.rules = [{ ...legacyRule, condition: { operator: 'gt', threshold: 5, minSamples: 10 } }];
+    h.rules = [{ ...collectorRule, condition: { operator: 'gt', threshold: 5, minSamples: 10 } }];
     (collectMetric as ReturnType<typeof vi.fn>).mockResolvedValue({ value: 50, sampleCount: 5 });
     expect(await tick(1)).toBe(0);
-    h.rules = [legacyRule];
+    h.rules = [collectorRule];
     (collectMetric as ReturnType<typeof vi.fn>).mockResolvedValue({ value: 3, sampleCount: 5 });
     expect(await tick(2)).toBe(0);
     expect(h.events).toHaveLength(0);
   });
 
-  it('evaluates an empty window as 0 for a zeroWhenEmpty legacy metric so "less than" rules fire', async () => {
+  it('evaluates an empty window as 0 for a zeroWhenEmpty collector metric so "less than" rules fire', async () => {
     const actual = await vi.importActual<typeof import('@/lib/services/alerts/metricCatalog')>('@/lib/services/alerts/metricCatalog');
     (getMetricDef as ReturnType<typeof vi.fn>).mockImplementation((id: string) => {
       const def = actual.getMetricDef(id);
-      return def && id === 'total_requests' ? { ...def, zeroWhenEmpty: true } : def;
+      return def && id === 'guardrail_total_evaluations' ? { ...def, zeroWhenEmpty: true } : def;
     });
     try {
-      h.rules = [{ ...legacyRule, metric: 'total_requests', condition: { operator: 'lt', threshold: 1 } }];
+      h.rules = [{ ...collectorRule, metric: 'guardrail_total_evaluations', condition: { operator: 'lt', threshold: 1 } }];
       (collectMetric as ReturnType<typeof vi.fn>).mockResolvedValue({ value: 0, sampleCount: 0 });
       expect(await tick()).toBe(1);
       expect(h.events[0]).toMatchObject({ actualValue: 0 });
@@ -484,13 +484,13 @@ describe('evaluateTenantAlerts: legacy rules', () => {
     ['eq', 10, 10, 1],
     ['eq', 11, 10, 0],
   ] as const)('operator %s with threshold %s and value %s fires %s time(s)', async (operator, threshold, value, expected) => {
-    h.rules = [{ ...legacyRule, condition: { operator, threshold } }];
+    h.rules = [{ ...collectorRule, condition: { operator, threshold } }];
     (collectMetric as ReturnType<typeof vi.fn>).mockResolvedValue({ value, sampleCount: 5 });
     expect(await tick()).toBe(expected);
   });
 
   it('survives a bad rule and still evaluates the others', async () => {
-    h.rules = [legacyRule, { ...legacyRule, _id: 'rule-2', metric: 'avg_latency_ms' }];
+    h.rules = [collectorRule, { ...collectorRule, _id: 'rule-2', metric: 'guardrail_avg_latency_ms' }];
     (collectMetric as ReturnType<typeof vi.fn>)
       .mockRejectedValueOnce(new Error('metric error'))
       .mockResolvedValueOnce({ value: 10, sampleCount: 5 });
@@ -505,7 +505,7 @@ describe('evaluateTenantAlerts: legacy rules', () => {
   });
 
   it('the ruleFilter decides which rules run', async () => {
-    h.rules = [legacyRule, { ...legacyRule, _id: 'rule-2' }];
+    h.rules = [collectorRule, { ...collectorRule, _id: 'rule-2' }];
     const fired = await evaluateTenantAlerts(ctx, { ruleFilter: (rule) => String(rule._id) === 'rule-2' });
     expect(fired).toBe(1);
     expect(h.states.has(stateKey('rule-1', ''))).toBe(false);
@@ -935,7 +935,7 @@ describe('evaluateTenantAlerts: hardening', () => {
   });
 
   it('an upgraded legacy rule keeps its cooldown from rule.lastTriggeredAt (no immediate re-fire)', async () => {
-    h.rules = [{ ...legacyRule, lastTriggeredAt: new Date(T0 - 10 * MIN) }];
+    h.rules = [{ ...collectorRule, lastTriggeredAt: new Date(T0 - 10 * MIN) }];
     expect(await tick()).toBe(0);
     expect(h.states.get(stateKey('rule-1', ''))).toMatchObject({ phase: 'pending' });
     expect(await tick(30)).toBe(0);
@@ -945,7 +945,7 @@ describe('evaluateTenantAlerts: hardening', () => {
   });
 
   it('a legacy rule that never fired starts without a cooldown', async () => {
-    h.rules = [legacyRule];
+    h.rules = [collectorRule];
     expect(await tick()).toBe(1);
   });
 
@@ -970,8 +970,8 @@ describe('evaluateTenantAlerts: hardening', () => {
   });
 
   it('a rule whose scope was edited mid-sweep counts as reshaped', async () => {
-    h.rules = [legacyRule];
-    h.db.findAlertRuleById.mockResolvedValue({ ...legacyRule, scope: { modelKey: 'other' } });
+    h.rules = [collectorRule];
+    h.db.findAlertRuleById.mockResolvedValue({ ...collectorRule, scope: { modelKey: 'other' } });
     await tick();
     expect(h.states.size).toBe(0);
   });
@@ -1020,7 +1020,7 @@ describe('evaluateTenantAlerts: hardening', () => {
   });
 
   it('stops starting rules once the deadline passed', async () => {
-    h.rules = [legacyRule, agentRule];
+    h.rules = [collectorRule, agentRule];
     expect(await evaluateTenantAlerts(ctx, { deadlineMs: T0 - 1 })).toBe(0);
     expect(h.db.listAlertStates).not.toHaveBeenCalled();
   });

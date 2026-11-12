@@ -398,9 +398,9 @@ describe('Legacy tenant DB schema migration', () => {
       tenantId: 'tenant-legacy',
       projectId: LEGACY_PROJECT_ID,
       name: 'legacy',
-      module: 'models',
+      module: 'guardrails',
       enabled: true,
-      metric: 'error_rate',
+      metric: 'guardrail_fail_rate',
       condition: { operator: 'gt', threshold: 1 },
       windowMinutes: 5,
       cooldownMinutes: 15,
@@ -413,8 +413,8 @@ describe('Legacy tenant DB schema migration', () => {
 
     const incident = await provider.createIncident({
       tenantId: 'tenant-legacy', projectId: LEGACY_PROJECT_ID, alertEventId: 'e1', ruleId: String(created._id),
-      ruleName: 'legacy', metric: 'error_rate', threshold: 1, actualValue: 2, severity: 'warning',
-      status: 'open', notes: [], firedAt: new Date(), entityKey: 'k', module: 'models',
+      ruleName: 'legacy', metric: 'guardrail_fail_rate', threshold: 1, actualValue: 2, severity: 'warning',
+      status: 'open', notes: [], firedAt: new Date(), entityKey: 'k', module: 'guardrails',
     });
     expect((await provider.listIncidents('tenant-legacy', { projectId: LEGACY_PROJECT_ID, entityKey: 'k' }))).toHaveLength(1);
     expect((await provider.countIncidentsByStatus(LEGACY_PROJECT_ID)).open).toBe(1);

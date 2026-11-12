@@ -78,7 +78,6 @@ describe('the template catalog', () => {
     expect(metric!.modes).toContain(def.condition.mode);
     expect(metric!.module).toBe(def.module);
     expect(ALERT_MODULE_METRICS[def.module]).toContain(def.metric);
-    expect(metric!.hiddenForNewRules).toBeUndefined();
   });
 
   it.each(EACH)('%s: watches every entity, or the whole project for a metric without entities', (_key, def) => {

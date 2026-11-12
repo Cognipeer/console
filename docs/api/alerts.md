@@ -194,7 +194,7 @@ Returns the rules of the project, the catalog the rule form is built from, the s
 
 (`rules` entries are the full [rule object](#the-rule-object); they are abbreviated here.)
 
-- `meta.catalog` has one entry per metric: `id`, `module`, `label`, `unit` (`%`, `ms`, `$`, `count`, `score` or empty), `source` (`entity` for the per-entity metrics, `legacy` for the others), `entityType` for per-entity metrics, `modes`, `goodDirection` (`down` when a lower value is better) and `zeroWhenEmpty` (`true` for the plain totals, which count as `0` in a window without data). Entries marked `hiddenForNewRules` are the module-wide metrics of earlier versions: the rule form does not offer them for new rules, and existing rules keep working.
+- `meta.catalog` has one entry per metric: `id`, `module`, `label`, `unit` (`%`, `ms`, `$`, `count`, `score` or empty), `source` (`entity` for the per-entity metrics, `collector` for the others), `entityType` for per-entity metrics, `modes`, `goodDirection` (`down` when a lower value is better) and `zeroWhenEmpty` (`true` for the plain totals, which count as `0` in a window without data).
 - `meta.modes.<mode>.reason` is `not_enterprise_build` or `license_required` when `available` is `false`.
 - `states` counts the stored per-entity states of each rule. An entity that has never breached has no stored state, so `ok` counts only entities that were pending or firing before.
 - `derived` gives every rule one `status`: `disabled` for a disabled rule, else `firing` when any entity fires, else `pending` when any is pending, else `noData` when the latest evaluation found no data for any of its targets (or, for a per-entity rule, no entity at all), else `ok`. `muted` is a flag next to the status, because a muted rule keeps being evaluated; `noData` repeats the no-data finding even when the status is `firing` or `pending`.
@@ -381,7 +381,7 @@ Replays a draft rule over the stored 5-minute health rollups of the last days an
 
 | Field | Description |
 |-------|-------------|
-| `supported` | `false` when the rule cannot be replayed; `reason` is then `legacy_metric` (only the per-entity metrics are stored as rollups) or `mode_not_replayable` (only threshold and absence rules replay), with a `message`. The answer is still `200` |
+| `supported` | `false` when the rule cannot be replayed; `reason` is then `collector_metric` (only the per-entity metrics are stored as rollups) or `mode_not_replayable` (only threshold and absence rules replay), with a `message`. The answer is still `200` |
 | `stepMinutes` | How often the replay evaluates: every 5 minutes for windows up to 60 minutes, and about a twelfth of the window for wider ones (a 24-hour window steps every 2 hours) |
 | `evaluations` | Entity evaluations replayed |
 | `fires` | Firings the rule would have produced, honouring **Hold for** (`forMinutes`) and the cooldown. Reminders are not counted |

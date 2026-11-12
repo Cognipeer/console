@@ -4,7 +4,7 @@
  *
  * Called periodically by the alert scheduler for every active tenant.
  *
- * One rule yields one target (legacy metrics: the rule's scope) or many
+ * One rule yields one target (collector metrics: the rule's scope) or many
  * (entity metrics: every agent / model / knowledge base / MCP server / tool the
  * rule covers). Each target has a state row in `alert_states`:
  *
@@ -104,7 +104,7 @@ export interface EvaluationContext {
 // ── Target evaluation (pure of side effects: also used by rule preview) ─────
 
 export interface TargetEvaluation {
-  /** '' = the rule's own scope (legacy metrics). */
+  /** '' = the rule's own scope (collector metrics). */
   entityKey: string;
   value: number | null;
   sampleCount: number;
@@ -202,7 +202,7 @@ export async function evaluateRuleTargets(
     return evaluateEntityRule(ctx, rule, def, def.entityType, mode, minSamples, options, notes);
   }
 
-  // Legacy: one target, the rule's scope, through its collector.
+  // Collector metrics: one target, the rule's scope, through its collector.
   const result = await collectMetric({
     tenantDbName: ctx.tenantDbName,
     tenantId: ctx.tenantId,

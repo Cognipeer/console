@@ -116,15 +116,17 @@ describe('alertCatalog', () => {
 
   it('infers the module from the stored module, the catalog and the prefix', () => {
     expect(inferModule(catalog, 'agent_error_rate')).toBe('agents');
-    expect(inferModule(catalog, 'error_rate', 'models')).toBe('models');
+    expect(inferModule(catalog, 'guardrail_fail_rate', 'guardrails')).toBe('guardrails');
     expect(inferModule(catalog, 'kb_future_metric')).toBe('rag');
     expect(inferModule(catalog, 'mcp_server_future')).toBe('mcp');
     expect(inferModule(catalog, undefined)).toBe('models');
   });
 
-  it('hides retired metrics unless the rule being edited uses one', () => {
-    expect(metricsForModule(catalog, 'models').map((def) => def.id)).not.toContain('error_rate');
-    expect(metricsForModule(catalog, 'models', 'error_rate').map((def) => def.id)).toContain('error_rate');
+  it('lists the metrics of a module', () => {
+    expect(metricsForModule(catalog, 'models').map((def) => def.id)).toEqual([
+      'model_requests', 'model_error_rate', 'model_p95_latency_ms', 'model_avg_latency_ms', 'model_cost',
+    ]);
+    expect(metricsForModule(catalog, 'guardrails').map((def) => def.id)).toContain('guardrail_fail_rate');
   });
 
   it('lists authorable modules in display order', () => {

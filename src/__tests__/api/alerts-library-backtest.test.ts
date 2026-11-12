@@ -138,8 +138,8 @@ async function createLibraryChannel(name = 'Ops Slack'): Promise<Json> {
 
 const ruleBody = (channels: unknown[], name = 'Uses library') => ({
   name,
-  module: 'models',
-  metric: 'error_rate',
+  module: 'guardrails',
+  metric: 'guardrail_fail_rate',
   condition: { operator: 'gt', threshold: 5 },
   windowMinutes: 15,
   channels,
@@ -423,10 +423,10 @@ describe('POST /alerts/rules/backtest', () => {
 
   it('answers supported:false for legacy metrics and non-replayable modes', async () => {
     const legacy = await call('POST', '/alerts/rules/backtest', {
-      rule: { name: 'x', module: 'models', metric: 'error_rate', condition: { operator: 'gt', threshold: 5 }, windowMinutes: 15 },
+      rule: { name: 'x', module: 'guardrails', metric: 'guardrail_fail_rate', condition: { operator: 'gt', threshold: 5 }, windowMinutes: 15 },
     });
     expect(legacy.status).toBe(200);
-    expect(legacy.body).toMatchObject({ supported: false, reason: 'legacy_metric', fires: 0, incidents: [] });
+    expect(legacy.body).toMatchObject({ supported: false, reason: 'collector_metric', fires: 0, incidents: [] });
 
     const baseline = await call('POST', '/alerts/rules/backtest', {
       rule: rule({ condition: { operator: 'gt', threshold: 0, mode: 'baseline', baseline: { lookbackDays: 14, sensitivity: 3, direction: 'up' } } }),

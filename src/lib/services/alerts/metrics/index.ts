@@ -10,11 +10,9 @@ import { getRegisteredAlertMetricCollectors } from '@/enterprise/alert-extension
 import type { IMetricCollector, MetricQuery, MetricResult } from './types';
 
 const logger = createLogger('alert-metrics');
-import { ModelUsageCollector } from './modelUsageCollector';
 import { InferenceServerCollector } from './inferenceServerCollector';
 import { GuardrailCollector } from './guardrailCollector';
 import { RagCollector } from './ragCollector';
-import { McpCollector } from './mcpCollector';
 import { AnalysisCollector } from './analysisCollector';
 import { EvaluationCollector } from './evaluationCollector';
 import { RedTeamCollector } from './redTeamCollector';
@@ -56,11 +54,9 @@ export async function collectMetric(query: MetricQuery): Promise<MetricResult> {
 }
 
 // Auto-register built-in collectors
-register(new ModelUsageCollector());
 register(new InferenceServerCollector());
 register(new GuardrailCollector());
 register(new RagCollector());
-register(new McpCollector());
 register(new AnalysisCollector());
 register(new EvaluationCollector());
 register(new RedTeamCollector());
