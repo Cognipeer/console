@@ -23,6 +23,7 @@ vi.mock('@/lib/services/agents/agentService', () => ({
 vi.mock('@/lib/database', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/database')>()),
   getDatabase: h.getDatabase,
+  runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await h.getDatabase()),
 }));
 vi.mock('@/lib/services/agents/agentSessionLease', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/services/agents/agentSessionLease')>()),

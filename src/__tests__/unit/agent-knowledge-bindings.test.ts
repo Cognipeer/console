@@ -145,3 +145,61 @@ describe('buildAgentKnowledgeTools', () => {
     expect(String(await run(read, { documentId: 'x' }))).toContain('# f.md');
   });
 });
+
+describe('buildAgentKnowledgeTools: the knowledge bases are read together', () => {
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  beforeEach(() => {
+    mocks.resolve.mockReset();
+  });
+
+  /** Reads of `slow` take longer; the log shows what had started when it finished. */
+  const slowFirst = (log: string[]) => mocks.resolve.mockImplementation(async (_db: string, key: string) => {
+    log.push(`start:${key}`);
+    await sleep(key === 'slow' ? 40 : 1);
+    log.push(`end:${key}`);
+    return key === 'off' ? { key, projectId: 'p1', status: 'disabled' } : { key, projectId: 'p1', status: 'active' };
+  });
+
+  it('combined: every base is read before the first answer, and the catalog stays in binding order', async () => {
+    const log: string[] = [];
+    slowFirst(log);
+    const built = await buildAgentKnowledgeTools('db', 't', 'p1', {
+      knowledgeBindings: [{ key: 'slow' }, { key: 'off' }, { key: 'quick' }],
+    }, guard);
+
+    expect(log.slice(0, 3)).toEqual(['start:slow', 'start:off', 'start:quick']);
+    const description = built.toolDefinitions[0].description ?? '';
+    expect(description.indexOf('- slow')).toBeGreaterThan(-1);
+    expect(description.indexOf('- slow')).toBeLessThan(description.indexOf('- quick'));
+    expect(description).not.toContain('- off');
+  });
+
+  it('separate: every base is read before the first answer, and the tools stay in binding order', async () => {
+    const log: string[] = [];
+    slowFirst(log);
+    const built = await buildAgentKnowledgeTools('db', 't', 'p1', {
+      knowledgeToolMode: 'separate',
+      knowledgeBindings: [{ key: 'slow' }, { key: 'quick' }],
+    }, guard);
+
+    expect(log.indexOf('start:quick')).toBeLessThan(log.indexOf('end:slow'));
+    expect(built.toolDefinitions.map((definition) => definition.name)).toEqual([
+      'knowledge_search_slow', 'knowledge_read_document_slow', 'knowledge_read_document_lines_slow',
+      'knowledge_search_quick', 'knowledge_read_document_quick', 'knowledge_read_document_lines_quick',
+    ]);
+  });
+
+  it('throws the failure of the first base in binding order, not the first to fail in time', async () => {
+    mocks.resolve.mockImplementation(async (_db: string, key: string) => {
+      if (key === 'first') { await sleep(30); throw new Error('first base unreachable'); }
+      throw new Error('second base unreachable');
+    });
+
+    await expect(buildAgentKnowledgeTools('db', 't', 'p1', { knowledgeBindings: [{ key: 'first' }, { key: 'second' }] }, guard))
+      .rejects.toThrow('first base unreachable');
+    await expect(buildAgentKnowledgeTools('db', 't', 'p1', {
+      knowledgeToolMode: 'separate', knowledgeBindings: [{ key: 'first' }, { key: 'second' }],
+    }, guard)).rejects.toThrow('first base unreachable');
+  });
+});

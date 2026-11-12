@@ -1,6 +1,6 @@
 /**
  * Agent reasoning, pure parts: the precedence rule, per-model picks, the
- * migration of the old Advanced-tab block, request parsing and config
+ * request parsing and config
  * validation. The wire effect of the rule is in agent-reasoning-wire.test.ts
  * and the run wiring in agent-reasoning-run.test.ts.
  */
@@ -10,7 +10,6 @@ import {
   agentReasoningForModel,
   agentShowsReasoning,
   applyModelToConfig,
-  migrateAgentReasoning,
   parseAgentRequestReasoning,
   reasoningConfigIssues,
   resolveAgentReasoning,
@@ -90,51 +89,10 @@ describe('per-model picks', () => {
   });
 });
 
-describe('migration of the old Advanced-tab reasoning', () => {
-  it('moves effort and budget onto the main model and keeps only reflection', () => {
-    const migrated = migrateAgentReasoning({
-      modelKey: 'm',
-      runtime: { profile: 'deep', reasoning: { enabled: true, effort: 'medium', budgetTokens: 4096, includeThoughts: true, reflection: false } },
-    });
-    expect(migrated.reasoningEffort).toBe('medium');
-    expect(migrated.reasoningBudgetTokens).toBe(4096);
-    expect(migrated.runtime).toEqual({ profile: 'deep', reasoning: { reflection: false } });
-  });
-
-  it('falls back to the level when no provider effort was set', () => {
-    expect(migrateAgentReasoning({ modelKey: 'm', runtime: { reasoning: { enabled: true, level: 'high' } } }).reasoningEffort).toBe('high');
-  });
-
-  it('a disabled block migrates to "Model default" (nothing set)', () => {
-    const migrated = migrateAgentReasoning({ modelKey: 'm', runtime: { reasoning: { enabled: false, effort: 'high' } } });
-    expect(migrated.reasoningEffort).toBeUndefined();
-    expect(migrated.runtime).toBeUndefined();
-  });
-
-  it('an explicit new-style pick wins over a stale old one', () => {
-    const migrated = migrateAgentReasoning({ modelKey: 'm', reasoningEffort: 'low', runtime: { reasoning: { enabled: true, effort: 'high' } } });
-    expect(migrated.reasoningEffort).toBe('low');
-    expect(migrated.runtime).toBeUndefined();
-  });
-
-  it('is idempotent and leaves a config without the old block untouched', () => {
-    const once = migrateAgentReasoning({ modelKey: 'm', runtime: { reasoning: { enabled: true, effort: 'low', budgetTokens: 2000 } } });
-    expect(migrateAgentReasoning(once)).toEqual(once);
-    const clean: IAgentConfig = { modelKey: 'm', runtime: { profile: 'fast', reasoning: { reflection: false } } };
-    expect(migrateAgentReasoning(clean)).toBe(clean);
-  });
-
-  it('drops a budget that sat next to "none"', () => {
-    const migrated = migrateAgentReasoning({ modelKey: 'm', runtime: { reasoning: { enabled: true, effort: 'none', budgetTokens: 3000 } } });
-    expect(migrated.reasoningEffort).toBe('none');
-    expect(migrated.reasoningBudgetTokens).toBeUndefined();
-  });
-
+describe('runtime.reasoning', () => {
   it('the SDK runtime options read reflection only', () => {
-    const old = resolveAgentRuntimeOptions({ modelKey: 'm', runtime: { reasoning: { enabled: true, effort: 'high', budgetTokens: 5000, reflection: false } } });
-    expect(old.reasoning).toEqual({ enabled: true, reflection: false });
-    expect(JSON.stringify(old.reasoning)).not.toContain('native');
-    expect(resolveAgentRuntimeOptions({ modelKey: 'm', runtime: { reasoning: { enabled: true, effort: 'high' } } }).reasoning).toEqual({ enabled: true, reflection: false });
+    expect(resolveAgentRuntimeOptions({ modelKey: 'm', runtime: { reasoning: { reflection: false } } }).reasoning).toEqual({ enabled: true, reflection: false });
+    expect(resolveAgentRuntimeOptions({ modelKey: 'm' }).reasoning).toEqual({ enabled: true, reflection: false });
     expect(resolveAgentRuntimeOptions({ modelKey: 'm', runtime: { reasoning: { reflection: true } } }).reasoning).toBeUndefined();
   });
 });

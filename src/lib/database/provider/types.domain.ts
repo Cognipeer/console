@@ -2921,7 +2921,6 @@ export type AgentSubagentMode = 'off' | 'registry_only' | 'registry_and_adhoc';
 export type AgentMemoryScope = 'session' | 'user' | 'workspace' | 'tenant';
 export type AgentMemoryWritePolicy = 'manual' | 'auto_important' | 'always';
 export type AgentMemoryReadPolicy = 'recent_only' | 'semantic' | 'hybrid';
-export type AgentReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
 export type AgentReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface IAgentLimits {
@@ -2962,12 +2961,6 @@ export interface IAgentContextPilotConfig {
 }
 
 export interface IAgentReasoningConfig {
-  enabled?: boolean;
-  level?: AgentReasoningLevel;
-  /** Provider-native effort. `none` is a value that gets SENT, not "off". */
-  effort?: AgentReasoningEffort;
-  budgetTokens?: number;
-  includeThoughts?: boolean;
   /** SDK reflection pass. Absent or `false` = off (console default); `true` enables it. */
   reflection?: boolean;
 }
@@ -3145,9 +3138,8 @@ export interface IAgentRuntimeConfig {
   toolResponses?: IAgentToolResponsesConfig;
   contextPilot?: IAgentContextPilotConfig;
   /**
-   * Only `reflection` is live. The rest moved next to the model
-   * (`IAgentConfig.reasoningEffort`); old values are migrated on read and on
-   * save (`migrateAgentReasoning`).
+   * Only `reflection` lives here. Effort and budget are next to the model
+   * (`IAgentConfig.reasoningEffort`).
    */
   reasoning?: IAgentReasoningConfig;
   /**

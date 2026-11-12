@@ -5,7 +5,7 @@
  */
 
 import type { AgentInvokeResult as AgentSdkInvokeResult, TraceSessionFile } from '@cognipeer/agent-sdk';
-import { getDatabase, runWithTenantScope, type DatabaseProvider, type IAgentTracingEvent, type IAgentTracingSession } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider, type IAgentTracingEvent, type IAgentTracingSession } from '@/lib/database';
 import { currentRestrictedKnowledgeTags, restrictedKnowledgeTagsOf } from '@/lib/services/rag/access';
 import { currentTurnSignal } from '@/lib/core/turnSignal';
 import { recordTracingSessionCreated } from '@/lib/services/agentTracing';
@@ -18,6 +18,7 @@ import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/fin
 import { nameSubagentOnApprovalStep } from './subagentEvents';
 import { mergeContinuedSessionIdentity, readTraceContinuationMarker } from '@/lib/services/tracingContinuation';
 import { createLogger } from '@/lib/core/logger';
+import { settleInOrder } from './concurrentBuild';
 
 const logger = createLogger('agents');
 
@@ -145,21 +146,21 @@ export async function reconcileTraceTotals(
 ): Promise<void> {
     if (!sessionId || !usage) return;
     try {
-        const db = await getDatabase();
-        await db.switchToTenant(tenantDbName);
-        const session = await db.findAgentTracingSessionById(sessionId, projectId);
-        if (!session) return;
-        const patch: Partial<IAgentTracingSession> = {};
-        const fields = [
-            ['totalInputTokens', usage.inputTokens],
-            ['totalOutputTokens', usage.outputTokens],
-            ['totalCachedInputTokens', usage.cachedInputTokens],
-        ] as const;
-        for (const [field, value] of fields) {
-            if (typeof value === 'number' && Number.isFinite(value) && value > (session[field] ?? 0)) patch[field] = Math.ceil(value);
-        }
-        if (Object.keys(patch).length === 0) return;
-        await db.updateAgentTracingSession(sessionId, patch, projectId);
+        await runWithTenantScope(tenantDbName, async (db) => {
+            const session = await db.findAgentTracingSessionById(sessionId, projectId);
+            if (!session) return;
+            const patch: Partial<IAgentTracingSession> = {};
+            const fields = [
+                ['totalInputTokens', usage.inputTokens],
+                ['totalOutputTokens', usage.outputTokens],
+                ['totalCachedInputTokens', usage.cachedInputTokens],
+            ] as const;
+            for (const [field, value] of fields) {
+                if (typeof value === 'number' && Number.isFinite(value) && value > (session[field] ?? 0)) patch[field] = Math.ceil(value);
+            }
+            if (Object.keys(patch).length === 0) return;
+            await db.updateAgentTracingSession(sessionId, patch, projectId);
+        });
     } catch (error) {
         logger.warn('Could not reconcile the trace totals with the turn usage', { sessionId, error: String(error) });
     }
@@ -179,18 +180,18 @@ export async function markTraceSessionFailed(
 ): Promise<void> {
     if (!sessionId) return;
     try {
-        const db = await getDatabase();
-        await db.switchToTenant(tenantDbName);
-        const session = await db.findAgentTracingSessionById(sessionId, projectId);
-        if (!session) return;
-        await db.updateAgentTracingSession(sessionId, {
-            status: 'error',
-            statusExplicit: true,
-            errors: [
-                ...(session.errors ?? []),
-                { eventId: 'console', type: 'session', message: detail, timestamp: new Date().toISOString() },
-            ],
-        }, projectId);
+        await runWithTenantScope(tenantDbName, async (db) => {
+            const session = await db.findAgentTracingSessionById(sessionId, projectId);
+            if (!session) return;
+            await db.updateAgentTracingSession(sessionId, {
+                status: 'error',
+                statusExplicit: true,
+                errors: [
+                    ...(session.errors ?? []),
+                    { eventId: 'console', type: 'session', message: detail, timestamp: new Date().toISOString() },
+                ],
+            }, projectId);
+        });
     } catch (error) {
         logger.warn('Could not mark the trace session failed', { sessionId, error: String(error) });
     }
@@ -411,10 +412,12 @@ export async function createInternalTracingSink(
                 onSessionSaved?.(sessionId);
             }
             const doc = buildEventDoc(sessionId, event);
-            await db.createAgentTracingEvent(doc);
-            stream.written += 1;
             const errorCounts = countTraceErrors([doc]);
-            await db.applyAgentTracingSessionEvent(sessionId, {
+            // The event and the session's running totals are different collections, so they are written together.
+            // A failure of either fails the write (the insert's first); the end-of-run save recomputes the totals from
+            // the stored events, so a total that was applied for an event that did not land is corrected there.
+            const inserted = db.createAgentTracingEvent(doc).then(() => { stream.written += 1; });
+            const aggregated = db.applyAgentTracingSessionEvent(sessionId, {
                 aiErrors: errorCounts.aiErrors,
                 cachedInputTokens: doc.cachedInputTokens,
                 durationMs: doc.durationMs,
@@ -428,6 +431,8 @@ export async function createInternalTracingSink(
                 toolErrors: errorCounts.toolErrors,
                 toolsUsed: doc.toolName ? [doc.toolName] : [],
             }, projectId);
+            const written = await settleInOrder([inserted, aggregated]);
+            if (!written.ok) throw written.reason;
             // Hosted runs feed agent health only; the end-of-run booking knows these were counted here.
             await recordTraceEventMetrics({ tenantDbName, tenantId, projectId, agentName: seed?.metadata?.flowOwned === 'true' ? undefined : seed?.agent?.name, events: [doc], source: 'hosted' });
         });
@@ -459,180 +464,179 @@ export async function createInternalTracingSink(
         onEvent,
         onSession: async (session: InternalTraceSession) => {
             try {
-                const db = await getDatabase();
-                await db.switchToTenant(tenantDbName);
+                await runWithTenantScope(tenantDbName, async (db) => {
+                    // A run that paused (tool approval, question, client tool)
+                    // and resumed sends its session in parts: the later parts
+                    // carry only their own events and are APPENDED, while the
+                    // session-level totals they carry already cover every part.
+                    const continuation = readTraceContinuationMarker(session);
+                    const existing = await db.findAgentTracingSessionById(session.sessionId, projectId);
+                    const stream = streams.get(session.sessionId);
+                    // Every streamed write lands before this save decides what is left to insert.
+                    if (stream) await stream.chain;
+                    const streamed = Boolean(stream && stream.written > 0);
+                    // A later part of a paused run, and a session streamed while it ran, keep the events already
+                    // stored and add the rest; any other save replaces what an earlier save of the session left.
+                    const appending = Boolean(existing) && (Boolean(continuation) || streamed);
+                    const stored = existing
+                        ? await db.listAgentTracingEvents(session.sessionId, projectId, { projection: { sections: 0, metadata: 0 } })
+                        : [];
+                    const storedSequences = new Set(stored.map((event) => event.sequence));
+                    const allEvents = Array.isArray(session.events) ? session.events : [];
+                    // A retried part, or a streamed event, must not be inserted twice.
+                    const events = appending
+                        ? allEvents.filter((event) => !storedSequences.has(event?.sequence ?? 0))
+                        : allEvents;
+                    const eventDocs = events.map((event) => buildEventDoc(session.sessionId, event));
 
-                // A run that paused (tool approval, question, client tool)
-                // and resumed sends its session in parts: the later parts
-                // carry only their own events and are APPENDED, while the
-                // session-level totals they carry already cover every part.
-                const continuation = readTraceContinuationMarker(session);
-                const existing = await db.findAgentTracingSessionById(session.sessionId, projectId);
-                const stream = streams.get(session.sessionId);
-                // Every streamed write lands before this save decides what is left to insert.
-                if (stream) await stream.chain;
-                const streamed = Boolean(stream && stream.written > 0);
-                // A later part of a paused run, and a session streamed while it ran, keep the events already
-                // stored and add the rest; any other save replaces what an earlier save of the session left.
-                const appending = Boolean(existing) && (Boolean(continuation) || streamed);
-                const stored = existing
-                    ? await db.listAgentTracingEvents(session.sessionId, projectId, { projection: { sections: 0, metadata: 0 } })
-                    : [];
-                const storedSequences = new Set(stored.map((event) => event.sequence));
-                const allEvents = Array.isArray(session.events) ? session.events : [];
-                // A retried part, or a streamed event, must not be inserted twice.
-                const events = appending
-                    ? allEvents.filter((event) => !storedSequences.has(event?.sequence ?? 0))
-                    : allEvents;
-                const eventDocs = events.map((event) => buildEventDoc(session.sessionId, event));
+                    // Models and tools used, and the diagnostic rollups (`totalReasoningTokens` /
+                    // `truncatedEvents`) that `applyAgentTracingSessionEvent` accumulates incrementally —
+                    // taken here over the whole session: the stored events (earlier parts, streamed writes)
+                    // and this save's own, read from the columns both carry.
+                    const counted = appending ? [...stored, ...eventDocs] : eventDocs;
+                    const modelsUsed = new Set<string>();
+                    const toolsUsed = new Set<string>();
+                    let totalReasoningTokens = 0;
+                    let truncatedEvents = 0;
+                    for (const doc of counted) {
+                        if (doc.model) modelsUsed.add(doc.model);
+                        if (doc.toolName) toolsUsed.add(doc.toolName);
+                        const actorName = doc.actor?.scope === 'tool' ? doc.actor?.name : undefined;
+                        if (typeof actorName === 'string' && actorName) toolsUsed.add(actorName);
+                        if (typeof doc.reasoningTokens === 'number') totalReasoningTokens += doc.reasoningTokens;
+                        if (isTruncatedFinishReason(doc.finishReason)) truncatedEvents += 1;
+                    }
+                    if (session?.agent?.model) modelsUsed.add(session.agent.model);
 
-                // Models and tools used, and the diagnostic rollups (`totalReasoningTokens` /
-                // `truncatedEvents`) that `applyAgentTracingSessionEvent` accumulates incrementally —
-                // taken here over the whole session: the stored events (earlier parts, streamed writes)
-                // and this save's own, read from the columns both carry.
-                const counted = appending ? [...stored, ...eventDocs] : eventDocs;
-                const modelsUsed = new Set<string>();
-                const toolsUsed = new Set<string>();
-                let totalReasoningTokens = 0;
-                let truncatedEvents = 0;
-                for (const doc of counted) {
-                    if (doc.model) modelsUsed.add(doc.model);
-                    if (doc.toolName) toolsUsed.add(doc.toolName);
-                    const actorName = doc.actor?.scope === 'tool' ? doc.actor?.name : undefined;
-                    if (typeof actorName === 'string' && actorName) toolsUsed.add(actorName);
-                    if (typeof doc.reasoningTokens === 'number') totalReasoningTokens += doc.reasoningTokens;
-                    if (isTruncatedFinishReason(doc.finishReason)) truncatedEvents += 1;
-                }
-                if (session?.agent?.model) modelsUsed.add(session.agent.model);
+                    // Same health rule as the HTTP ingest: the SDK's own status stays authoritative; counters and a
+                    // derived status fill in when it is absent. SDK sink failures are not run failures.
+                    const errorCounts = countTraceErrors(counted);
+                    const sessionErrors = session.errors ?? [];
+                    const nonSinkErrors = sessionErrors.filter((error) => (error as Record<string, unknown> | null)?.type !== 'sink').length;
+                    const sessionStatus = deriveSessionStatus({
+                        clientStatus: session.status,
+                        errorEvents: errorCounts.errorEvents,
+                        nonSinkErrors,
+                        ended: String(session.status ?? '').trim().toLowerCase() !== 'in_progress',
+                    });
+                    // A turn the caller stopped ends its session as the SDK sees an ordinary end ("success");
+                    // the sink runs inside the invoke, so the turn's own signal says it was cancelled. A run
+                    // that failed keeps its error. What the aborted model call used is only known when the
+                    // gateway settled it (runUsage); the trace's token totals are the SDK's, so they may miss it.
+                    const cancelledByCaller = currentTurnSignal()?.aborted === true
+                        && sessionStatus !== 'error' && sessionStatus !== 'paused' && sessionStatus !== 'in_progress';
+                    // What the traced work drew from documents not open to everyone (the sink runs inside the turn's
+                    // exposure), with what an earlier part of the session already held.
+                    const kbRestricted = restrictedKnowledgeTagsOf([...(existing?.kbRestricted ?? []), ...currentRestrictedKnowledgeTags()]);
 
-                // Same health rule as the HTTP ingest: the SDK's own status stays authoritative; counters and a
-                // derived status fill in when it is absent. SDK sink failures are not run failures.
-                const errorCounts = countTraceErrors(counted);
-                const sessionErrors = session.errors ?? [];
-                const nonSinkErrors = sessionErrors.filter((error) => (error as Record<string, unknown> | null)?.type !== 'sink').length;
-                const sessionStatus = deriveSessionStatus({
-                    clientStatus: session.status,
-                    errorEvents: errorCounts.errorEvents,
-                    nonSinkErrors,
-                    ended: String(session.status ?? '').trim().toLowerCase() !== 'in_progress',
-                });
-                // A turn the caller stopped ends its session as the SDK sees an ordinary end ("success");
-                // the sink runs inside the invoke, so the turn's own signal says it was cancelled. A run
-                // that failed keeps its error. What the aborted model call used is only known when the
-                // gateway settled it (runUsage); the trace's token totals are the SDK's, so they may miss it.
-                const cancelledByCaller = currentTurnSignal()?.aborted === true
-                    && sessionStatus !== 'error' && sessionStatus !== 'paused' && sessionStatus !== 'in_progress';
-                // What the traced work drew from documents not open to everyone (the sink runs inside the turn's
-                // exposure), with what an earlier part of the session already held.
-                const kbRestricted = restrictedKnowledgeTagsOf([...(existing?.kbRestricted ?? []), ...currentRestrictedKnowledgeTags()]);
+                    const agentTriggerId = (session.metadata as Record<string, unknown> | undefined)?.source === 'trigger'
+                        && typeof (session.metadata as Record<string, unknown>).triggerId === 'string';
+                    const sessionDoc: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'> = {
+                        sessionId: session.sessionId,
+                        traceId: session.traceId,
+                        rootSpanId: session.rootSpanId,
+                        threadId: session.threadId,
+                        tenantId,
+                        projectId,
+                        source: agentTriggerId ? 'trigger' : 'custom',
+                        agent: session.agent ?? {},
+                        agentName: session.agent?.name ?? undefined,
+                        agentVersion: session.agent?.version ?? undefined,
+                        agentModel: session.agent?.model ?? undefined,
+                        config: session.config ?? {},
+                        metadata: { ...(session.metadata ?? {}), ...(agentKey ? { agentKey } : {}) },
+                        summary: session.summary ?? {},
+                        status: cancelledByCaller ? 'cancelled' : sessionStatus,
+                        // An SDK-supplied status is never overridden by a late error event (only a derived one is).
+                        statusExplicit: cancelledByCaller || isExplicitClientStatus(session.status),
+                        startedAt: session.startedAt ? new Date(session.startedAt) : new Date(),
+                        endedAt: session.endedAt ? new Date(session.endedAt) : undefined,
+                        durationMs: session.durationMs ?? undefined,
+                        errorEvents: errorCounts.errorEvents,
+                        toolErrors: errorCounts.toolErrors,
+                        aiErrors: errorCounts.aiErrors,
+                        errors: sessionErrors,
+                        modelsUsed: Array.from(modelsUsed),
+                        toolsUsed: Array.from(toolsUsed),
+                        eventCounts: session.summary?.eventCounts ?? {},
+                        totalEvents: counted.length,
+                        totalInputTokens: session.summary?.totalInputTokens ?? 0,
+                        totalOutputTokens: session.summary?.totalOutputTokens ?? 0,
+                        totalCachedInputTokens: session.summary?.totalCachedInputTokens ?? 0,
+                        totalReasoningTokens,
+                        truncatedEvents,
+                        totalBytesIn: session.summary?.totalBytesIn ?? undefined,
+                        totalBytesOut: session.summary?.totalBytesOut ?? undefined,
+                        ...(kbRestricted.length > 0 ? { kbRestricted } : {}),
+                    };
 
-                const agentTriggerId = (session.metadata as Record<string, unknown> | undefined)?.source === 'trigger'
-                    && typeof (session.metadata as Record<string, unknown>).triggerId === 'string';
-                const sessionDoc: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'> = {
-                    sessionId: session.sessionId,
-                    traceId: session.traceId,
-                    rootSpanId: session.rootSpanId,
-                    threadId: session.threadId,
-                    tenantId,
-                    projectId,
-                    source: agentTriggerId ? 'trigger' : 'custom',
-                    agent: session.agent ?? {},
-                    agentName: session.agent?.name ?? undefined,
-                    agentVersion: session.agent?.version ?? undefined,
-                    agentModel: session.agent?.model ?? undefined,
-                    config: session.config ?? {},
-                    metadata: { ...(session.metadata ?? {}), ...(agentKey ? { agentKey } : {}) },
-                    summary: session.summary ?? {},
-                    status: cancelledByCaller ? 'cancelled' : sessionStatus,
-                    // An SDK-supplied status is never overridden by a late error event (only a derived one is).
-                    statusExplicit: cancelledByCaller || isExplicitClientStatus(session.status),
-                    startedAt: session.startedAt ? new Date(session.startedAt) : new Date(),
-                    endedAt: session.endedAt ? new Date(session.endedAt) : undefined,
-                    durationMs: session.durationMs ?? undefined,
-                    errorEvents: errorCounts.errorEvents,
-                    toolErrors: errorCounts.toolErrors,
-                    aiErrors: errorCounts.aiErrors,
-                    errors: sessionErrors,
-                    modelsUsed: Array.from(modelsUsed),
-                    toolsUsed: Array.from(toolsUsed),
-                    eventCounts: session.summary?.eventCounts ?? {},
-                    totalEvents: counted.length,
-                    totalInputTokens: session.summary?.totalInputTokens ?? 0,
-                    totalOutputTokens: session.summary?.totalOutputTokens ?? 0,
-                    totalCachedInputTokens: session.summary?.totalCachedInputTokens ?? 0,
-                    totalReasoningTokens,
-                    truncatedEvents,
-                    totalBytesIn: session.summary?.totalBytesIn ?? undefined,
-                    totalBytesOut: session.summary?.totalBytesOut ?? undefined,
-                    ...(kbRestricted.length > 0 ? { kbRestricted } : {}),
-                };
+                    // The counters above already cover the stored events; what carries over from an earlier
+                    // part or from the streamed opening is the identity a later save may lack.
+                    if (appending && existing) mergeContinuedSessionIdentity(sessionDoc, existing);
 
-                // The counters above already cover the stored events; what carries over from an earlier
-                // part or from the streamed opening is the identity a later save may lack.
-                if (appending && existing) mergeContinuedSessionIdentity(sessionDoc, existing);
+                    onSessionSaved?.(session.sessionId);
+                    // Upsert session
+                    if (existing) {
+                        await db.updateAgentTracingSession(session.sessionId, sessionDoc, projectId);
+                    } else {
+                        const attribution = recordTracingSessionCreated({
+                            tenantDbName,
+                            tenantId,
+                            projectId,
+                            agentName: sessionDoc.agentName,
+                            metadata: sessionDoc.metadata,
+                        });
+                        await db.createAgentTracingSession({
+                            ...sessionDoc,
+                            userId: attribution.userId,
+                            apiTokenId: attribution.apiTokenId,
+                            actorType: attribution.actorType,
+                        });
+                    }
 
-                onSessionSaved?.(session.sessionId);
-                // Upsert session
-                if (existing) {
-                    await db.updateAgentTracingSession(session.sessionId, sessionDoc, projectId);
-                } else {
-                    const attribution = recordTracingSessionCreated({
+                    // Replace the events — or, for a continued or streamed session, add what is not stored yet.
+                    if (!appending) {
+                        await db.deleteAgentTracingEvents(session.sessionId, projectId);
+                    }
+                    for (const eventDoc of eventDocs) {
+                        await db.createAgentTracingEvent(eventDoc);
+                    }
+                    // What the health counters already hold for this part: a replaced save's previous events
+                    // (subtracted below), or the events this part streamed, booked as they were written.
+                    const partStart = continuation?.firstSequence ?? 0;
+                    const partStored = appending ? stored.filter((doc) => (doc.sequence ?? 0) >= partStart) : [];
+                    const bookedWhileStreaming = streamed && Boolean(seed?.agent?.name) && seed?.metadata?.flowOwned !== 'true';
+
+                    // Hosted runs feed agent health only: their model and tool calls are counted where they execute.
+                    await recordTraceEventMetrics({
                         tenantDbName,
                         tenantId,
                         projectId,
-                        agentName: sessionDoc.agentName,
-                        metadata: sessionDoc.metadata,
-                    });
-                    await db.createAgentTracingSession({
-                        ...sessionDoc,
-                        userId: attribution.userId,
-                        apiTokenId: attribution.apiTokenId,
-                        actorType: attribution.actorType,
-                    });
-                }
-
-                // Replace the events — or, for a continued or streamed session, add what is not stored yet.
-                if (!appending) {
-                    await db.deleteAgentTracingEvents(session.sessionId, projectId);
-                }
-                for (const eventDoc of eventDocs) {
-                    await db.createAgentTracingEvent(eventDoc);
-                }
-                // What the health counters already hold for this part: a replaced save's previous events
-                // (subtracted below), or the events this part streamed, booked as they were written.
-                const partStart = continuation?.firstSequence ?? 0;
-                const partStored = appending ? stored.filter((doc) => (doc.sequence ?? 0) >= partStart) : [];
-                const bookedWhileStreaming = streamed && Boolean(seed?.agent?.name) && seed?.metadata?.flowOwned !== 'true';
-
-                // Hosted runs feed agent health only: their model and tool calls are counted where they execute.
-                await recordTraceEventMetrics({
-                    tenantDbName,
-                    tenantId,
-                    projectId,
-                    // A hidden agent a flow owns is not an agent of its own in the health views.
-                    agentName: seed?.metadata?.flowOwned === 'true' ? undefined : sessionDoc.agentName,
-                    events: appending ? [...partStored, ...eventDocs] : eventDocs,
-                    previousEvents: appending ? (bookedWhileStreaming ? partStored : []) : stored,
-                    source: 'hosted',
-                });
-                if (isTerminalSessionStatus(sessionDoc.status)) {
-                    await recordAgentSessionOutcome({
-                        tenantDbName,
-                        tenantId,
-                        projectId,
-                        session: sessionDoc,
-                        previousOutcome: existing?.metricsOutcome,
+                        // A hidden agent a flow owns is not an agent of its own in the health views.
+                        agentName: seed?.metadata?.flowOwned === 'true' ? undefined : sessionDoc.agentName,
+                        events: appending ? [...partStored, ...eventDocs] : eventDocs,
+                        previousEvents: appending ? (bookedWhileStreaming ? partStored : []) : stored,
                         source: 'hosted',
-                        events: counted,
                     });
-                }
+                    if (isTerminalSessionStatus(sessionDoc.status)) {
+                        await recordAgentSessionOutcome({
+                            tenantDbName,
+                            tenantId,
+                            projectId,
+                            session: sessionDoc,
+                            previousOutcome: existing?.metricsOutcome,
+                            source: 'hosted',
+                            events: counted,
+                        });
+                    }
 
-                logger.info('Internal tracing session saved', {
-                    sessionId: session.sessionId,
-                    agentName: session.agent?.name,
-                    eventsCount: counted.length,
-                    streamedEvents: stream?.written ?? 0,
-                    insertedEvents: eventDocs.length,
+                    logger.info('Internal tracing session saved', {
+                        sessionId: session.sessionId,
+                        agentName: session.agent?.name,
+                        eventsCount: counted.length,
+                        streamedEvents: stream?.written ?? 0,
+                        insertedEvents: eventDocs.length,
+                    });
                 });
             } catch (err) {
                 logger.error('Failed to save internal tracing session', { error: err });

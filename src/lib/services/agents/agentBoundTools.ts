@@ -15,6 +15,7 @@ import { isToolOutput } from '@/lib/services/tools/toolOutput';
 import { classifyTool } from './agentHumanInTheLoop';
 import { effectiveActionAnnotations, mcpToolMarkings } from '@/lib/services/tools/actionAnnotations';
 import { mayUseSharedResource } from './sharedResourceAccess';
+import { started } from './concurrentBuild';
 import { resolveMcpGuardrailBinding, getToolAnnotationOverrides, resolveSourceType } from '@/lib/services/mcp/mcpService';
 import { defaultAnnotationsForSource } from '@/lib/services/mcp/toolAnnotations';
 import { isMcpToolEnabled, executeMcpTool } from '@/lib/services/mcp';
@@ -92,10 +93,32 @@ export async function buildBoundTools(
     const definitions: TraceToolDefinition[] = [];
     const cleanupTasks: Array<() => Promise<void>> = [];
 
-    for (const binding of bindings) {
+    type ToolRecord = Awaited<ReturnType<typeof resolveAgentBindingTool>>;
+    type McpServer = Awaited<ReturnType<typeof resolveAgentBindingMcpServer>>;
+    type McpLookup = { server: McpServer; mayUse: boolean };
+
+    /** The read a binding needs before its tools can be built, started early; bindings that read nothing resolve to nothing. */
+    async function prefetchBinding(binding: NonNullable<typeof bindings>[number]): Promise<ToolRecord | McpLookup | undefined> {
+        if (binding.source === 'tool') return resolveAgentBindingTool(tenantDbName, binding.sourceKey, projectId);
+        if (binding.source !== 'mcp') return undefined;
+        const server = await resolveAgentBindingMcpServer(tenantDbName, binding.sourceKey, projectId, agentId);
+        if (!server || server.status !== 'active') return { server, mayUse: false };
+        const mayUse = await mayUseSharedResource(
+            { tenantDbName, tenantId, caller: mcpIdentity, source: runtimeContext?.source },
+            { type: 'mcp-server', id: String(server._id ?? ''), key: server.key, projectId: server.projectId, access: server.access },
+        );
+        return { server, mayUse };
+    }
+
+    // The records every binding needs are read for all bindings at once: N bindings cost one round trip of waiting, not
+    // N. Only reads start here. Whatever opens something (a browser session) or builds through a host stays in the
+    // serial loop below, in binding order, and a read that failed throws at its own binding, after the bindings before it.
+    const lookups = bindings.map((binding) => started(prefetchBinding(binding)));
+
+    for (const [index, binding] of bindings.entries()) {
         if (binding.source === 'tool') {
             // ── Unified tool system ──────────────────────────────
-            const toolRecord = await resolveAgentBindingTool(tenantDbName, binding.sourceKey, projectId);
+            const toolRecord = (await lookups[index]) as ToolRecord | undefined;
             if (!toolRecord || toolRecord.status !== 'active') {
                 logger.warn('Skipping inactive/missing tool', { key: binding.sourceKey });
                 continue;
@@ -186,17 +209,13 @@ export async function buildBoundTools(
             }
         } else if (binding.source === 'mcp') {
             // ── Legacy MCP server bindings ───────────────────────
-            const server = await resolveAgentBindingMcpServer(tenantDbName, binding.sourceKey, projectId, agentId);
+            const { server, mayUse } = (await lookups[index]) as McpLookup;
             if (!server || server.status !== 'active') {
                 logger.warn('Skipping inactive/missing MCP server', { key: binding.sourceKey });
                 continue;
             }
             // The server's access list decides for the person this run is made for (managed:access:*); a server they
             // may not use is left out, so the model never sees its tools.
-            const mayUse = await mayUseSharedResource(
-                { tenantDbName, tenantId, caller: mcpIdentity, source: runtimeContext?.source },
-                { type: 'mcp-server', id: String(server._id ?? ''), key: server.key, projectId: server.projectId, access: server.access },
-            );
             if (!mayUse) {
                 logger.info('MCP server is not open to the person this run is made for; its tools are left out', { key: binding.sourceKey });
                 continue;

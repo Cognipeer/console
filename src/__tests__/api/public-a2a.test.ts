@@ -14,8 +14,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@/lib/database', async () => {
   const errors = await import('@/lib/database/provider/errors');
+  const getDatabase = vi.fn();
   return {
-    getDatabase: vi.fn(),
+    getDatabase,
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
     AgentRunConflictError: errors.AgentRunConflictError,
     AgentRunIdempotencyKeyTakenError: errors.AgentRunIdempotencyKeyTakenError,
   };

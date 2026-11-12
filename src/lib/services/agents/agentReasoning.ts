@@ -17,7 +17,7 @@
  */
 
 import type { IModel } from '@/lib/database';
-import type { IAgentConfig, IAgentRuntimeConfig } from '@/lib/database/provider/types.domain';
+import type { IAgentConfig } from '@/lib/database/provider/types.domain';
 import { effortsOfRule, resolveRuleForDriver } from '@/lib/services/models/modelRules';
 import { modelMaxOutputTokens } from '@/lib/services/models/outputLimits';
 import { isManagedModel } from '@/enterprise/managed-credits';
@@ -112,34 +112,6 @@ export function applyModelToConfig<T extends IAgentConfig>(config: T, modelKey: 
 /** Whether reasoning text may leave the platform for this agent. */
 export function agentShowsReasoning(config: Pick<IAgentConfig, 'showReasoning'> | undefined | null): boolean {
   return config?.showReasoning !== false;
-}
-
-/**
- * Old Advanced-tab reasoning (`runtime.reasoning`: enabled/level/effort/budget/
- * includeThoughts) becomes the main model's own fields; only `reflection` stays
- * under `runtime.reasoning`. Pure and idempotent: an explicit new-style value
- * wins over a stale old one, and a second pass changes nothing.
- */
-export function migrateAgentReasoning(config: IAgentConfig): IAgentConfig {
-  const old = config?.runtime?.reasoning;
-  if (!old || typeof old !== 'object') return config;
-  const legacyKeys = ['enabled', 'level', 'effort', 'budgetTokens', 'includeThoughts'] as const;
-  if (!legacyKeys.some((key) => (old as Record<string, unknown>)[key] !== undefined)) return config;
-
-  const next: IAgentConfig = { ...config };
-  if (config.reasoningEffort === undefined && config.reasoningBudgetTokens === undefined && old.enabled !== false) {
-    const effort = isEffort(old.effort) ? old.effort : isEffort(old.level) ? old.level : undefined;
-    const budget = positiveInt(old.budgetTokens);
-    if (effort) next.reasoningEffort = effort;
-    if (budget !== undefined && effort !== 'none') next.reasoningBudgetTokens = budget;
-  }
-
-  const runtime: IAgentRuntimeConfig = { ...(config.runtime ?? {}) };
-  if (old.reflection !== undefined) runtime.reasoning = { reflection: old.reflection };
-  else delete runtime.reasoning;
-  if (Object.keys(runtime).length > 0) next.runtime = runtime;
-  else delete next.runtime;
-  return next;
 }
 
 export interface ParsedRequestReasoning {

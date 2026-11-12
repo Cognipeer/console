@@ -8,7 +8,7 @@ import type { QueuePayload } from '@/lib/core/queue';
 import { agentEntityId } from './agentEntityId';
 import type { AgentInvokeResult as AgentSdkInvokeResult, Message as AgentSdkMessage, SmartAgentEvent as AgentSdkEvent } from '@cognipeer/agent-sdk';
 import { applyServiceAvailability, assertAgentsEnabled } from './agentServiceAvailability';
-import { getDatabase, type IAgentConversation, type IAgentMessageAttachment } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type DatabaseProvider, type IAgentConversation, type IAgentMessageAttachment } from '@/lib/database';
 import { KnowledgeExposure, runWithKnowledgeExposure } from '@/lib/services/rag/access';
 import { consoleIdentityPersonOf } from '@/lib/iam/consoleIdentity';
 import { runWithTurnSignal } from '@/lib/core/turnSignal';
@@ -123,32 +123,33 @@ export async function executePlaygroundChatLocal(
 ): Promise<AgentPlaygroundChatResult> {
     await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
-    try {
-        const runtime = request.runtimeContext;
-        const caller: RoutingCallerContext = {
-            channel: channelFromSource(runtime?.source) ?? 'playground',
-            agentKey: request.agentKey,
-            projectId: request.projectId,
-            ...(runtime?.userId ? { userId: runtime.userId } : {}),
-            ...(runtime?.tokenId ? { apiTokenId: runtime.tokenId } : {}),
-            ...Object.fromEntries(Object.entries(request.callerContext ?? {}).filter(([, v]) => v !== undefined)),
-            run: {},
-        };
-        return await runWithRoutingCaller(caller, () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runPlaygroundChatTurn(request, scope)));
-    } catch (error) {
-        await scope.events?.fail(error).catch(() => undefined);
-        throw error;
-    }
+    // One tenant scope for the whole turn, the failure path included.
+    return runWithTenantScope(request.tenantDbName, async (db) => {
+        try {
+            const runtime = request.runtimeContext;
+            const caller: RoutingCallerContext = {
+                channel: channelFromSource(runtime?.source) ?? 'playground',
+                agentKey: request.agentKey,
+                projectId: request.projectId,
+                ...(runtime?.userId ? { userId: runtime.userId } : {}),
+                ...(runtime?.tokenId ? { apiTokenId: runtime.tokenId } : {}),
+                ...Object.fromEntries(Object.entries(request.callerContext ?? {}).filter(([, v]) => v !== undefined)),
+                run: {},
+            };
+            return await runWithRoutingCaller(caller, () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runPlaygroundChatTurn(request, scope, db)));
+        } catch (error) {
+            await scope.events?.fail(error).catch(() => undefined);
+            throw error;
+        }
+    });
 }
 
 async function runPlaygroundChatTurn(
     request: AgentPlaygroundChatRequest,
     scope: { events?: SessionTurnEvents },
+    db: DatabaseProvider,
 ): Promise<AgentPlaygroundChatResult> {
     const { tenantDbName, tenantId, projectId, agentKey, userMessage } = request;
-
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
 
     const agent = await db.findAgentByKey(agentKey, projectId);
     if (!agent) throw new Error(`Agent "${agentKey}" not found`);

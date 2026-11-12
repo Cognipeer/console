@@ -366,9 +366,14 @@ export async function previewAgentImport(
     projectId: string,
     manifest: AgentManifest,
 ): Promise<AgentImportPreview> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, (db) => previewImportInScope(db, projectId, manifest));
+}
 
+async function previewImportInScope(
+    db: DatabaseProvider,
+    projectId: string,
+    manifest: AgentManifest,
+): Promise<AgentImportPreview> {
     const declared = collectManifestDependencies(manifest.spec);
     const dependencies: ManifestDependencyStatus[] = [];
     for (const dep of declared) {
@@ -598,17 +603,18 @@ export async function applyAgentManifest(
     const issues = validateAgentManifest(manifest);
     if (issues.length > 0) throw new AgentManifestError('Manifest failed validation', issues);
 
-    const preview = await previewAgentImport(tenantDbName, projectId, manifest);
-    if (preview.missing.length > 0 && options.allowMissingDependencies === false) {
-        throw new AgentManifestError(
-            'Manifest references dependencies this project does not have',
-            preview.missing.map((dep) => `${dep.type} "${dep.key}" (${dep.usedBy})`),
-        );
-    }
-
-    // One tenant binding for every read and write below (and the config lookups of the re-binding): a
-    // process-global switchToTenant can be overwritten by another tenant's request between the awaits.
-    return runWithTenantScope(tenantDbName, (db) => importManifest(db, tenantId, projectId, userId, manifest, options, preview));
+    // One tenant binding for the dependency check, every read and write below and the config lookups of the
+    // re-binding: a process-global switchToTenant can be overwritten by another tenant's request between the awaits.
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const preview = await previewImportInScope(db, projectId, manifest);
+        if (preview.missing.length > 0 && options.allowMissingDependencies === false) {
+            throw new AgentManifestError(
+                'Manifest references dependencies this project does not have',
+                preview.missing.map((dep) => `${dep.type} "${dep.key}" (${dep.usedBy})`),
+            );
+        }
+        return importManifest(db, tenantId, projectId, userId, manifest, options, preview);
+    });
 }
 
 async function importManifest(
@@ -618,7 +624,7 @@ async function importManifest(
     userId: string,
     manifest: AgentManifest,
     options: Parameters<typeof applyAgentManifest>[5],
-    preview: Awaited<ReturnType<typeof previewAgentImport>>,
+    preview: AgentImportPreview,
 ): Promise<AgentImportResult> {
     const key = options.key?.trim() || manifest.metadata.key;
     const name = options.name?.trim() || manifest.metadata.name;

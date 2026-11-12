@@ -7,7 +7,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({ getDatabase: vi.fn() }));
-vi.mock('@/lib/database', () => ({ getDatabase: hoisted.getDatabase }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: hoisted.getDatabase,
+  runWithTenantScope: async (_tenant: string, fn: (db: unknown) => unknown) => fn(await hoisted.getDatabase()),
+}));
 
 import {
   activeSubagentEntries,

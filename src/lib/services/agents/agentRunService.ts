@@ -24,13 +24,12 @@ import crypto from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
 import {
-  getDatabase,
+  runWithTenantScope,
   type DatabaseProvider,
   AgentRunConflictError,
   AgentRunIdempotencyKeyTakenError,
 } from '@/lib/database';
 import type { AgentResponseFormat, AgentRunClass, IAgent, IAgentConfig, IAgentRun } from '@/lib/database';
-import { runInTenant } from '@/lib/database/runInTenant';
 import { resolveRemindersConfig, type ResolvedRemindersConfig } from './agentRemindersConfig';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { getThisNodeName } from '@/lib/core/cluster/nodeRegistry';
@@ -77,29 +76,17 @@ export const AGENT_RUN_DEFERRED_QUEUE = 'agent-runs-deferred';
 /** Callback deliveries (seconds each) no longer wait behind runs that take up to 30 minutes. */
 export const AGENT_RUN_CALLBACK_QUEUE = 'agent-run-callbacks';
 
-async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
-}
-
 /**
- * Bind `fn` to the tenant DB for its ENTIRE execution via a real
- * AsyncLocalStorage scope (`db.runWithTenant`), not the bare
- * `switchToTenant` (`enterWith` + a process-global fallback field). A run can
- * still be executing when a concurrent request for a DIFFERENT tenant flips
- * that global fallback; without this, the flip would redirect the run's
- * in-flight writes into the wrong tenant's database.
- *
- * NOTE: intentionally NOT `@/lib/database`'s `runWithTenantScope`: its
- * internal `getDatabase()` is bound to that module's own import, which a
- * test's `vi.mock('@/lib/database', factory)` cannot rebind.
+ * Bind `fn` to the tenant DB for its ENTIRE execution (an AsyncLocalStorage
+ * scope, `runWithTenantScope`). A run can still be executing when a concurrent
+ * request for a DIFFERENT tenant arrives; the scope keeps the run's in-flight
+ * writes in its own tenant's database.
  */
 export async function runWithTenantDb<T>(
   tenantDbName: string,
   fn: (db: DatabaseProvider) => T | Promise<T>,
 ): Promise<T> {
-  return runInTenant(await getDatabase(), tenantDbName, fn);
+  return runWithTenantScope(tenantDbName, fn);
 }
 
 /** Resolves once `ms` has elapsed, with the given sentinel — never rejects. */
@@ -668,10 +655,11 @@ export async function lookupIdempotentAgentRun(input: {
   idempotencyKey: string;
   idempotencyConversationScope: string | null;
 }): Promise<{ kind: 'replay'; run: IAgentRun } | { kind: 'conflict' } | { kind: 'none' }> {
-  const db = await withTenantDb(input.tenantDbName);
-  const existing = await db.getAgentRunByIdempotencyKey(input.tenantId, input.projectId, input.idempotencyKey);
-  if (!existing) return { kind: 'none' };
-  return existing.idempotencyRequestHash === idempotencyRequestHash(input) ? { kind: 'replay', run: existing } : { kind: 'conflict' };
+  return runWithTenantScope(input.tenantDbName, async (db) => {
+    const existing = await db.getAgentRunByIdempotencyKey(input.tenantId, input.projectId, input.idempotencyKey);
+    if (!existing) return { kind: 'none' as const };
+    return existing.idempotencyRequestHash === idempotencyRequestHash(input) ? { kind: 'replay' as const, run: existing } : { kind: 'conflict' as const };
+  });
 }
 
 /** Run row identity for `waitForAgentRun` / `cancelAgentRun`. */
@@ -1373,72 +1361,75 @@ export async function queueAgentRunResume(input: {
   limits?: AgentRunLimits;
 }): Promise<QueueAgentRunResumeOutcome> {
   await assertAgentsEnabled(input);
-  const db = await withTenantDb(input.tenantDbName);
   const trigger = input.trigger ?? (input.userId === RESUME_TIMEOUT_ACTOR ? 'timeout' : 'resume');
-  let run: IAgentRun | null = null;
+  let run: IAgentRun;
   try {
-    const paused = await findPausedOwnerRun(db, input, input.ownerRunId);
-    if (paused) {
-      run = await db.requeueAgentRunForResume(String(paused._id), input.tenantId, input.resumeActionIds, {
-        trigger,
-        userId: input.userId,
-        apiTokenId: input.apiTokenId ?? null,
-      });
-    }
-    if (!run) {
-      // The turn this continues: the paused run, else the session's latest run (a
-      // budget continuation) — its trigger, flags and variables carry over (§2.4a).
-      const [source] = paused ? [paused] : await db.listAgentRuns({
-        tenantId: input.tenantId,
-        projectId: input.projectId,
-        conversationId: input.conversationId,
-        excludeModes: ['sync'],
-        limit: 1,
-      });
-      const limits = input.limits ?? await resolveAgentRunLimits({
-        quotaContext: {
-          tenantDbName: input.tenantDbName,
+    run = await runWithTenantScope(input.tenantDbName, async (db) => {
+      let queued: IAgentRun | null = null;
+      const paused = await findPausedOwnerRun(db, input, input.ownerRunId);
+      if (paused) {
+        queued = await db.requeueAgentRunForResume(String(paused._id), input.tenantId, input.resumeActionIds, {
+          trigger,
+          userId: input.userId,
+          apiTokenId: input.apiTokenId ?? null,
+        });
+      }
+      if (!queued) {
+        // The turn this continues: the paused run, else the session's latest run (a
+        // budget continuation) — its trigger, flags and variables carry over (§2.4a).
+        const [source] = paused ? [paused] : await db.listAgentRuns({
           tenantId: input.tenantId,
           projectId: input.projectId,
+          conversationId: input.conversationId,
+          excludeModes: ['sync'],
+          limit: 1,
+        });
+        const limits = input.limits ?? await resolveAgentRunLimits({
+          quotaContext: {
+            tenantDbName: input.tenantDbName,
+            tenantId: input.tenantId,
+            projectId: input.projectId,
+            userId: input.userId,
+            ...(input.apiTokenId ? { tokenId: input.apiTokenId } : {}),
+          },
+        });
+        queued = await db.createAgentRun({
+          mode: 'background',
+          tenantId: input.tenantId,
+          tenantDbName: input.tenantDbName,
+          projectId: input.projectId,
+          agentKey: input.agentKey,
+          conversationId: input.conversationId,
+          // The turn continues from its stored state; there is no new message.
+          userMessage: '',
+          resumeActionIds: input.resumeActionIds,
+          ...(input.usePublished !== undefined ? { usePublished: input.usePublished } : {}),
+          ...(input.version !== undefined ? { version: input.version } : {}),
+          ...(input.runtimeContext ? { runtimeContext: sealRuntimeContext(input.runtimeContext) } : {}),
+          status: 'queued',
+          runClass: 'default',
+          trigger: source?.trigger ?? 'request',
+          ...(source?.triggerId ? { triggerId: source.triggerId, channel: source.channel ?? null } : {}),
+          ...(source?.unattended ? { unattended: true } : {}),
+          ...(source?.externalContent ? { externalContent: true } : {}),
+          ...(source?.externalContent && source.literalVariables?.length ? { literalVariables: source.literalVariables } : {}),
+          ...(source?.triggerData ? { triggerData: source.triggerData } : {}),
+          ...(source?.variables ? { variables: source.variables } : {}),
+          ...(source?.responseFormat ? { responseFormat: source.responseFormat } : {}),
+          queueGeneration: 1,
+          callbackAttempts: 0,
+          maxDurationMs: limits.maxDurationMs,
           userId: input.userId,
-          ...(input.apiTokenId ? { tokenId: input.apiTokenId } : {}),
-        },
-      });
-      run = await db.createAgentRun({
-        mode: 'background',
-        tenantId: input.tenantId,
-        tenantDbName: input.tenantDbName,
-        projectId: input.projectId,
-        agentKey: input.agentKey,
-        conversationId: input.conversationId,
-        // The turn continues from its stored state; there is no new message.
-        userMessage: '',
-        resumeActionIds: input.resumeActionIds,
-        ...(input.usePublished !== undefined ? { usePublished: input.usePublished } : {}),
-        ...(input.version !== undefined ? { version: input.version } : {}),
-        ...(input.runtimeContext ? { runtimeContext: sealRuntimeContext(input.runtimeContext) } : {}),
-        status: 'queued',
-        runClass: 'default',
-        trigger: source?.trigger ?? 'request',
-        ...(source?.triggerId ? { triggerId: source.triggerId, channel: source.channel ?? null } : {}),
-        ...(source?.unattended ? { unattended: true } : {}),
-        ...(source?.externalContent ? { externalContent: true } : {}),
-        ...(source?.externalContent && source.literalVariables?.length ? { literalVariables: source.literalVariables } : {}),
-        ...(source?.triggerData ? { triggerData: source.triggerData } : {}),
-        ...(source?.variables ? { variables: source.variables } : {}),
-        ...(source?.responseFormat ? { responseFormat: source.responseFormat } : {}),
-        queueGeneration: 1,
-        callbackAttempts: 0,
-        maxDurationMs: limits.maxDurationMs,
-        userId: input.userId,
-        ...(input.apiTokenId ? { apiTokenId: input.apiTokenId } : {}),
-        actorType: input.actorType ?? (input.userId.startsWith('system:') ? 'system' : 'user'),
-        ...(input.resumeActionIds.includes(CONTINUE_RUN_MARKER) ? {} : { resumeTrigger: trigger }),
-        ...(source?.accountableUserId ? { accountableUserId: source.accountableUserId } : {}),
-        ...(source?.accountableTokenId ? { accountableTokenId: source.accountableTokenId } : {}),
-        expiresAt: agentRunRetainedUntil(),
-      });
-    }
+          ...(input.apiTokenId ? { apiTokenId: input.apiTokenId } : {}),
+          actorType: input.actorType ?? (input.userId.startsWith('system:') ? 'system' : 'user'),
+          ...(input.resumeActionIds.includes(CONTINUE_RUN_MARKER) ? {} : { resumeTrigger: trigger }),
+          ...(source?.accountableUserId ? { accountableUserId: source.accountableUserId } : {}),
+          ...(source?.accountableTokenId ? { accountableTokenId: source.accountableTokenId } : {}),
+          expiresAt: agentRunRetainedUntil(),
+        });
+      }
+      return queued;
+    });
   } catch (error) {
     if (error instanceof AgentRunConflictError) return { kind: 'conflict' };
     throw error;
@@ -1473,31 +1464,32 @@ export async function settlePausedAgentRuns(
   response: AgentChatResponse,
   ownerRunId: string | null | undefined,
 ): Promise<void> {
-  const db = await withTenantDb(tenantDbName);
-  const run = await findPausedOwnerRun(db, scope, ownerRunId);
-  if (!run) return;
-  const { _conversation_messages: _omitted, ...body } = response;
-  void _omitted;
-  const runId = String(run._id);
-  const result = { ...body, id: `resp_${runId}` } as unknown as Record<string, unknown>;
-  if (response.status === 'requires_action') {
-    await db.finalizeAgentRun(runId, scope.tenantId, { status: 'requires_action', result, stopReason: 'requires_action' });
-    return;
-  }
-  const completedAt = new Date();
-  const finalized = await db.finalizeAgentRun(runId, scope.tenantId, {
-    status: 'succeeded',
-    result,
-    stopReason: toSessionStopReason(response.stop_reason),
-    completedAt,
-    runtimeContext: null,
-    expiresAt: agentRunRetainedUntil(completedAt),
-  });
-  if (finalized) {
-    await fireAgentRunCallback(finalized, 'succeeded', { result }).catch((error) => {
-      logger.warn('Could not queue the run callback', { runId, error: error instanceof Error ? error.message : String(error) });
+  await runWithTenantScope(tenantDbName, async (db) => {
+    const run = await findPausedOwnerRun(db, scope, ownerRunId);
+    if (!run) return;
+    const { _conversation_messages: _omitted, ...body } = response;
+    void _omitted;
+    const runId = String(run._id);
+    const result = { ...body, id: `resp_${runId}` } as unknown as Record<string, unknown>;
+    if (response.status === 'requires_action') {
+      await db.finalizeAgentRun(runId, scope.tenantId, { status: 'requires_action', result, stopReason: 'requires_action' });
+      return;
+    }
+    const completedAt = new Date();
+    const finalized = await db.finalizeAgentRun(runId, scope.tenantId, {
+      status: 'succeeded',
+      result,
+      stopReason: toSessionStopReason(response.stop_reason),
+      completedAt,
+      runtimeContext: null,
+      expiresAt: agentRunRetainedUntil(completedAt),
     });
-  }
+    if (finalized) {
+      await fireAgentRunCallback(finalized, 'succeeded', { result }).catch((error) => {
+        logger.warn('Could not queue the run callback', { runId, error: error instanceof Error ? error.message : String(error) });
+      });
+    }
+  });
 }
 
 /**
@@ -1674,16 +1666,14 @@ export async function getAgentRunStatus(
   projectId: string,
   runId: string,
 ): Promise<IAgentRun | null> {
-  const db = await withTenantDb(tenantDbName);
-  return db.getAgentRunById(normalizeAgentRunId(runId), tenantId, projectId);
+  return runWithTenantScope(tenantDbName, (db) => db.getAgentRunById(normalizeAgentRunId(runId), tenantId, projectId));
 }
 
 export async function listAgentRuns(
   tenantDbName: string,
   filter: Parameters<DatabaseProvider['listAgentRuns']>[0],
 ): Promise<IAgentRun[]> {
-  const db = await withTenantDb(tenantDbName);
-  return db.listAgentRuns(filter);
+  return runWithTenantScope(tenantDbName, (db) => db.listAgentRuns(filter));
 }
 
 export type CancelAgentRunOutcome =

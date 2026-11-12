@@ -50,7 +50,10 @@ const hoisted = vi.hoisted(() => ({
   warn: vi.fn(),
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return { getDatabase, runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()) };
+});
 
 vi.mock('@/lib/services/agents/externalAgent', () => ({
   invokeExternalAgent: hoisted.invokeExternalAgent,

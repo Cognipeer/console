@@ -5,7 +5,6 @@
 
 import { getDatabase, type IAgent, runWithTenantScope, type IAgentVersion } from '@/lib/database';
 import { sealAgentConfigSecrets } from './agentSandboxSecrets';
-import { migrateAgentReasoning } from './agentReasoning';
 import { stripLegacyExecutionConfig } from './agentCallbackConfig';
 import { detachConnectorTriggers } from './agentTriggerConnectorHost';
 import { deleteAgentOwnedResources } from './agentOwnedResources';
@@ -91,7 +90,7 @@ export async function createAgentRecord(
             description: data.description,
             // Sandbox secrets are sealed here, the one write path every creator
             // (dashboard, client API) goes through.
-            config: sealAgentConfigSecrets(migrateAgentReasoning(data.config), undefined),
+            config: sealAgentConfigSecrets(data.config, undefined),
             status: data.status || 'active',
             ...(data.metadata ? { metadata: data.metadata } : {}),
             ...(data.owner ? { owner: data.owner } : {}),
@@ -110,8 +109,6 @@ export async function updateAgentRecord(
     userId: string,
 ): Promise<IAgent | null> {
     return runWithTenantScope(tenantDbName, async (db) => {
-        // Old Advanced-tab reasoning moves next to the model on every save.
-        if (data.config) data = { ...data, config: migrateAgentReasoning(data.config) };
         if (data.config?.sandbox || data.config?.callback !== undefined) {
             // `config` replaces the stored one wholesale; masked secret values
             // must resolve against what is stored, not be saved as the mask —
@@ -156,7 +153,7 @@ export async function getAgentById(
     agentId: string,
 ): Promise<IAgent | null> {
     return runWithTenantScope(tenantDbName, async (db) => {
-        return withMigratedReasoning(await db.findAgentById(agentId));
+        return db.findAgentById(agentId);
     });
 }
 
@@ -175,15 +172,8 @@ export async function getAgentByKey(
     return runWithTenantScope(tenantDbName, async (db) => {
         const agent = await db.findAgentByKey(key, projectId);
         if (agent?.owner && !options.includeOwned) return null;
-        return withMigratedReasoning(agent);
+        return agent;
     });
-}
-
-/** Read-side half of the `runtime.reasoning` migration (the save side is in create/update). */
-function withMigratedReasoning(agent: IAgent | null): IAgent | null {
-    if (!agent?.config) return agent;
-    const config = migrateAgentReasoning(agent.config);
-    return config === agent.config ? agent : { ...agent, config };
 }
 
 export async function listAgents(
@@ -390,6 +380,8 @@ export async function checkAgentModel(
     tenantId: string,
     projectId: string,
     modelKey: string,
+    // Whether an unrecognized failure keeps its message (the route decides who may read it).
+    options: { exposeInternal?: boolean } = {},
 ): Promise<AgentModelCheckResult> {
     const startedAt = Date.now();
     try {
@@ -408,6 +400,6 @@ export async function checkAgentModel(
             modelKey,
             error: error instanceof Error ? error.message : String(error),
         });
-        return { ok: false, latencyMs: Date.now() - startedAt, error: classifyAgentRunError(error, { exposeInternal: true }).error };
+        return { ok: false, latencyMs: Date.now() - startedAt, error: classifyAgentRunError(error, { exposeInternal: options.exposeInternal === true }).error };
     }
 }

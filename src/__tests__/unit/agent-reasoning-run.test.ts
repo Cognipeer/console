@@ -21,7 +21,10 @@ const hoisted = vi.hoisted(() => ({
   invokeConfigs: [] as Array<Record<string, unknown>>,
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return { getDatabase, runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()) };
+});
 
 vi.mock('@/lib/services/models/modelService', () => ({
   getModelByKey: hoisted.getModelByKey,
@@ -214,14 +217,6 @@ describe('what a run hands the native model', () => {
     expect(mainModelCall().model.key).toBe('other');
     expect(mainModelCall().reasoning).toBeUndefined();
     expect(mainModelCall().requestReasoning).toEqual({ effort: 'low' });
-  });
-
-  it('an old config (runtime.reasoning) runs with its migrated pick', async () => {
-    db.findAgentByKey.mockResolvedValue(agentWith({
-      runtime: { reasoning: { enabled: true, effort: 'medium', budgetTokens: 4096 } },
-    }));
-    await executeAgentChatLocal({ ...base });
-    expect(mainModelCall().reasoning).toEqual({ effort: 'medium', budgetTokens: 4096 });
   });
 });
 

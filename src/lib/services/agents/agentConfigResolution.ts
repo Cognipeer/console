@@ -5,7 +5,7 @@
  * `agentService` re-exports `resolveAgentConfig`, the name every caller knows.
  */
 
-import { getDatabase, type IAgent } from '@/lib/database';
+import { runWithTenantScope, type IAgent } from '@/lib/database';
 
 /**
  * Resolves the agent config to use for execution.
@@ -19,27 +19,26 @@ export async function resolveAgentConfig(
     projectId?: string,
     requestedVersion?: number,
 ): Promise<{ agent: IAgent; config: IAgent['config']; resolvedVersion: number | null }> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const agent = await db.findAgentByKey(agentKey, projectId);
+        if (!agent) throw new Error(`Agent "${agentKey}" not found`);
 
-    const agent = await db.findAgentByKey(agentKey, projectId);
-    if (!agent) throw new Error(`Agent "${agentKey}" not found`);
-
-    // If a specific version is requested
-    if (requestedVersion !== undefined && requestedVersion !== null) {
-        const version = await db.findAgentVersion(String(agent._id), requestedVersion);
-        if (!version) {
-            throw new Error(`Version ${requestedVersion} not found for agent "${agentKey}"`);
+        // If a specific version is requested
+        if (requestedVersion !== undefined && requestedVersion !== null) {
+            const version = await db.findAgentVersion(String(agent._id), requestedVersion);
+            if (!version) {
+                throw new Error(`Version ${requestedVersion} not found for agent "${agentKey}"`);
+            }
+            return { agent, config: version.snapshot.config, resolvedVersion: version.version };
         }
-        return { agent, config: version.snapshot.config, resolvedVersion: version.version };
-    }
 
-    // Use published version if available
-    if (agent.publishedVersion) {
-        const version = await db.findAgentVersion(String(agent._id), agent.publishedVersion);
-        if (version) return { agent, config: version.snapshot.config, resolvedVersion: version.version };
-    }
+        // Use published version if available
+        if (agent.publishedVersion) {
+            const version = await db.findAgentVersion(String(agent._id), agent.publishedVersion);
+            if (version) return { agent, config: version.snapshot.config, resolvedVersion: version.version };
+        }
 
-    // Fallback to current config (never published or version data missing)
-    return { agent, config: agent.config, resolvedVersion: null };
+        // Fallback to current config (never published or version data missing)
+        return { agent, config: agent.config, resolvedVersion: null };
+    });
 }

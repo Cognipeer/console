@@ -126,7 +126,6 @@ import { piiPolicyKeyOf, piiProtectionPayload } from '@/components/pii/piiProtec
 import AgentAdditionalModels from './studio/AgentAdditionalModels';
 import AgentReasoningPicker, { type ReasoningPickerValue } from './studio/AgentReasoningPicker';
 import { subagentPolicyToStore } from './studio/subagentSettings';
-import { migrateAgentReasoning } from '@/lib/services/agents/agentReasoning';
 import type { SkillView } from '@/components/skills/types';
 import type {
   IAgentConfig,
@@ -513,15 +512,13 @@ export default function AgentDetailPage({ agentId: agentIdProp, ownedByFlow = fa
           knowledgeToolMode: cfg.knowledgeToolMode === 'separate' ? 'separate' : 'combined',
         });
         setToolBindings(cfg.toolBindings ?? []);
-        // Old Advanced-tab reasoning is folded into the model's own fields (the server does it on read too).
-        const migrated = migrateAgentReasoning(cfg);
-        setAdditionalModels(migrated.additionalModels ?? []);
+        setAdditionalModels(cfg.additionalModels ?? []);
         setMainReasoning({
-          ...(migrated.reasoningEffort ? { reasoningEffort: migrated.reasoningEffort } : {}),
-          ...(migrated.reasoningBudgetTokens ? { reasoningBudgetTokens: migrated.reasoningBudgetTokens } : {}),
+          ...(cfg.reasoningEffort ? { reasoningEffort: cfg.reasoningEffort } : {}),
+          ...(cfg.reasoningBudgetTokens ? { reasoningBudgetTokens: cfg.reasoningBudgetTokens } : {}),
         });
-        setShowReasoning(migrated.showReasoning !== false);
-        setRuntimeConfig(migrated.runtime ?? {});
+        setShowReasoning(cfg.showReasoning !== false);
+        setRuntimeConfig(cfg.runtime ?? {});
         setMaxTokens(typeof cfg.maxTokens === 'number' && cfg.maxTokens > 0 ? cfg.maxTokens : undefined);
         setStructuredOutput(cfg.structuredOutput);
         setVariablesConfig(cfg.variables);

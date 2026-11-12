@@ -6,7 +6,7 @@
  * warn that an image will not be seen — instead of finding out from a refusal.
  */
 
-import { getDatabase, type IAgentConfig } from '@/lib/database';
+import { runWithTenantScope, type IAgentConfig } from '@/lib/database';
 import { resolveModelCapabilities } from '@/lib/services/models/modelCapabilities';
 import { attachmentsAvailability, attachmentsOcrActive, FILE_OUTPUT_EXTENSIONS, outputsAvailability, resolveOutputsConfig } from './sessionFilesConfig';
 import { inspectFileBucket } from './sessionFilesBucket';
@@ -42,37 +42,36 @@ export async function describeAgentAttachments(input: {
     config: IAgentConfig;
 }): Promise<AgentAttachmentInfo> {
     const { config } = input;
-    const db = await getDatabase();
-    await db.switchToTenant(input.tenantDbName);
+    return runWithTenantScope(input.tenantDbName, async (db) => {
+        const availability = attachmentsAvailability(config);
+        const outputsOn = outputsAvailability(config);
+        const bucketUsable = async (key: string) =>
+            (await inspectFileBucket(db, input.tenantId, input.projectId, key).catch(() => null))?.usable === true;
+        const enabled = availability.available ? await bucketUsable(availability.cfg.bucketKey) : false;
 
-    const availability = attachmentsAvailability(config);
-    const outputsOn = outputsAvailability(config);
-    const bucketUsable = async (key: string) =>
-        (await inspectFileBucket(db, input.tenantId, input.projectId, key).catch(() => null))?.usable === true;
-    const enabled = availability.available ? await bucketUsable(availability.cfg.bucketKey) : false;
+        // An image reaches the model only through an upload, so with uploads off it accepts none.
+        let acceptsImages = false;
+        if (enabled && config.modelKey && !(config.kind === 'external' && config.connection)) {
+            const model = await db.findModelByKey(config.modelKey, input.projectId).catch(() => null);
+            acceptsImages = model ? resolveModelCapabilities(model).inputModalities.includes('image') : false;
+        }
 
-    // An image reaches the model only through an upload, so with uploads off it accepts none.
-    let acceptsImages = false;
-    if (enabled && config.modelKey && !(config.kind === 'external' && config.connection)) {
-        const model = await db.findModelByKey(config.modelKey, input.projectId).catch(() => null);
-        acceptsImages = model ? resolveModelCapabilities(model).inputModalities.includes('image') : false;
-    }
-
-    // Limits are shown even when files are off, so a client can render them without a second call.
-    const limits = availability.available ? availability.cfg : null;
-    const outputs = resolveOutputsConfig(config.attachments);
-    return {
-        enabled,
-        maxFiles: limits?.maxFiles ?? 0,
-        maxFileSizeMb: limits?.maxFileSizeMb ?? 0,
-        allowedMimeTypes: limits?.allowedMimeTypes ?? [],
-        acceptsImages,
-        ...(availability.available && availability.cfg.ocr ? { ocr: { enabled: enabled && attachmentsOcrActive(availability.cfg) } } : {}),
-        outputs: {
-            enabled: outputsOn.available ? await bucketUsable(outputsOn.cfg.bucketKey) : false,
-            maxFilesPerTurn: outputs.maxFilesPerTurn,
-            maxFileSizeMb: outputs.maxFileSizeMb,
-            types: [...FILE_OUTPUT_EXTENSIONS],
-        },
-    };
+        // Limits are shown even when files are off, so a client can render them without a second call.
+        const limits = availability.available ? availability.cfg : null;
+        const outputs = resolveOutputsConfig(config.attachments);
+        return {
+            enabled,
+            maxFiles: limits?.maxFiles ?? 0,
+            maxFileSizeMb: limits?.maxFileSizeMb ?? 0,
+            allowedMimeTypes: limits?.allowedMimeTypes ?? [],
+            acceptsImages,
+            ...(availability.available && availability.cfg.ocr ? { ocr: { enabled: enabled && attachmentsOcrActive(availability.cfg) } } : {}),
+            outputs: {
+                enabled: outputsOn.available ? await bucketUsable(outputsOn.cfg.bucketKey) : false,
+                maxFilesPerTurn: outputs.maxFilesPerTurn,
+                maxFileSizeMb: outputs.maxFileSizeMb,
+                types: [...FILE_OUTPUT_EXTENSIONS],
+            },
+        };
+    });
 }

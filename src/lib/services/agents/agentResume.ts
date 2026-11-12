@@ -7,6 +7,8 @@ import type { AgentInvokeResult as AgentSdkInvokeResult, Message as AgentSdkMess
 import { assertAgentsEnabled } from './agentServiceAvailability';
 import {
     getDatabase,
+    runWithTenantScope,
+    type DatabaseProvider,
     type AgentResponseFormat,
     type IAgent,
     type IAgentConfig,
@@ -269,39 +271,39 @@ export async function validateApprovedArgs(input: {
     toolName: string;
     approvedArgs: Record<string, unknown>;
 }): Promise<{ ok: true } | { ok: false; message: string }> {
-    const db = await getDatabase();
-    await db.switchToTenant(input.tenantDbName);
-    const conversation = await db.findAgentConversationById(input.conversationId);
-    if (!conversation || conversation.projectId !== input.projectId) throw new Error(`Conversation "${input.conversationId}" not found`);
-    const agent = await db.findAgentByKey(input.agentKey, input.projectId);
-    if (!agent) throw new Error(`Agent "${input.agentKey}" not found`);
+    return runWithTenantScope(input.tenantDbName, async (db) => {
+        const conversation = await db.findAgentConversationById(input.conversationId);
+        if (!conversation || conversation.projectId !== input.projectId) throw new Error(`Conversation "${input.conversationId}" not found`);
+        const agent = await db.findAgentByKey(input.agentKey, input.projectId);
+        if (!agent) throw new Error(`Agent "${input.agentKey}" not found`);
 
-    const built = await buildLocalAgentRun({
-        db,
-        tenantDbName: input.tenantDbName,
-        tenantId: input.tenantId,
-        projectId: input.projectId,
-        agentKey: input.agentKey,
-        agent,
-        config: agent.config,
-        actorId: input.userId,
-        source: 'agent',
-        route: 'agent.chat',
-        userId: input.userId,
-        conversation,
-        memoryConversationId: input.conversationId,
-        threadId: input.conversationId,
+        const built = await buildLocalAgentRun({
+            db,
+            tenantDbName: input.tenantDbName,
+            tenantId: input.tenantId,
+            projectId: input.projectId,
+            agentKey: input.agentKey,
+            agent,
+            config: agent.config,
+            actorId: input.userId,
+            source: 'agent',
+            route: 'agent.chat',
+            userId: input.userId,
+            conversation,
+            memoryConversationId: input.conversationId,
+            threadId: input.conversationId,
+        });
+        try {
+            const tool = built.tools.find((candidate) => candidate.name === input.toolName);
+            // A tool this agent no longer has cannot be validated; the resume reports it.
+            if (!tool) return { ok: true };
+            const { validateToolArgs } = await import('@cognipeer/agent-sdk');
+            const checked = validateToolArgs(tool, input.approvedArgs);
+            return checked.ok ? { ok: true } : { ok: false, message: checked.message };
+        } finally {
+            await runBoundToolCleanup(built.cleanupTasks, { agentKey: input.agentKey, mode: 'chat' });
+        }
     });
-    try {
-        const tool = built.tools.find((candidate) => candidate.name === input.toolName);
-        // A tool this agent no longer has cannot be validated; the resume reports it.
-        if (!tool) return { ok: true };
-        const { validateToolArgs } = await import('@cognipeer/agent-sdk');
-        const checked = validateToolArgs(tool, input.approvedArgs);
-        return checked.ok ? { ok: true } : { ok: false, message: checked.message };
-    } finally {
-        await runBoundToolCleanup(built.cleanupTasks, { agentKey: input.agentKey, mode: 'chat' });
-    }
 }
 
 /**
@@ -329,12 +331,15 @@ export function executeAgentContinueLocal(
 export async function executeAgentResumeLocal(request: AgentResumeRequest): Promise<AgentResumeResult> {
     await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
-    try {
-        return await runWithRoutingCaller(resumeCallerOf(request), () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runAgentResumeTurn(request, scope)));
-    } catch (error) {
-        await scope.events?.fail(error).catch(() => undefined);
-        throw error;
-    }
+    // One tenant scope for the whole turn, the failure path included.
+    return runWithTenantScope(request.tenantDbName, async (db) => {
+        try {
+            return await runWithRoutingCaller(resumeCallerOf(request), () => runWithKnowledgeExposure(new KnowledgeExposure(), () => runAgentResumeTurn(request, scope, db)));
+        } catch (error) {
+            await scope.events?.fail(error).catch(() => undefined);
+            throw error;
+        }
+    });
 }
 
 /**
@@ -370,10 +375,9 @@ async function clientToolContent(
 async function runAgentResumeTurn(
     request: AgentResumeRequest,
     scope: { events?: SessionTurnEvents },
+    db: DatabaseProvider,
 ): Promise<AgentResumeResult> {
     const { tenantDbName, tenantId, projectId, agentKey, conversationId } = request;
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
 
     // A pause to continue — or, for a budget-stopped session, the state it ended in.
     let pausedRun: Awaited<ReturnType<typeof loadPausedRun>> | null = null;

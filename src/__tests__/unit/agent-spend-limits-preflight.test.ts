@@ -15,7 +15,10 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkBudget: hoisted.checkBudget,
   settleUsageBudget: hoisted.settleUsageBudget,
 }));
-vi.mock('@/lib/database', () => ({ getDatabase: hoisted.getDatabase }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: hoisted.getDatabase,
+  runWithTenantScope: async (_tenant: string, fn: (db: unknown) => unknown) => fn(await hoisted.getDatabase()),
+}));
 
 import {
   agentSpendSettler,
@@ -130,5 +133,19 @@ describe('assertQueuedTurnSpendAllowed (before a run is queued)', () => {
     withAgent({ modelKey: 'main', kind: 'external', connection: { url: 'https://x' } });
     await expect(assertQueuedTurnSpendAllowed(input)).resolves.toBeUndefined();
     expect(hoisted.checkBudget).not.toHaveBeenCalled();
+  });
+
+  it('reads the agent in an explicit tenant scope, without switching the shared handle', async () => {
+    hoisted.checkBudget.mockReset();
+    hoisted.checkBudget.mockResolvedValue({ allowed: true });
+    const db = {
+      switchToTenant: vi.fn(),
+      findAgentByKey: vi.fn(async () => ({ config: { modelKey: 'main' } })),
+      findTenantById: vi.fn(async () => ({ licenseType: 'FREE' })),
+    };
+    hoisted.getDatabase.mockResolvedValue(db);
+    await expect(assertQueuedTurnSpendAllowed(input)).resolves.toBeUndefined();
+    expect(db.findAgentByKey).toHaveBeenCalledWith('a1', 'p1');
+    expect(db.switchToTenant).not.toHaveBeenCalled();
   });
 });

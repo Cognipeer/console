@@ -6,7 +6,10 @@ const db = {
   runWithTenant: undefined,
   switchToTenant: vi.fn(async () => undefined),
 };
-vi.mock('@/lib/database', () => ({ getDatabase: async () => db }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: async () => db,
+  runWithTenantScope: async (_tenantDbName: string, fn: (d: unknown) => unknown) => fn(db),
+}));
 
 import { abortLocalTurns, watchTurnCancellation } from '@/lib/services/agents/turnWatch';
 
