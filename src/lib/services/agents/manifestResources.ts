@@ -14,7 +14,7 @@
  * not embedded — they stay plain references.
  */
 
-import { getDatabase, type IAgentConfig, type IAgentToolBinding, type IMcpServer, type ITool } from '@/lib/database';
+import { runWithTenantScope, type IAgentConfig, type IAgentToolBinding, type IMcpServer, type ITool } from '@/lib/database';
 
 export const MANIFEST_RESOURCE_TYPES = ['skills', 'prompts', 'mcpServers', 'tools'] as const;
 export type ManifestResourceType = typeof MANIFEST_RESOURCE_TYPES[number];
@@ -219,56 +219,56 @@ export async function collectManifestResources(
     const skipped: CollectedResources['skipped'] = [];
     if (include.size === 0) return { resources, skipped };
 
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const refs = referencedResourceKeys(spec);
-    const missing = (type: ManifestResourceType, key: string) => skipped.push({ type, key, reason: 'not found in this project' });
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const refs = referencedResourceKeys(spec);
+        const missing = (type: ManifestResourceType, key: string) => skipped.push({ type, key, reason: 'not found in this project' });
 
-    if (include.has('skills')) {
-        for (const key of refs.skills) {
-            const skill = await db.findSkillByKey(key, projectId);
-            if (!skill) { missing('skills', key); continue; }
-            (resources.skills ??= []).push({
-                key: skill.key,
-                title: skill.title,
-                header: skill.header,
-                body: skill.body,
-                ...(skill.minModelTier ? { minModelTier: skill.minModelTier } : {}),
-            });
+        if (include.has('skills')) {
+            for (const key of refs.skills) {
+                const skill = await db.findSkillByKey(key, projectId);
+                if (!skill) { missing('skills', key); continue; }
+                (resources.skills ??= []).push({
+                    key: skill.key,
+                    title: skill.title,
+                    header: skill.header,
+                    body: skill.body,
+                    ...(skill.minModelTier ? { minModelTier: skill.minModelTier } : {}),
+                });
+            }
         }
-    }
-    if (include.has('prompts')) {
-        for (const key of refs.prompts) {
-            const prompt = await db.findPromptByKey(key, projectId);
-            if (!prompt) { missing('prompts', key); continue; }
-            (resources.prompts ??= []).push({
-                key: prompt.key,
-                name: prompt.name,
-                ...(prompt.description ? { description: prompt.description } : {}),
-                template: prompt.template,
-                ...(prompt.metadata && Object.keys(prompt.metadata).length ? { metadata: prompt.metadata } : {}),
-            });
+        if (include.has('prompts')) {
+            for (const key of refs.prompts) {
+                const prompt = await db.findPromptByKey(key, projectId);
+                if (!prompt) { missing('prompts', key); continue; }
+                (resources.prompts ??= []).push({
+                    key: prompt.key,
+                    name: prompt.name,
+                    ...(prompt.description ? { description: prompt.description } : {}),
+                    template: prompt.template,
+                    ...(prompt.metadata && Object.keys(prompt.metadata).length ? { metadata: prompt.metadata } : {}),
+                });
+            }
         }
-    }
-    if (include.has('mcpServers')) {
-        for (const key of refs.mcpServers) {
-            const server = await db.findMcpServerByKey(key, projectId);
-            if (!server) { missing('mcpServers', key); continue; }
-            const resource = mcpResource(server);
-            if ('skip' in resource) skipped.push({ type: 'mcpServers', key, reason: resource.skip });
-            else (resources.mcpServers ??= []).push(resource);
+        if (include.has('mcpServers')) {
+            for (const key of refs.mcpServers) {
+                const server = await db.findMcpServerByKey(key, projectId);
+                if (!server) { missing('mcpServers', key); continue; }
+                const resource = mcpResource(server);
+                if ('skip' in resource) skipped.push({ type: 'mcpServers', key, reason: resource.skip });
+                else (resources.mcpServers ??= []).push(resource);
+            }
         }
-    }
-    if (include.has('tools')) {
-        for (const key of refs.tools) {
-            const tool = await db.findToolByKey(key, projectId);
-            if (!tool) { missing('tools', key); continue; }
-            // A connector's own actions have no endpoint or spec to carry: the importing workspace installs its own connector.
-            if (tool.type === 'connector') { skipped.push({ type: 'tools', key, reason: 'managed by a connector' }); continue; }
-            (resources.tools ??= []).push(toolResource(tool, tool.type));
+        if (include.has('tools')) {
+            for (const key of refs.tools) {
+                const tool = await db.findToolByKey(key, projectId);
+                if (!tool) { missing('tools', key); continue; }
+                // A connector's own actions have no endpoint or spec to carry: the importing workspace installs its own connector.
+                if (tool.type === 'connector') { skipped.push({ type: 'tools', key, reason: 'managed by a connector' }); continue; }
+                (resources.tools ??= []).push(toolResource(tool, tool.type));
+            }
         }
-    }
-    return { resources, skipped };
+        return { resources, skipped };
+    });
 }
 
 /** Rewrites resource keys in a spec (after an import created copies under new keys). */

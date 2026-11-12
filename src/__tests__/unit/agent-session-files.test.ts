@@ -30,7 +30,10 @@ const hoisted = vi.hoisted(() => ({
   resource: vi.fn(),
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn(async () => hoisted.db) }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: vi.fn(async () => hoisted.db),
+  runWithTenantScope: vi.fn(async (_n: string, fn: (d: unknown) => unknown) => fn(hoisted.db)),
+}));
 vi.mock('@/lib/core/logger', () => ({
   createLogger: () => ({ info: vi.fn(), debug: vi.fn(), error: vi.fn(), warn: hoisted.warn }),
 }));

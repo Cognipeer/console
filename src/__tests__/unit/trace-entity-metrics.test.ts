@@ -11,7 +11,7 @@ const hoisted = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/services/entityMetrics/entityMetricsRollup', () => ({ recordEntityMetric: hoisted.recordEntityMetric }));
-vi.mock('@/lib/database', () => ({ getDatabase: hoisted.getDatabase, runWithTenantScope: vi.fn() }));
+vi.mock('@/lib/database', () => ({ getDatabase: hoisted.getDatabase, runWithTenantScope: vi.fn(async (_n: string, fn: (d: unknown) => unknown) => fn(await hoisted.getDatabase())) }));
 
 import { AgentTracingService, type TraceModelPricerLoader } from '@/lib/services/agentTracing';
 import { matchesTracingStatus } from '@/lib/services/snapshots/snapshotService';
@@ -457,6 +457,7 @@ describe("'abandoned' sessions in the service-level consumers", () => {
   it('lets a thread finish once every session ended or was abandoned', async () => {
     const db = createMockDb();
     hoisted.getDatabase.mockResolvedValue(db);
+    vi.mocked(runWithTenantScope).mockImplementation((async (_name: string, fn: (d: unknown) => unknown) => fn(db)) as never);
     const session = (sessionId: string, status: string) => ({
       sessionId, status, agentName: 'a', startedAt: new Date('2025-01-10T10:00:00Z'), totalEvents: 1,
     }) as never;

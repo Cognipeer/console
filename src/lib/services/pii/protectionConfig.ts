@@ -6,7 +6,7 @@
  *   { policyKey: "..." }   -> on, with that PII policy (it must exist in the project)
  */
 
-import { getDatabase, type IPiiProtectionConfig } from '@/lib/database';
+import { runWithTenantScope, type IPiiProtectionConfig } from '@/lib/database';
 
 export type PiiProtectionField =
   | { value?: undefined; error?: undefined }
@@ -26,11 +26,11 @@ export async function readPiiProtectionField(
   if (typeof policyKey !== 'string' || policyKey.trim() === '') {
     return { error: 'piiProtection.policyKey is required' };
   }
-  const db = await getDatabase();
-  await db.switchToTenant(scope.tenantDbName);
-  const policy = await db.findPiiPolicyByKey(policyKey.trim(), scope.projectId);
-  if (!policy) {
-    return { error: `piiProtection.policyKey: PII policy "${policyKey.trim()}" not found in this project` };
-  }
-  return { value: { policyKey: policy.key } };
+  return runWithTenantScope(scope.tenantDbName, async (db) => {
+    const policy = await db.findPiiPolicyByKey(policyKey.trim(), scope.projectId);
+    if (!policy) {
+      return { error: `piiProtection.policyKey: PII policy "${policyKey.trim()}" not found in this project` };
+    }
+    return { value: { policyKey: policy.key } };
+  });
 }

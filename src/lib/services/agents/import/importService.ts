@@ -17,7 +17,7 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase, type IAgent, type IAgentConfig, type IAgentToolBinding, type IMcpServer, type IAgentSkill } from '@/lib/database';
+import { runWithTenantScope, type IAgent, type IAgentConfig, type IAgentToolBinding, type IMcpServer, type IAgentSkill } from '@/lib/database';
 import { createMcpServer, deleteMcpServer, listMcpServers } from '@/lib/services/mcp/mcpService';
 import { createSkill, listSkills } from '@/lib/services/agents/skillService';
 import { createPrompt, deletePrompt } from '@/lib/services/prompts/promptService';
@@ -163,46 +163,46 @@ const DEPENDENCY_RESOURCE_TYPE: Record<string, ManifestResourceType | undefined>
 
 async function embeddedResourceRows(ctx: ImportContext, resources: ManifestResources | undefined): Promise<EmbeddedResourceRow[]> {
     if (!resources) return [];
-    const db = await getDatabase();
-    await db.switchToTenant(ctx.tenantDbName);
-    const rows: EmbeddedResourceRow[] = [];
-    for (const skill of resources.skills ?? []) {
-        const found = await db.findSkillByKey(skill.key, ctx.projectId);
-        rows.push({ type: 'skills', key: skill.key, name: skill.title, detail: skill.header, ...(found ? { existing: { key: found.key, name: found.title } } : {}) });
-    }
-    for (const prompt of resources.prompts ?? []) {
-        const found = await db.findPromptByKey(prompt.key, ctx.projectId);
-        rows.push({ type: 'prompts', key: prompt.key, name: prompt.name, ...(prompt.description ? { detail: prompt.description } : {}), ...(found ? { existing: { key: found.key, name: found.name } } : {}) });
-    }
-    if (resources.mcpServers?.length) {
-        const servers = await listMcpServers(ctx.tenantDbName, { projectId: ctx.projectId });
-        for (const server of resources.mcpServers) {
-            const found = servers.find((s: IMcpServer) => s.key === server.key)
-                ?? (server.remoteConfig ? servers.find((s: IMcpServer) => s.remoteConfig?.url === server.remoteConfig!.url && s.status !== 'disabled') : undefined);
+    return runWithTenantScope(ctx.tenantDbName, async (db) => {
+        const rows: EmbeddedResourceRow[] = [];
+        for (const skill of resources.skills ?? []) {
+            const found = await db.findSkillByKey(skill.key, ctx.projectId);
+            rows.push({ type: 'skills', key: skill.key, name: skill.title, detail: skill.header, ...(found ? { existing: { key: found.key, name: found.title } } : {}) });
+        }
+        for (const prompt of resources.prompts ?? []) {
+            const found = await db.findPromptByKey(prompt.key, ctx.projectId);
+            rows.push({ type: 'prompts', key: prompt.key, name: prompt.name, ...(prompt.description ? { detail: prompt.description } : {}), ...(found ? { existing: { key: found.key, name: found.name } } : {}) });
+        }
+        if (resources.mcpServers?.length) {
+            const servers = await listMcpServers(ctx.tenantDbName, { projectId: ctx.projectId });
+            for (const server of resources.mcpServers) {
+                const found = servers.find((s: IMcpServer) => s.key === server.key)
+                    ?? (server.remoteConfig ? servers.find((s: IMcpServer) => s.remoteConfig?.url === server.remoteConfig!.url && s.status !== 'disabled') : undefined);
+                rows.push({
+                    type: 'mcpServers',
+                    key: server.key,
+                    name: server.name,
+                    detail: server.remoteConfig?.url ?? (server.stdioConfig ? `${server.stdioConfig.runtime} ${server.stdioConfig.packageName}` : server.upstreamBaseUrl ?? server.sourceType),
+                    ...(found ? { existing: { key: found.key, name: found.name } } : {}),
+                    // Console identity asks for no credential: the importing workspace signs its own tokens.
+                    ...(server.auth.type !== 'none' && server.auth.type !== 'console_identity' ? { auth: server.auth } : {}),
+                    ...(server.stdioConfig?.envKeys?.length ? { envKeys: server.stdioConfig.envKeys } : {}),
+                });
+            }
+        }
+        for (const tool of resources.tools ?? []) {
+            const found = await db.findToolByKey(tool.key, ctx.projectId);
             rows.push({
-                type: 'mcpServers',
-                key: server.key,
-                name: server.name,
-                detail: server.remoteConfig?.url ?? (server.stdioConfig ? `${server.stdioConfig.runtime} ${server.stdioConfig.packageName}` : server.upstreamBaseUrl ?? server.sourceType),
+                type: 'tools',
+                key: tool.key,
+                name: tool.name,
+                detail: tool.mcpEndpoint ?? tool.upstreamBaseUrl ?? tool.type,
                 ...(found ? { existing: { key: found.key, name: found.name } } : {}),
-                // Console identity asks for no credential: the importing workspace signs its own tokens.
-                ...(server.auth.type !== 'none' && server.auth.type !== 'console_identity' ? { auth: server.auth } : {}),
-                ...(server.stdioConfig?.envKeys?.length ? { envKeys: server.stdioConfig.envKeys } : {}),
+                ...(tool.auth.type !== 'none' ? { auth: tool.auth } : {}),
             });
         }
-    }
-    for (const tool of resources.tools ?? []) {
-        const found = await db.findToolByKey(tool.key, ctx.projectId);
-        rows.push({
-            type: 'tools',
-            key: tool.key,
-            name: tool.name,
-            detail: tool.mcpEndpoint ?? tool.upstreamBaseUrl ?? tool.type,
-            ...(found ? { existing: { key: found.key, name: found.name } } : {}),
-            ...(tool.auth.type !== 'none' ? { auth: tool.auth } : {}),
-        });
-    }
-    return rows;
+        return rows;
+    });
 }
 
 function slugify(value: string): string {
@@ -230,10 +230,10 @@ function detectFormat(doc: ParsedAgentDocument, explicit?: string) {
 }
 
 async function projectModels(tenantDbName: string, projectId: string) {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    const models = await db.listModels({ projectId, category: 'llm' });
-    return models.map((m) => ({ key: m.key, name: m.name, modelId: m.modelId }));
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const models = await db.listModels({ projectId, category: 'llm' });
+        return models.map((m) => ({ key: m.key, name: m.name, modelId: m.modelId }));
+    });
 }
 
 function suggestModel(requested: string | undefined, options: Array<{ key: string; modelId: string }>): string | undefined {
@@ -245,9 +245,9 @@ function suggestModel(requested: string | undefined, options: Array<{ key: strin
 }
 
 async function agentKeyExists(tenantDbName: string, projectId: string, key: string): Promise<boolean> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return Boolean(await db.findAgentByKey(key, projectId));
+    return runWithTenantScope(tenantDbName, async (db) => {
+        return Boolean(await db.findAgentByKey(key, projectId));
+    });
 }
 
 export async function previewAgentDocumentImport(
@@ -490,9 +490,9 @@ async function withImportRollback<T>(
         for (const prompt of created.prompts) await attempt('prompt', prompt.key, () => deletePrompt(ctx.tenantDbName, ctx.projectId, prompt.id));
         if (created.skills.length > 0) {
             await attempt('skills', undefined, async () => {
-                const db = await getDatabase();
-                await db.switchToTenant(ctx.tenantDbName);
-                for (const skill of created.skills) await attempt('skill', skill.key, () => db.deleteSkill(skill.id));
+                await runWithTenantScope(ctx.tenantDbName, async (db) => {
+                    for (const skill of created.skills) await attempt('skill', skill.key, () => db.deleteSkill(skill.id));
+                });
             });
         }
         if (error instanceof AgentManifestError) throw new AgentImportError(error.message, 400, { issues: error.issues });
@@ -642,27 +642,27 @@ export async function applyAgentDocumentImport(
         });
 
         // Provenance: where this agent came from, for whoever opens it next.
-        const db = await getDatabase();
-        await db.switchToTenant(ctx.tenantDbName);
-        await db.updateAgent(String(result.agent._id), {
-            metadata: {
-                ...(result.agent.metadata ?? {}),
-                imported: {
-                    format: 'claude-managed-agent',
-                    at: new Date().toISOString(),
-                    ...(plan.source ?? {}),
-                    ...(plan.model ? { requestedModel: plan.model } : {}),
-                    ...(plan.metadata ? { metadata: plan.metadata } : {}),
+        return runWithTenantScope(ctx.tenantDbName, async (db) => {
+            await db.updateAgent(String(result.agent._id), {
+                metadata: {
+                    ...(result.agent.metadata ?? {}),
+                    imported: {
+                        format: 'claude-managed-agent',
+                        at: new Date().toISOString(),
+                        ...(plan.source ?? {}),
+                        ...(plan.model ? { requestedModel: plan.model } : {}),
+                        ...(plan.metadata ? { metadata: plan.metadata } : {}),
+                    },
                 },
-            },
-        }).catch(() => undefined);
+            }).catch(() => undefined);
 
-        return {
-            agent: result.agent,
-            action: result.action,
-            created: { mcpServers: withoutIds(created.mcpServers), skills: withoutIds(created.skills) },
-            warnings: [...warnings, ...validation.warnings.map((w) => ({ code: 'config_warning', message: `${w.field}: ${w.message}` }))],
-        };
+            return {
+                agent: result.agent,
+                action: result.action,
+                created: { mcpServers: withoutIds(created.mcpServers), skills: withoutIds(created.skills) },
+                warnings: [...warnings, ...validation.warnings.map((w) => ({ code: 'config_warning', message: `${w.field}: ${w.message}` }))],
+            };
+        });
     });
 }
 
@@ -701,10 +701,10 @@ async function applyManifestDocument(
     }
     // Also before anything is created: a bucket the caller may not name must not leave library records behind.
     if (manifest.spec?.attachments?.bucketKey) {
-        const db = await getDatabase();
-        await db.switchToTenant(ctx.tenantDbName);
-        const overwritten = input.overwrite ? await db.findAgentByKey(key, ctx.projectId) : null;
-        await assertMayNameBucket(manifest.spec, overwritten?.config, ctx.canNameBucket);
+        await runWithTenantScope(ctx.tenantDbName, async (db) => {
+            const overwritten = input.overwrite ? await db.findAgentByKey(key, ctx.projectId) : null;
+            await assertMayNameBucket(manifest.spec, overwritten?.config, ctx.canNameBucket);
+        });
     }
 
     const resources = manifest.resources ?? {};

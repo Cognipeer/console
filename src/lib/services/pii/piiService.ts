@@ -9,7 +9,7 @@
 
 import { safetyCheckSkipped } from '@/lib/services/availability/safetySkip';
 import slugify from 'slugify';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import type {
   IPiiCustomPattern,
   IPiiPolicy,
@@ -70,19 +70,19 @@ async function generateUniqueKey(
   projectId: string | undefined,
   desiredKey: string,
 ): Promise<string> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
 
-  const base = normalizeKey(desiredKey);
-  let attempt = 0;
-  let candidate = base;
-  while (attempt < MAX_KEY_ATTEMPTS) {
-    const existing = await db.findPiiPolicyByKey(candidate, projectId);
-    if (!existing) return candidate;
-    attempt++;
-    candidate = `${base}-${attempt}`;
-  }
-  throw new Error(`Could not generate a unique key for PII policy "${desiredKey}"`);
+    const base = normalizeKey(desiredKey);
+    let attempt = 0;
+    let candidate = base;
+    while (attempt < MAX_KEY_ATTEMPTS) {
+      const existing = await db.findPiiPolicyByKey(candidate, projectId);
+      if (!existing) return candidate;
+      attempt++;
+      candidate = `${base}-${attempt}`;
+    }
+    throw new Error(`Could not generate a unique key for PII policy "${desiredKey}"`);
+  });
 }
 
 // ── Default policy builder ────────────────────────────────────────────────
@@ -168,29 +168,29 @@ export async function createPiiPolicy(
   createdBy: string,
   input: CreatePiiPolicyInput,
 ): Promise<PiiServicePolicyView> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
 
-  const key = await generateUniqueKey(tenantDbName, input.projectId, input.name);
+    const key = await generateUniqueKey(tenantDbName, input.projectId, input.name);
 
-  const record = await db.createPiiPolicy({
-    tenantId,
-    projectId: input.projectId,
-    key,
-    name: input.name,
-    description: input.description,
-    defaultAction: input.defaultAction,
-    engine: input.engine ?? 'regex',
-    categories: input.categories,
-    customPatterns: input.customPatterns ?? [],
-    languages: input.languages ?? [],
-    enabled: input.enabled ?? true,
-    metadata: input.metadata ?? {},
-    ...(input.detection ? { detection: input.detection } : {}),
-    createdBy,
+    const record = await db.createPiiPolicy({
+      tenantId,
+      projectId: input.projectId,
+      key,
+      name: input.name,
+      description: input.description,
+      defaultAction: input.defaultAction,
+      engine: input.engine ?? 'regex',
+      categories: input.categories,
+      customPatterns: input.customPatterns ?? [],
+      languages: input.languages ?? [],
+      enabled: input.enabled ?? true,
+      metadata: input.metadata ?? {},
+      ...(input.detection ? { detection: input.detection } : {}),
+      createdBy,
+    });
+
+    return serializePiiPolicy(record);
   });
-
-  return serializePiiPolicy(record);
 }
 
 export async function updatePiiPolicy(
@@ -199,36 +199,36 @@ export async function updatePiiPolicy(
   updatedBy: string,
   input: UpdatePiiPolicyInput,
 ): Promise<PiiServicePolicyView | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  // `detection` is merged, not replaced: a client that sends only
-  // `minConfidence` must not wipe a stored `mode`/`ner` it never saw.
-  let detection = input.detection;
-  if (detection) {
-    const existing = await db.findPiiPolicyById(id);
-    if (!existing) return null;
-    detection = { ...existing.detection, ...detection };
-  }
-  const updated = await db.updatePiiPolicy(id, { ...input, ...(detection ? { detection } : {}), updatedBy });
-  if (!updated) return null;
-  return serializePiiPolicy(updated);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    // `detection` is merged, not replaced: a client that sends only
+    // `minConfidence` must not wipe a stored `mode`/`ner` it never saw.
+    let detection = input.detection;
+    if (detection) {
+      const existing = await db.findPiiPolicyById(id);
+      if (!existing) return null;
+      detection = { ...existing.detection, ...detection };
+    }
+    const updated = await db.updatePiiPolicy(id, { ...input, ...(detection ? { detection } : {}), updatedBy });
+    if (!updated) return null;
+    return serializePiiPolicy(updated);
+  });
 }
 
 export async function deletePiiPolicy(tenantDbName: string, id: string): Promise<boolean> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.deletePiiPolicy(id);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.deletePiiPolicy(id);
+  });
 }
 
 export async function getPiiPolicy(
   tenantDbName: string,
   id: string,
 ): Promise<PiiServicePolicyView | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const record = await db.findPiiPolicyById(id);
-  if (!record) return null;
-  return serializePiiPolicy(record);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const record = await db.findPiiPolicyById(id);
+    if (!record) return null;
+    return serializePiiPolicy(record);
+  });
 }
 
 export async function getPiiPolicyByKey(
@@ -237,21 +237,21 @@ export async function getPiiPolicyByKey(
   /** string = that project's row; `null` = the tenant-wide row only; `undefined` = any project. */
   projectId?: string | null,
 ): Promise<PiiServicePolicyView | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const record = await db.findPiiPolicyByKey(key, projectId);
-  if (!record) return null;
-  return serializePiiPolicy(record);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const record = await db.findPiiPolicyByKey(key, projectId);
+    if (!record) return null;
+    return serializePiiPolicy(record);
+  });
 }
 
 export async function listPiiPolicies(
   tenantDbName: string,
   filters?: { projectId?: string; enabled?: boolean; search?: string },
 ): Promise<PiiServicePolicyView[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const records = await db.listPiiPolicies(filters);
-  return records.map(serializePiiPolicy);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const records = await db.listPiiPolicies(filters);
+    return records.map(serializePiiPolicy);
+  });
 }
 
 // ── Catalog helpers (for UI/API) ──────────────────────────────────────────
@@ -401,53 +401,53 @@ export async function scanWithPolicy(params: {
   /** Override the response locale. Defaults to 'en'. */
   locale?: PiiLanguage;
 }): Promise<PiiScanResult & { policyKey: string; policyName: string }> {
-  const db = await getDatabase();
-  await db.switchToTenant(params.tenantDbName);
-  const policy = await db.findPiiPolicyByKey(params.policyKey, params.projectId);
-  if (!policy) {
-    throw new Error(`PII policy with key "${params.policyKey}" not found`);
-  }
-  // Fail OPEN when the PII service is switched off for the tenant: the text
-  // comes back unchanged, exactly as for a disabled policy.
-  if (!policy.enabled || await safetyCheckSkipped({ tenantDbName: params.tenantDbName }, 'pii', { policyKey: params.policyKey })) {
+  return runWithTenantScope(params.tenantDbName, async (db) => {
+    const policy = await db.findPiiPolicyByKey(params.policyKey, params.projectId);
+    if (!policy) {
+      throw new Error(`PII policy with key "${params.policyKey}" not found`);
+    }
+    // Fail OPEN when the PII service is switched off for the tenant: the text
+    // comes back unchanged, exactly as for a disabled policy.
+    if (!policy.enabled || await safetyCheckSkipped({ tenantDbName: params.tenantDbName }, 'pii', { policyKey: params.policyKey })) {
+      return {
+        inputLength: params.text.length,
+        findings: [],
+        outputText: params.text,
+        hasBlocking: false,
+        action: policy.defaultAction,
+        languages: policy.languages ?? [],
+        policyKey: policy.key,
+        policyName: policy.name,
+      };
+    }
+
+    const action: PiiAction = params.actionOverride ?? policy.defaultAction;
+    const detected = await runDetection(
+      params.text,
+      policy.engine ?? 'regex',
+      {
+        categories: policy.categories,
+        customPatterns: policy.customPatterns,
+        languages: policy.languages,
+        locale: params.locale,
+        detection: policy.detection,
+      },
+      action,
+    );
+    const { findings, outputText, hasBlocking, vault } = applyPiiAction(params.text, detected.findings, action);
     return {
       inputLength: params.text.length,
-      findings: [],
-      outputText: params.text,
-      hasBlocking: false,
-      action: policy.defaultAction,
+      findings,
+      outputText,
+      hasBlocking,
+      action,
       languages: policy.languages ?? [],
+      ...(vault ? { vault } : {}),
       policyKey: policy.key,
       policyName: policy.name,
+      ...(detected.degraded.length > 0 ? { degraded: detected.degraded } : {}),
     };
-  }
-
-  const action: PiiAction = params.actionOverride ?? policy.defaultAction;
-  const detected = await runDetection(
-    params.text,
-    policy.engine ?? 'regex',
-    {
-      categories: policy.categories,
-      customPatterns: policy.customPatterns,
-      languages: policy.languages,
-      locale: params.locale,
-      detection: policy.detection,
-    },
-    action,
-  );
-  const { findings, outputText, hasBlocking, vault } = applyPiiAction(params.text, detected.findings, action);
-  return {
-    inputLength: params.text.length,
-    findings,
-    outputText,
-    hasBlocking,
-    action,
-    languages: policy.languages ?? [],
-    ...(vault ? { vault } : {}),
-    policyKey: policy.key,
-    policyName: policy.name,
-    ...(detected.degraded.length > 0 ? { degraded: detected.degraded } : {}),
-  };
+  });
 }
 
 /**
@@ -462,34 +462,34 @@ export async function loadPolicyScanner(params: {
   policyKey: string;
   projectId?: string;
 }): Promise<{ policyKey: string; version: string; scan: (text: string) => Promise<PiiFinding[]> } | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(params.tenantDbName);
-  const policy = await db.findPiiPolicyByKey(params.policyKey, params.projectId);
-  if (!policy) {
-    throw new Error(`PII policy with key "${params.policyKey}" not found`);
-  }
-  if (!policy.enabled || await safetyCheckSkipped({ tenantDbName: params.tenantDbName }, 'pii', { policyKey: params.policyKey })) {
-    return null;
-  }
-  const updatedAt = policy.updatedAt ? new Date(policy.updatedAt).getTime() : 0;
-  return {
-    policyKey: policy.key,
-    version: `${policy.key}@${updatedAt}`,
-    scan: async (text) => {
-      const detected = await runDetection(
-        text,
-        policy.engine ?? 'regex',
-        {
-          categories: policy.categories,
-          customPatterns: policy.customPatterns,
-          languages: policy.languages,
-          detection: policy.detection,
-        },
-        'detect',
-      );
-      return detected.findings;
-    },
-  };
+  return runWithTenantScope(params.tenantDbName, async (db) => {
+    const policy = await db.findPiiPolicyByKey(params.policyKey, params.projectId);
+    if (!policy) {
+      throw new Error(`PII policy with key "${params.policyKey}" not found`);
+    }
+    if (!policy.enabled || await safetyCheckSkipped({ tenantDbName: params.tenantDbName }, 'pii', { policyKey: params.policyKey })) {
+      return null;
+    }
+    const updatedAt = policy.updatedAt ? new Date(policy.updatedAt).getTime() : 0;
+    return {
+      policyKey: policy.key,
+      version: `${policy.key}@${updatedAt}`,
+      scan: async (text) => {
+        const detected = await runDetection(
+          text,
+          policy.engine ?? 'regex',
+          {
+            categories: policy.categories,
+            customPatterns: policy.customPatterns,
+            languages: policy.languages,
+            detection: policy.detection,
+          },
+          'detect',
+        );
+        return detected.findings;
+      },
+    };
+  });
 }
 
 export type { PiiFinding, PiiScanResult, PiiVault };

@@ -7,7 +7,10 @@ const db = {
     findMcpServerByKey: vi.fn(),
     findToolByKey: vi.fn(),
 };
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn(async () => db) }));
+vi.mock('@/lib/database', () => ({
+    getDatabase: vi.fn(async () => db),
+    runWithTenantScope: vi.fn(async (_n: string, fn: (d: unknown) => unknown) => fn(db)),
+}));
 
 import {
     collectManifestResources,
