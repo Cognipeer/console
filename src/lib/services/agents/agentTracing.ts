@@ -18,6 +18,7 @@ import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/fin
 import { nameSubagentOnApprovalStep } from './subagentEvents';
 import { mergeContinuedSessionIdentity, readTraceContinuationMarker } from '@/lib/services/tracingContinuation';
 import { createLogger } from '@/lib/core/logger';
+import { settleInOrder } from './concurrentBuild';
 
 const logger = createLogger('agents');
 
@@ -411,10 +412,12 @@ export async function createInternalTracingSink(
                 onSessionSaved?.(sessionId);
             }
             const doc = buildEventDoc(sessionId, event);
-            await db.createAgentTracingEvent(doc);
-            stream.written += 1;
             const errorCounts = countTraceErrors([doc]);
-            await db.applyAgentTracingSessionEvent(sessionId, {
+            // The event and the session's running totals are different collections, so they are written together.
+            // A failure of either fails the write (the insert's first); the end-of-run save recomputes the totals from
+            // the stored events, so a total that was applied for an event that did not land is corrected there.
+            const inserted = db.createAgentTracingEvent(doc).then(() => { stream.written += 1; });
+            const aggregated = db.applyAgentTracingSessionEvent(sessionId, {
                 aiErrors: errorCounts.aiErrors,
                 cachedInputTokens: doc.cachedInputTokens,
                 durationMs: doc.durationMs,
@@ -428,6 +431,8 @@ export async function createInternalTracingSink(
                 toolErrors: errorCounts.toolErrors,
                 toolsUsed: doc.toolName ? [doc.toolName] : [],
             }, projectId);
+            const written = await settleInOrder([inserted, aggregated]);
+            if (!written.ok) throw written.reason;
             // Hosted runs feed agent health only; the end-of-run booking knows these were counted here.
             await recordTraceEventMetrics({ tenantDbName, tenantId, projectId, agentName: seed?.metadata?.flowOwned === 'true' ? undefined : seed?.agent?.name, events: [doc], source: 'hosted' });
         });

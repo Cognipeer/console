@@ -158,7 +158,7 @@ import {
 } from './agentGuardrails';
 import { buildTracingMetadata, reconcileTraceTotals, markTraceSessionFailed, createInternalTracingSink } from './agentTracing';
 import { resolveAgentPrompt } from './agentPrompt';
-import { deferredWarnings, settleInOrder, started } from './concurrentBuild';
+import { allInOrder, deferredWarnings, settleInOrder, started } from './concurrentBuild';
 import { assertOwnedAgentReachable, ownedAgentFlowTags, buildAgentSubagents } from './agentSubagents';
 import { buildBoundTools, runBoundToolCleanup } from './agentBoundTools';
 import { endRunsOfDroppedPause, buildAgentChatModel, describeRunOutcome } from './agentRecords';
@@ -1329,6 +1329,12 @@ async function runAgentChatTurn(
         ? { origin: 'reminder' as const, reminder: { runId: request.reminder.runId, message: request.reminder.message, setAt: request.reminder.setAt } }
         : undefined;
 
+    // The reads below that need only what the request already carries are started up front and awaited where the
+    // serial code read them, so a turn waits for the slowest read instead of the sum, and every check still happens
+    // in its original order (a missing conversation is reported before a spend refusal, as before).
+    // The conversation is looked up by id alone, while the agent resolves.
+    const conversationRead = started(db.findAgentConversationById(conversationId));
+
     // 1. Load agent config (use published version for API/SDK calls)
     let resolvedVersion: number | null = null;
     let agent: IAgent;
@@ -1353,9 +1359,14 @@ async function runAgentChatTurn(
         config = foundAgent.config;
     }
     assertOwnedAgentReachable(agent, request.runtimeContext);
+    // The tenant behind the turn's spend limit: read while the conversation is checked. Only a turn that calls a model needs it.
+    const spendScopeInput = { tenantDbName, tenantId, projectId, userId: request.accountableUserId ?? request.userId };
+    const spendScopeRead = !(config.kind === 'external' && config.connection) && config.kind !== 'flow' && config.modelKey
+        ? started(resolveAgentSpendScope(spendScopeInput))
+        : undefined;
 
     // 2. Load conversation
-    let conversation = await db.findAgentConversationById(conversationId);
+    let conversation = await conversationRead;
     // findAgentConversationById resolves purely by _id — it has no projectId
     // parameter — so without this check, any caller who can produce another
     // project's conversationId (a previous_response_id / A2A contextId / any
@@ -1383,27 +1394,31 @@ async function runAgentChatTurn(
     // Checked before the event log opens: a refusal must not mark the session
     // idle or write an error into it.
     const hitlSettings = resolveHitlConfig(config.humanInTheLoop);
-    await assertNoBlockingPending(db, conversation, hitlSettings);
-
-    // The files this message attaches must be files of this session.
-    const attachedRecords = await resolveMessageAttachments({
-        tenantDbName, tenantId, projectId, conversation, config, fileIds: request.attachments,
-    });
-
-    // A context given when the session was created (`POST /client/v1/agents/sessions`) applies to its API turns too.
-    const turnRuntimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
-
     // The session's own budget and the tenant's spend limit, for a turn that
     // calls a model (a connected agent spends nothing here). Refused before the
     // event log opens, like the check above.
     const callsModel = !(config.kind === 'external' && config.connection) && config.kind !== 'flow';
+    // The files this message attaches must be files of this session. Read together with the two checks around them
+    // (nothing here writes), and judged in the order below: pending actions, attachments, spend limit.
+    const attachedRead = started(resolveMessageAttachments({
+        tenantDbName, tenantId, projectId, conversation, config, fileIds: request.attachments,
+    }));
+    const spendCheck = callsModel && config.modelKey
+        ? started((spendScopeRead ?? resolveAgentSpendScope(spendScopeInput)).then(async (scope) => {
+            await assertAgentTurnSpendAllowed(scope, config);
+            return scope;
+        }))
+        : undefined;
+    await assertNoBlockingPending(db, conversation, hitlSettings);
+    const attachedRecords = await attachedRead;
+
+    // A context given when the session was created (`POST /client/v1/agents/sessions`) applies to its API turns too.
+    const turnRuntimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
+
     const budgetPlan = callsModel ? planSessionBudget(conversation, config.runtime?.limits?.maxCostUsd) : null;
     // Every turn adds its spend to the session's total — with a budget or without one.
     const spendAccount = budgetPlan ?? startSessionSpendAccount(conversation);
-    const spend = callsModel && config.modelKey
-        ? await resolveAgentSpendScope({ tenantDbName, tenantId, projectId, userId: request.accountableUserId ?? request.userId })
-        : undefined;
-    if (spend) await assertAgentTurnSpendAllowed(spend, config);
+    const spend = spendCheck ? await spendCheck : undefined;
 
     // The session event log for this turn. The ledger collects what `input.pre`
     // rewrote on the wire: step 6 persists the redacted user turn rather than
@@ -1564,6 +1579,9 @@ async function runAgentChatTurn(
         });
     }
 
+    // The stored state of the last turn needs only the conversation: read while the agent is built.
+    const carriedRead = started(loadConversationState(db, conversation));
+
     // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
     const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, outputLimit, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity, hitlLog } = await buildLocalAgentRun({
         db,
@@ -1607,16 +1625,19 @@ async function runAgentChatTurn(
     // ended in (its tool calls and results, summaries, plan), or the text
     // transcript when there is none — see agentTurnState.ts.
     const now = new Date();
-    const carried = await loadConversationState(db, conversation);
-    const attached = await assembleMessageAttachments({
-        tenantDbName, tenantId, projectId, records: attachedRecords, config, model, warnings,
-    });
+    const [carried, attached, earlier] = await allInOrder([
+        carriedRead,
+        assembleMessageAttachments({
+            tenantDbName, tenantId, projectId, records: attachedRecords, config, model, warnings,
+        }),
+        earlierAttachments({ db, conversation, config, model }),
+    ]);
     const inputState = buildTurnInputState({
         carried,
         transcript: conversation.messages || [],
         userMessage,
         userContent: buildUserTurnContent(userMessage, attached),
-        attachments: await earlierAttachments({ db, conversation, config, model }),
+        attachments: earlier,
     });
     const userTurnIndex = inputState.messages.length - 1;
     // Tool calls the carried state already holds belong to earlier turns.

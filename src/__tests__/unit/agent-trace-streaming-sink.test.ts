@@ -122,7 +122,11 @@ function sessionFile(sessionId: string, events: unknown[], extra: Doc = {}) {
 }
 
 const streamed = () => vi.waitFor(() => expect(hoisted.applied.length).toBeGreaterThan(0));
-const streamedCount = (n: number) => vi.waitFor(() => expect(hoisted.applied).toHaveLength(n));
+/** `n` events were written; `failed` of them did not land, so the agent's health was not booked for them. */
+const streamedCount = (n: number, failed = 0) => vi.waitFor(() => {
+    expect(hoisted.applied).toHaveLength(n);
+    expect(hoisted.metrics).toHaveLength(n - failed);
+});
 
 beforeEach(() => {
     hoisted.sessions.clear();
@@ -185,7 +189,9 @@ describe('a hosted run is traced while it runs', () => {
         const events = [aiCall(sessionId, 1, { input: 100, output: 20 }), toolCall(sessionId, 2, true), aiCall(sessionId, 3, { input: 200, output: 40 }), toolCall(sessionId, 4)];
         hoisted.failWritesOfSequence.add(2); // one streamed write fails: the run goes on, the save makes up for it
         for (const event of events) sink.onEvent(event);
-        await streamedCount(3);
+        // The event and the running totals are written together, so the totals took in the event that did not land
+        // (the save below recomputes them from what is stored); its health booking was skipped.
+        await streamedCount(4, 1);
         expect(hoisted.events.map((event) => event.sequence)).toEqual([1, 3, 4]);
 
         await sink.onSession(sessionFile(sessionId, events));
@@ -205,6 +211,45 @@ describe('a hosted run is traced while it runs', () => {
         expect(final.events.sort()).toEqual([1, 2, 3, 4]);
         expect(final.previous.sort()).toEqual([1, 3, 4]);
         expect(hoisted.outcomes).toEqual(['success']);
+    });
+
+    it('writes an event and the session totals together, and books the health only when both landed', async () => {
+        const { make, sessionId } = sinkFor('s-together');
+        const sink = await make();
+        let releaseInsert: () => void = () => undefined;
+        const { getDatabase } = await import('@/lib/database');
+        const db = (await getDatabase()) as unknown as { createAgentTracingEvent: ReturnType<typeof vi.fn> };
+        const original = db.createAgentTracingEvent.getMockImplementation() as (doc: Doc) => Promise<unknown>;
+        // The first event's insert is held back: the totals must be written without waiting for it.
+        db.createAgentTracingEvent.mockImplementationOnce(async (doc: Doc) => {
+            await new Promise<void>((resolve) => { releaseInsert = resolve; });
+            return original(doc);
+        });
+
+        sink.onEvent(aiCall(sessionId, 1, { input: 100, output: 20 }));
+        await streamed();
+        expect(hoisted.applied).toHaveLength(1);
+        expect(hoisted.events).toHaveLength(0);
+        expect(hoisted.metrics).toHaveLength(0);
+
+        releaseInsert();
+        await vi.waitFor(() => expect(hoisted.metrics).toHaveLength(1));
+        expect(hoisted.events.map((event) => event.sequence)).toEqual([1]);
+    });
+
+    it('does not book the health of an event whose totals could not be written, and carries on with the next event', async () => {
+        const { make, sessionId } = sinkFor('s-totals-fail');
+        const sink = await make();
+        const { getDatabase } = await import('@/lib/database');
+        const db = (await getDatabase()) as unknown as { applyAgentTracingSessionEvent: ReturnType<typeof vi.fn> };
+        db.applyAgentTracingSessionEvent.mockImplementationOnce(async () => { throw new Error('database unavailable'); });
+
+        sink.onEvent(aiCall(sessionId, 1, { input: 100, output: 20 }));
+        sink.onEvent(aiCall(sessionId, 2, { input: 200, output: 40 }));
+        await vi.waitFor(() => expect(hoisted.metrics).toHaveLength(1));
+
+        expect(hoisted.events.map((event) => event.sequence)).toEqual([1, 2]);
+        expect(hoisted.metrics[0].events).toEqual([2]);
     });
 
     it('names the sub-agent an approval came from, learned from the SDK event that follows the trace record', async () => {
