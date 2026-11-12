@@ -9,7 +9,7 @@
 
 import { createLogger } from '@/lib/core/logger';
 import { ingestDocument, reingestDocument } from '@/lib/services/rag';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import type { ICrawlerRagBinding } from '@/lib/database';
 import { isPageOfCrawler } from '@/lib/services/rag/crawlerMark';
 
@@ -56,59 +56,59 @@ export async function ingestCrawlPage(input: IngestPageInput): Promise<IngestPag
     // Recurring crawls revisit the same URLs on every run. Re-ingesting a
     // page we've already indexed for this module must replace its old
     // chunks/vectors rather than piling up duplicate copies alongside them.
-    const db = await getDatabase();
-    await db.switchToTenant(input.tenantDbName);
-    let existing = await db.findRagDocumentByFileName(
-      input.rag.ragModuleKey,
-      input.url,
-      input.projectId,
-    );
-    // In a knowledge base with access control a page replaces only a page this crawler sent, wherever a manager put it:
-    // a document of the same name from anywhere else may sit in a folder whose readers never asked for the crawled
-    // text, and the newest of that name need not be the crawler's. With none of its own, the page is a new document.
-    if (existing && !isPageOfCrawler(existing.metadata, input.crawlerKey)) {
-      const ragModule = await db.findRagModuleByKey(input.rag.ragModuleKey, input.projectId);
-      if (ragModule?.access?.enabled === true) {
-        const named = await db.listRagDocumentsByFileName(input.rag.ragModuleKey, input.url, input.projectId);
-        existing = named.find((doc) => isPageOfCrawler(doc.metadata, input.crawlerKey)) ?? null;
+    return await runWithTenantScope(input.tenantDbName, async (db) => {
+      let existing = await db.findRagDocumentByFileName(
+        input.rag.ragModuleKey,
+        input.url,
+        input.projectId,
+      );
+      // In a knowledge base with access control a page replaces only a page this crawler sent, wherever a manager put it:
+      // a document of the same name from anywhere else may sit in a folder whose readers never asked for the crawled
+      // text, and the newest of that name need not be the crawler's. With none of its own, the page is a new document.
+      if (existing && !isPageOfCrawler(existing.metadata, input.crawlerKey)) {
+        const ragModule = await db.findRagModuleByKey(input.rag.ragModuleKey, input.projectId);
+        if (ragModule?.access?.enabled === true) {
+          const named = await db.listRagDocumentsByFileName(input.rag.ragModuleKey, input.url, input.projectId);
+          existing = named.find((doc) => isPageOfCrawler(doc.metadata, input.crawlerKey)) ?? null;
+        }
       }
-    }
-    const sentByCrawler = { crawlerKey: input.crawlerKey };
+      const sentByCrawler = { crawlerKey: input.crawlerKey };
 
-    const doc = existing
-      ? await reingestDocument(
-          input.tenantDbName,
-          input.tenantId,
-          input.projectId,
-          {
-            ragModuleKey: input.rag.ragModuleKey,
-            documentId: String(existing._id),
-            content: input.bodyMarkdown,
-            fileName: input.url,
-            contentType: 'text/markdown',
-            metadata,
-            sentByCrawler,
-            updatedBy: input.createdBy,
-          },
-        )
-      : await ingestDocument(
-          input.tenantDbName,
-          input.tenantId,
-          input.projectId,
-          {
-            ragModuleKey: input.rag.ragModuleKey,
-            fileName: input.url,
-            content: input.bodyMarkdown,
-            contentType: 'text/markdown',
-            metadata,
-            sentByCrawler,
-            createdBy: input.createdBy,
-          },
-        );
-    return {
-      ragStatus: doc.status === 'indexed' ? 'indexed' : 'failed',
-      ragDocumentId: typeof doc._id === 'string' ? doc._id : String(doc._id),
-    };
+      const doc = existing
+        ? await reingestDocument(
+            input.tenantDbName,
+            input.tenantId,
+            input.projectId,
+            {
+              ragModuleKey: input.rag.ragModuleKey,
+              documentId: String(existing._id),
+              content: input.bodyMarkdown,
+              fileName: input.url,
+              contentType: 'text/markdown',
+              metadata,
+              sentByCrawler,
+              updatedBy: input.createdBy,
+            },
+          )
+        : await ingestDocument(
+            input.tenantDbName,
+            input.tenantId,
+            input.projectId,
+            {
+              ragModuleKey: input.rag.ragModuleKey,
+              fileName: input.url,
+              content: input.bodyMarkdown,
+              contentType: 'text/markdown',
+              metadata,
+              sentByCrawler,
+              createdBy: input.createdBy,
+            },
+          );
+      return {
+        ragStatus: doc.status === 'indexed' ? 'indexed' : 'failed',
+        ragDocumentId: typeof doc._id === 'string' ? doc._id : String(doc._id),
+      };
+    });
   } catch (err) {
     log.warn('RAG ingest failed for crawled page', {
       url: input.url,

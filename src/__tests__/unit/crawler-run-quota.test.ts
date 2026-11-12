@@ -12,14 +12,17 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/quota/serviceQuota', () => ({ enforceServiceQuota: mocks.enforce }));
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn().mockResolvedValue({
-    switchToTenant: vi.fn().mockResolvedValue(undefined),
+vi.mock('@/lib/database', () => {
+  const db = {
     findCrawlerById: vi.fn().mockResolvedValue(null),
     findCrawlerByKey: mocks.findCrawlerByKey,
     createCrawlJob: mocks.createCrawlJob,
-  }),
-}));
+  };
+  return {
+    getDatabase: vi.fn().mockResolvedValue(db),
+    runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(db)),
+  };
+});
 vi.mock('@/lib/services/availability/serviceAvailability', () => ({ assertServiceEnabled: vi.fn() }));
 vi.mock('@/lib/services/crawler/engine', () => ({
   crawl: async function* () { yield { url: 'https://a.test/', type: 'html', body: 'x', depth: 0, fetchedAt: new Date() }; },
