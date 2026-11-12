@@ -27,6 +27,7 @@ import {
   type Mounted,
   type RouteHandler,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import CreateProjectShell from '@/components/projects/CreateProjectShell';
 import { DashboardUserProvider } from '@/components/layout/DashboardUserContext';
 import TenantProviders from '@/components/settings/TenantProviders';
@@ -106,7 +107,7 @@ async function openEditForm(patch: () => unknown) {
     ['GET', /^\/api\/providers\/drivers\/[^/]+\/form$/, () => ({ schema: SCHEMA })],
     ['PATCH', '/api/providers/prov-1', patch],
   ]);
-  mounted = await mount(createElement(TenantProviders));
+  mounted = await renderWithQuery(createElement(TenantProviders));
   await settle(120);
 
   await click(q('button[aria-label="Actions"]'));
@@ -228,7 +229,7 @@ describe('adding a provider', () => {
 
   it('marks the field the server refused on the tenant\'s provider list, and keeps the form open', async () => {
     installCreateApi(refuseEndpoint);
-    mounted = await mount(createElement(TenantProviders));
+    mounted = await renderWithQuery(createElement(TenantProviders));
     await settle(120);
     await click(buttonByText('Add provider'));
     await settle(60);
@@ -268,7 +269,7 @@ describe('adding a provider', () => {
       ['GET', '/api/users', () => ({ users: [] })],
       ['GET', '/api/groups', () => ({ groups: [] })],
     ]);
-    mounted = await mount(createElement(CreateProjectShell, { open: true, onClose: vi.fn(), onCreated: vi.fn() }));
+    mounted = await renderWithQuery(createElement(CreateProjectShell, { open: true, onClose: vi.fn(), onCreated: vi.fn() }));
     await settle(120);
     await click(buttonByText('Add a new provider'));
     await settle(60);
@@ -280,7 +281,7 @@ describe('adding a provider', () => {
 
   it('keeps a refusal that names no field of the form as the message alone', async () => {
     installCreateApi(() => jsonResponse({ error: 'Provider creation failed.' }, 400));
-    mounted = await mount(createElement(TenantProviders));
+    mounted = await renderWithQuery(createElement(TenantProviders));
     await settle(120);
     await click(buttonByText('Add provider'));
     await settle(60);
@@ -305,7 +306,7 @@ describe('the pages that edit a provider', () => {
 
   it.each(PAGES)('%s hands the refusal of a save, with its field, to the form', (file) => {
     const source = readFileSync(path.join(ROOT, file), 'utf8');
-    expect(source).toMatch(/throw providerRequestError\(body, 'Failed to update (provider|instance)'\)/);
+    expect(source).toMatch(/throw providerRequestError\((body|error\.payload), 'Failed to update (provider|instance)'\)/);
     // the plain Error of the text alone would drop the field the form needs
     expect(source).not.toMatch(/throw new Error\(body\?\.error \|\| 'Failed to update (provider|instance)'\)/);
   });

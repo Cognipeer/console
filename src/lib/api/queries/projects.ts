@@ -113,6 +113,21 @@ function useInvalidateProjects() {
   return () => queryClient.invalidateQueries({ queryKey: projectsKeys.project(project) });
 }
 
+/**
+ * Creates a project (with its members, groups, providers and alert defaults). The answer is the raw body
+ * (`project`, `warnings`). The list reloads in the background: the caller moves to the new project at once.
+ */
+export function useCreateProject() {
+  const invalidate = useInvalidateProjects();
+  return useMutation({
+    mutationFn: (body: Record<string, unknown>) =>
+      apiPost<{ project?: { _id?: string }; warnings?: string[] }>('/api/projects', body),
+    onSuccess: () => {
+      void invalidate();
+    },
+  });
+}
+
 /** Make a project the active one. The result of the call is empty. */
 export function useSetActiveProject() {
   const invalidate = useInvalidateProjects();

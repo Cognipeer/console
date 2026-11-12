@@ -104,6 +104,8 @@ function withQuery(path: string, query?: Query): string {
   return search ? `${path}?${search}` : path;
 }
 
+// Raw fetch on purpose: a refusal names its decision in the `X-Decision-Id` response header, which the shared client's
+// error does not carry (`toDirectoryApiError` reads it).
 async function call(method: string, path: string, options: CallOptions = {}): Promise<unknown> {
   const hasBody = options.body !== undefined;
   const res = await fetch(withQuery(path, options.query), {

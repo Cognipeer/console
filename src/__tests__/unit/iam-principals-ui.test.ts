@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MantineProvider } from '@mantine/core';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import { I18nProvider, useTranslations } from '@/lib/i18n';
 import { ConfirmProvider } from '@/components/common/confirm/ConfirmProvider';
 import { theme } from '@/theme/theme';
@@ -42,9 +44,13 @@ function render(
   }
   return renderToStaticMarkup(
     React.createElement(
-      MantineProvider,
-      { theme, env: 'test' },
-      React.createElement(Provider, { locale }, React.createElement(Confirm, null, React.createElement(Harness))),
+      QueryClientProvider,
+      { client: newTestQueryClient() },
+      React.createElement(
+        MantineProvider,
+        { theme, env: 'test' },
+        React.createElement(Provider, { locale }, React.createElement(Confirm, null, React.createElement(Harness))),
+      ),
     ),
   );
 }

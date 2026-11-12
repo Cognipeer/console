@@ -9,6 +9,7 @@ import { IconCalendar, IconChevronDown, IconDownload } from '@tabler/icons-react
 import type { PermissionService } from '@/lib/security/rbac';
 import { parseLocalDate } from '@/lib/utils/dashboardDateFilter';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import { useAuditLogs, useAuditServices } from '@/lib/api/queries/settings';
 
 interface AuditLogRecord {
   id: string;
@@ -87,9 +88,6 @@ function DetailItem({ label, value, mono }: { label: string; value?: ReactNode; 
 }
 
 export default function AuditLogViewer() {
-  const [logs, setLogs] = useState<AuditLogRecord[]>([]);
-  const [services, setServices] = useState<PermissionServiceOption[]>([]);
-  const [loading, setLoading] = useState(true);
   const [searchInput, setSearchInput] = useState('');
   const [debouncedSearch] = useDebouncedValue(searchInput.trim(), 300);
   const [serviceFilter, setServiceFilter] = useState<string>('');
@@ -99,12 +97,12 @@ export default function AuditLogViewer() {
   const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([null, null]);
   const [page, setPage] = useState(1);
   const [pageSize] = useState(25);
-  const [hasNextPage, setHasNextPage] = useState(false);
-  const [total, setTotal] = useState<number | undefined>(undefined);
   const [exporting, setExporting] = useState(false);
   const [selectedLog, setSelectedLog] = useState<AuditLogRecord | null>(null);
   const [drawerOpened, drawerHandlers] = useDisclosure(false);
 
+  const servicesQuery = useAuditServices<{ services?: PermissionServiceOption[] }>();
+  const services = useMemo(() => servicesQuery.data?.services ?? [], [servicesQuery.data]);
   const serviceLabels = useMemo(
     () => new Map(services.map((service) => [service.id, service.label])),
     [services],
@@ -122,57 +120,21 @@ export default function AuditLogViewer() {
     return params;
   }, [actionFilter, dateRange, debouncedSearch, methodFilter, outcomeFilter, serviceFilter]);
 
-  const fetchLogs = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true);
-    try {
-      const params = buildFilterParams();
-      params.set('limit', String(pageSize + 1));
-      params.set('skip', String((page - 1) * pageSize));
-
-      const response = await fetch(`/api/audit/logs?${params.toString()}`, { signal });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data?.error || 'Failed to load audit logs');
-      }
-      const nextLogs = (data.logs ?? []) as AuditLogRecord[];
-      setHasNextPage(nextLogs.length > pageSize);
-      setTotal(typeof data.total === 'number' ? data.total : undefined);
-      setLogs(nextLogs.slice(0, pageSize));
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        return;
-      }
-      notifications.show({
-        title: 'Audit log',
-        message: error instanceof Error ? error.message : 'Failed to load audit logs',
-        color: 'red',
-      });
-    } finally {
-      if (!signal?.aborted) {
-        setLoading(false);
-      }
-    }
+  // One more row than a page tells whether there is a next page.
+  const logFilters = useMemo(() => {
+    const params = buildFilterParams();
+    params.set('limit', String(pageSize + 1));
+    params.set('skip', String((page - 1) * pageSize));
+    return params.toString();
   }, [buildFilterParams, page, pageSize]);
-
-  useEffect(() => {
-    async function fetchServices() {
-      try {
-        const response = await fetch('/api/audit/services');
-        if (!response.ok) return;
-        const data = await response.json() as { services?: PermissionServiceOption[] };
-        setServices(data.services ?? []);
-      } catch {
-        setServices([]);
-      }
-    }
-    void fetchServices();
-  }, []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void fetchLogs(controller.signal);
-    return () => controller.abort();
-  }, [fetchLogs]);
+  const logsQuery = useAuditLogs<{ logs?: AuditLogRecord[]; total?: number }>(logFilters);
+  // The grid shows its loading state on every page and filter change, not only on the first load.
+  const loading = logsQuery.isFetching;
+  const fetchedRows = useMemo(() => logsQuery.data?.logs ?? [], [logsQuery.data]);
+  const hasNextPage = fetchedRows.length > pageSize;
+  const total = typeof logsQuery.data?.total === 'number' ? logsQuery.data.total : undefined;
+  const logs = useMemo(() => fetchedRows.slice(0, pageSize), [fetchedRows, pageSize]);
+  const refetchLogs = logsQuery.refetch;
 
   useEffect(() => {
     setPage(1);
@@ -183,6 +145,7 @@ export default function AuditLogViewer() {
     try {
       const params = buildFilterParams();
       params.set('format', format);
+      // Raw fetch on purpose: a file download (blob) named by the Content-Disposition header.
       const response = await fetch(`/api/audit/logs/export?${params.toString()}`);
       if (!response.ok) {
         const data = await response.json().catch(() => null);
@@ -378,7 +341,7 @@ export default function AuditLogViewer() {
             </Menu>
           </>
         }
-        onRefresh={() => void fetchLogs()}
+        onRefresh={() => void refetchLogs()}
         refreshing={loading}
         empty={{
           title: 'No audit events',

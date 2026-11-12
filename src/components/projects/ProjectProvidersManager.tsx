@@ -1,12 +1,14 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Button, Modal, Select, Stack, Text } from '@mantine/core';
 import { IconPlus, IconTrash } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useConfirm } from '@/components/common/confirm';
+import { errorMessage } from '@/lib/api/client';
+import { useProjectProviders, useUpdateTenantProvider } from '@/lib/api/queries/tenantProviders';
 import { useTranslations } from '@/lib/i18n';
 
 type Provider = {
@@ -49,52 +51,27 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
   const { confirmAction } = useConfirm();
   const tq = useTranslations('common.confirm.qos');
   const tCommon = useTranslations('common');
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [loading, setLoading] = useState(true);
+  const providersQuery = useProjectProviders<Provider>(projectId);
+  const updateProvider = useUpdateTenantProvider();
+  const providers = useMemo(() => providersQuery.data?.providers ?? [], [providersQuery.data]);
+  const loading = providersQuery.isFetching;
   // The person may not read providers at all (a project admin without the providers permission).
-  const [forbidden, setForbidden] = useState(false);
-  const [tenantScope, setTenantScope] = useState(false);
+  const forbidden = providersQuery.data?.forbidden ?? false;
+  const tenantScope = providersQuery.data?.tenantScope ?? false;
   const [submitting, setSubmitting] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
+  const refetchProviders = providersQuery.refetch;
 
-  const fetchProviders = useCallback(async () => {
-    setLoading(true);
-    try {
-      const resTenant = await fetch('/api/providers?scope=tenant', { cache: 'no-store' });
-      if (resTenant.ok) {
-        const data = (await resTenant.json()) as { providers?: Provider[] };
-        setProviders(data.providers ?? []);
-        setTenantScope(true);
-        setForbidden(false);
-        return;
-      }
-
-      const resProject = await fetch('/api/providers', { cache: 'no-store' });
-      if (resProject.status === 403) {
-        setProviders([]);
-        setForbidden(true);
-        return;
-      }
-      if (!resProject.ok) {
-        const body = await resProject.json().catch(() => null);
-        throw new Error(body?.error || 'Failed to load providers');
-      }
-      const data = (await resProject.json()) as { providers?: Provider[] };
-      setProviders(data.providers ?? []);
-      setTenantScope(false);
-      setForbidden(false);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to load providers';
-      notifications.show({ title: 'Project providers', message, color: 'red' });
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
+  // A failed read keeps what was shown and says so once per failure.
+  const failedAt = providersQuery.errorUpdatedAt;
+  const loadError = providersQuery.error;
   useEffect(() => {
-    void fetchProviders();
-  }, [fetchProviders, projectId]);
+    if (loadError) {
+      notifications.show({ title: 'Project providers', message: errorMessage(loadError, 'Failed to load providers'), color: 'red' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failedAt]);
 
   const rows = useMemo(() => providers ?? [], [providers]);
 
@@ -120,19 +97,11 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
       next.delete(String(projectId));
     }
 
-    const res = await fetch(
-      `/api/providers/${encodeURIComponent(provider._id)}?scope=tenant`,
-      {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectIds: Array.from(next) }),
-      },
-    );
-
-    const body = await res.json().catch(() => null);
-    if (!res.ok) {
-      throw new Error(body?.error || 'Failed to update assignment');
-    }
+    await updateProvider
+      .mutateAsync({ id: provider._id, body: { projectIds: Array.from(next) } })
+      .catch((error: unknown) => {
+        throw new Error(errorMessage(error, 'Failed to update assignment'));
+      });
   };
 
   const setAssignment = async (provider: Provider, assign: boolean) => {
@@ -142,7 +111,6 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
     try {
       await patchAssignment(provider, assign);
       notifications.show({ title: 'Project providers', message: 'Provider added', color: 'green' });
-      await fetchProviders();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to update assignment';
       notifications.show({ title: 'Project providers', message, color: 'red' });
@@ -164,7 +132,6 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
     });
     if (!removed) return;
     notifications.show({ title: 'Project providers', message: 'Provider removed', color: 'green' });
-    await fetchProviders();
   };
 
   const columns: DataGridColumn<Provider>[] = [
@@ -221,7 +188,7 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
         loading={loading}
         rowKey={(p) => String(p._id)}
         columns={columns}
-        onRefresh={() => void fetchProviders()}
+        onRefresh={() => void refetchProviders()}
         refreshing={loading}
         toolbarRight={
           tenantScope ? (

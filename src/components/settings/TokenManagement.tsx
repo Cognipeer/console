@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Button, Text } from '@mantine/core';
 import { IconKey, IconTrash, IconAdjustments } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
@@ -12,13 +12,11 @@ import TokenDetailModal from '@/components/iam/tokens/TokenDetailModal';
 import TokenStatusBadges from '@/components/iam/tokens/TokenStatusBadges';
 import { isTokenExpired, type ApiTokenRow } from '@/components/iam/tokens/tokenModel';
 import { formatRelative } from '@/components/iam/timeFormat';
+import { tokenRoutes, useDeleteToken, useTokens } from '@/lib/api/queries/tokens';
 
 export default function TokenManagement({ projectId }: { projectId?: string }) {
-  const [tokens, setTokens] = useState<ApiTokenRow[]>([]);
-  const [loading, setLoading] = useState(true);
   const [createModalOpened, setCreateModalOpened] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [forbidden, setForbidden] = useState(false);
   const [query, setQuery] = useState('');
   const t = useTranslations('settings.tokenManagement');
   const tIam = useTranslations('iamTokens');
@@ -27,43 +25,26 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
   const locale = useLocale();
   const { confirmAction } = useConfirm();
 
-  const listUrl = projectId
-    ? `/api/projects/${encodeURIComponent(projectId)}/tokens`
-    : '/api/tokens';
-  const itemUrl = (id: string) =>
-    projectId
-      ? `/api/projects/${encodeURIComponent(projectId)}/tokens/${encodeURIComponent(id)}`
-      : `/api/tokens/${encodeURIComponent(id)}`;
+  const routes = tokenRoutes(projectId);
+  const tokensQuery = useTokens(projectId);
+  const deleteToken = useDeleteToken(projectId);
+  const tokens = useMemo(() => tokensQuery.data?.tokens ?? [], [tokensQuery.data]);
+  const forbidden = tokensQuery.data?.forbidden ?? false;
+  const loading = tokensQuery.isPending;
+  const refetchTokens = tokensQuery.refetch;
 
-  const fetchTokens = useCallback(async () => {
-    setLoading(true);
-    try {
-      const response = await fetch(listUrl);
-      if (response.status === 403) {
-        setForbidden(true);
-        setTokens([]);
-        return;
-      }
-      if (!response.ok) {
-        throw new Error(t('errors.fetch'));
-      }
-      setForbidden(false);
-      const data = await response.json();
-      setTokens(data.tokens || []);
-    } catch {
-      notifications.show({
-        title: tNotifications('errorTitle'),
-        message: t('errors.load'),
-        color: 'red',
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [listUrl, t, tNotifications]);
-
+  // A failed read keeps what was shown and says so once per failure.
+  const failedAt = tokensQuery.errorUpdatedAt;
+  const failed = tokensQuery.isError;
   useEffect(() => {
-    void fetchTokens();
-  }, [fetchTokens]);
+    if (!failed) return;
+    notifications.show({
+      title: tNotifications('errorTitle'),
+      message: t('errors.load'),
+      color: 'red',
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failedAt]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -90,8 +71,11 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
       confirmLabel: t('deleteModal.confirm'),
       cancelLabel: t('deleteModal.cancel'),
       action: async () => {
-        const response = await fetch(itemUrl(token._id), { method: 'DELETE' });
-        if (!response.ok) throw new Error(t('errors.delete'));
+        try {
+          await deleteToken.mutateAsync(token._id);
+        } catch {
+          throw new Error(t('errors.delete'));
+        }
       },
     });
     if (!done) return;
@@ -100,7 +84,6 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
       message: t('messages.deleteSuccess'),
       color: 'green',
     });
-    fetchTokens();
   };
 
   if (forbidden) {
@@ -182,8 +165,8 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
           onChange: setQuery,
           placeholder: tIam('table.searchPlaceholder'),
         }}
-        onRefresh={() => void fetchTokens()}
-        refreshing={loading}
+        onRefresh={() => void refetchTokens()}
+        refreshing={tokensQuery.isFetching}
         toolbarRight={
           <Button
             color="teal"
@@ -227,19 +210,17 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
       <CreateTokenModal
         opened={createModalOpened}
         onClose={() => setCreateModalOpened(false)}
-        onSuccess={fetchTokens}
-        createUrl={listUrl}
+        // Minting a token reloads the list (see `useCreateToken`); nothing more to do when the form closes.
+        onSuccess={() => undefined}
+        createUrl={routes.list}
       />
 
       <TokenDetailModal
         token={selected}
         onClose={() => setSelectedId(null)}
-        onSaved={(saved) =>
-          setTokens((current) =>
-            current.map((token) => (String(token._id) === String(saved._id) ? { ...token, ...saved } : token)),
-          )
-        }
-        updateUrl={itemUrl}
+        // The saved token is merged into the cached list by `useUpdateToken`.
+        onSaved={() => undefined}
+        updateUrl={routes.item}
       />
     </>
   );

@@ -4,6 +4,8 @@
  * which is always English and always present.
  */
 
+import { ApiError } from '@/lib/api/client';
+
 export type Translate = (key: string, values?: Record<string, string | number | undefined | null>) => string;
 
 const KNOWN_CODES = new Set([
@@ -23,18 +25,19 @@ interface ErrorBody {
   details?: unknown;
 }
 
-/** The response body as an object; `{}` when it is empty, not JSON or not an object. */
-export async function readJsonObject(response: Response): Promise<Record<string, unknown>> {
-  try {
-    const body: unknown = await response.json();
-    return body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
+/** The JSON body of a failed call (`{}` when the failure carried none, or the body was not an object). */
+function errorBodyOf(error: ApiError): ErrorBody {
+  const body = error.payload;
+  return body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
 }
 
-export async function readErrorBody(response: Response): Promise<ErrorBody> {
-  return readJsonObject(response);
+/**
+ * A failed token call as the error to show: an answer of the server becomes its message in the UI language
+ * (`tokenErrorMessage`), anything else (a lost connection) keeps its own message.
+ */
+export function tokenCallError(error: unknown, t: Translate, fallback: string): Error {
+  if (error instanceof ApiError) return new Error(tokenErrorMessage(errorBodyOf(error), t, fallback));
+  return error instanceof Error ? error : new Error(fallback);
 }
 
 export function tokenErrorMessage(body: ErrorBody, t: Translate, fallback: string): string {

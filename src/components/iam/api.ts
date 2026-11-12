@@ -13,6 +13,8 @@
  * checks keep working for either.
  */
 
+import { ApiError as ClientApiError, apiRequest } from '@/lib/api/client';
+
 /** The error `code` and message of a failed API call (`{ error, code }` bodies). */
 export class ApiError extends Error {
   constructor(
@@ -1073,20 +1075,14 @@ export function buildQuery(query?: Query): string {
   return s ? `?${s}` : '';
 }
 
-async function errorFrom(res: Response): Promise<IamApiError> {
-  let message = `HTTP ${res.status}`;
-  let code: string | undefined;
-  let details: ValidationDetail[] = [];
-  try {
-    const body = asRecord(await res.json());
-    if (typeof body.error === 'string' && body.error) message = body.error;
-    else if (typeof body.message === 'string' && body.message) message = body.message;
-    if (typeof body.code === 'string') code = body.code;
-    details = normalizeDetails(body.details);
-  } catch {
-    /* not JSON */
-  }
-  return new IamApiError(message, res.status, code, details);
+/** The error of a non-2xx answer, from the `{ error | message, code, details }` body the server sent (if any). */
+function errorFromBody(status: number, payload: unknown): IamApiError {
+  let message = `HTTP ${status}`;
+  const body = asRecord(payload);
+  if (typeof body.error === 'string' && body.error) message = body.error;
+  else if (typeof body.message === 'string' && body.message) message = body.message;
+  const code = typeof body.code === 'string' ? body.code : undefined;
+  return new IamApiError(message, status, code, normalizeDetails(body.details));
 }
 
 interface RequestOptions {
@@ -1097,23 +1093,25 @@ interface RequestOptions {
 
 async function request(method: string, path: string, opts: RequestOptions = {}): Promise<unknown> {
   const hasBody = opts.body !== undefined;
-  const res = await fetch(`${path}${buildQuery(opts.query)}`, {
-    method,
-    cache: 'no-store',
-    credentials: 'same-origin',
-    signal: opts.signal,
-    ...(hasBody
-      ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts.body) }
-      : {}),
-  });
-  if (!res.ok) throw await errorFrom(res);
-  if (res.status === 204) return undefined;
-  const text = await res.text();
-  if (!text) return undefined;
+  let result: unknown;
   try {
-    return JSON.parse(text);
+    result = await apiRequest<unknown>(`${path}${buildQuery(opts.query)}`, {
+      method,
+      signal: opts.signal,
+      ...(hasBody ? { body: JSON.stringify(opts.body) } : {}),
+    });
+  } catch (error) {
+    if (error instanceof ClientApiError) throw errorFromBody(error.status, error.payload);
+    if (error instanceof SyntaxError) throw new IamApiError('Invalid JSON in response', 200, 'invalid_response');
+    throw error;
+  }
+  // A body that is not typed as JSON comes back as text: an empty one is "no content", anything else must still parse.
+  if (typeof result !== 'string') return result;
+  if (!result) return undefined;
+  try {
+    return JSON.parse(result);
   } catch {
-    throw new IamApiError('Invalid JSON in response', res.status, 'invalid_response');
+    throw new IamApiError('Invalid JSON in response', 200, 'invalid_response');
   }
 }
 

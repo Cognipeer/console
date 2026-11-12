@@ -13,7 +13,6 @@ import {
   installApiMock,
   installDomStubs,
   jsonResponse,
-  mount,
   q,
   qa,
   setInput,
@@ -22,6 +21,7 @@ import {
   type Mounted,
   type RouteHandler,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import { CAPS_ADMIN, CAPS_READ_ONLY, directoryRoutes, PEOPLE } from '../helpers/iamDirectoryFixtures';
 
 const nav = vi.hoisted(() => ({ search: '', cache: new Map<string, URLSearchParams>() }));
@@ -56,7 +56,7 @@ async function renderTab(search = 'tab=principals', extra: Route[] = [], caps: u
   nav.search = search;
   window.history.replaceState(null, '', `/dashboard/iam?${search}`);
   api = installApiMock([...directoryRoutes(caps), ...extra]);
-  mounted = await mount(createElement(PrincipalsTab, { canManage: true }));
+  mounted = await renderWithQuery(createElement(PrincipalsTab, { canManage: true }));
   await settle(150);
 }
 

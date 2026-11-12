@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActionIcon,
   Alert,
@@ -40,6 +40,19 @@ import FormShell, {
   ToggleList,
   ToggleRow,
 } from '@/components/common/ui/FormShell';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useDeleteWebhook,
+  useRedeliverWebhook,
+  useRestartWebhookDeliveries,
+  useRotateWebhookSecret,
+  useSaveWebhook,
+  useSendWebhookTest,
+  useSetWebhookStatus,
+  useWebhookDeliveries,
+  useWebhooks,
+  type WebhookSecretEndpoint,
+} from '@/lib/api/queries/webhooks';
 import { useTranslations } from '@/lib/i18n';
 import {
   eventGroups,
@@ -59,21 +72,9 @@ import {
   type WebhookEventType,
 } from './webhooksUi';
 
-const API = '/api/webhooks';
-const DELIVERY_PAGE = 50;
-
-type ApiResult<T> = { ok: boolean; status: number; data: T & { error?: string } };
-
-async function api<T = Record<string, unknown>>(method: string, url: string, body?: unknown): Promise<ApiResult<T>> {
-  const response = await fetch(url, {
-    method,
-    ...(body !== undefined ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}),
-  });
-  const data = await response.json().catch(() => ({}));
-  return { ok: response.ok, status: response.status, data };
-}
-
 const formatTime = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString() : '—');
+
+const NO_EVENTS: WebhookEventType[] = [];
 
 type Editor = { mode: 'create' } | { mode: 'edit'; endpoint: WebhookEndpointRow };
 type SecretReveal = { kind: 'created' | 'rotated'; url: string; secret: string };
@@ -82,50 +83,40 @@ export default function WebhookManagement() {
   const t = useTranslations('webhooks');
   const tCommon = useTranslations('common');
   const tNotifications = useTranslations('notifications');
+  const webhooks = useWebhooks();
+  const saveStatus = useSetWebhookStatus();
+  const sendTestEvent = useSendWebhookTest();
+  const rotateSecret = useRotateWebhookSecret();
+  const deleteWebhook = useDeleteWebhook();
   // What the person may do here is the policy engine's answer (the list response), not a guess from a role.
-  const [capabilities, setCapabilities] = useState<WebhookCapabilities>({ manage: true, workspaceScope: false });
-
-  const [endpoints, setEndpoints] = useState<WebhookEndpointRow[]>([]);
-  const [catalog, setCatalog] = useState<WebhookEventType[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [forbidden, setForbidden] = useState(false);
+  const capabilities = useMemo<WebhookCapabilities>(
+    () => (webhooks.data?.list ? parseWebhookCapabilities(webhooks.data.list) : { manage: true, workspaceScope: false }),
+    [webhooks.data],
+  );
+  const endpoints = useMemo(() => webhooks.data?.list?.endpoints ?? [], [webhooks.data]);
+  const catalog = webhooks.data?.catalog ?? NO_EVENTS;
+  const loading = webhooks.isFetching;
+  const forbidden = webhooks.data?.forbidden ?? false;
+  const refetchWebhooks = webhooks.refetch;
   const [query, setQuery] = useState('');
   const [editor, setEditor] = useState<Editor | null>(null);
   const [secret, setSecret] = useState<SecretReveal | null>(null);
   const [deliveriesFor, setDeliveriesFor] = useState<WebhookEndpointRow | null>(null);
   const [toDelete, setToDelete] = useState<WebhookEndpointRow | null>(null);
 
-  const fail = useCallback((message: string) => {
+  const fail = (message: string) => {
     notifications.show({ title: tNotifications('errorTitle'), message, color: 'red' });
-  }, [tNotifications]);
+  };
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [list, events] = await Promise.all([
-        api<{ endpoints: WebhookEndpointRow[] }>('GET', API),
-        api<{ events: WebhookEventType[] }>('GET', `${API}/events`),
-      ]);
-      if (list.status === 403) {
-        setForbidden(true);
-        setEndpoints([]);
-        return;
-      }
-      if (!list.ok) throw new Error(list.data.error || t('errors.load'));
-      setForbidden(false);
-      setEndpoints(list.data.endpoints ?? []);
-      setCapabilities(parseWebhookCapabilities(list.data));
-      if (events.ok) setCatalog(events.data.events ?? []);
-    } catch (error) {
-      fail(error instanceof Error ? error.message : t('errors.load'));
-    } finally {
-      setLoading(false);
-    }
-  }, [fail, t]);
-
+  // A failed read keeps what was shown and says so once per failure.
+  const failedAt = webhooks.errorUpdatedAt;
+  const loadError = webhooks.error;
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (loadError) {
+      notifications.show({ title: tNotifications('errorTitle'), message: errorMessage(loadError, t('errors.load')), color: 'red' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failedAt]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -135,16 +126,21 @@ export default function WebhookManagement() {
   }, [endpoints, query]);
 
   const setStatus = async (endpoint: WebhookEndpointRow, status: 'active' | 'disabled') => {
-    const result = await api(`PATCH`, `${API}/${endpoint.id}`, { status });
-    if (!result.ok) return fail(result.data.error || t('errors.action'));
+    try {
+      await saveStatus.mutateAsync({ id: endpoint.id, status });
+    } catch (error) {
+      return fail(errorMessage(error, t('errors.action')));
+    }
     notifications.show({ title: tCommon('success'), message: t(status === 'active' ? 'messages.enabled' : 'messages.disabled'), color: 'green' });
-    void load();
   };
 
   const sendTest = async (endpoint: WebhookEndpointRow) => {
-    const result = await api<{ delivery: WebhookDeliveryRow }>('POST', `${API}/${endpoint.id}/test`);
-    if (!result.ok) return fail(result.data.error || t('errors.action'));
-    const delivery = result.data.delivery;
+    let delivery: WebhookDeliveryRow;
+    try {
+      delivery = (await sendTestEvent.mutateAsync(endpoint.id)).delivery;
+    } catch (error) {
+      return fail(errorMessage(error, t('errors.action')));
+    }
     if (delivery.status === 'delivered') {
       notifications.show({ title: tCommon('success'), message: t('messages.testDelivered', { code: delivery.lastStatusCode ?? 200 }), color: 'green' });
     } else {
@@ -153,18 +149,23 @@ export default function WebhookManagement() {
   };
 
   const rotate = async (endpoint: WebhookEndpointRow) => {
-    const result = await api<{ endpoint: WebhookEndpointRow & { secret: string } }>('POST', `${API}/${endpoint.id}/rotate-secret`);
-    if (!result.ok) return fail(result.data.error || t('errors.action'));
-    setSecret({ kind: 'rotated', url: endpoint.url, secret: result.data.endpoint.secret });
+    try {
+      const rotated = await rotateSecret.mutateAsync(endpoint.id);
+      setSecret({ kind: 'rotated', url: endpoint.url, secret: rotated.endpoint.secret ?? '' });
+    } catch (error) {
+      fail(errorMessage(error, t('errors.action')));
+    }
   };
 
   const confirmDelete = async () => {
     if (!toDelete) return;
-    const result = await api('DELETE', `${API}/${toDelete.id}`);
-    if (!result.ok) return fail(result.data.error || t('errors.delete'));
+    try {
+      await deleteWebhook.mutateAsync(toDelete.id);
+    } catch (error) {
+      return fail(errorMessage(error, t('errors.delete')));
+    }
     notifications.show({ title: tCommon('success'), message: t('messages.deleted'), color: 'green' });
     setToDelete(null);
-    void load();
   };
 
   if (forbidden) {
@@ -245,7 +246,7 @@ export default function WebhookManagement() {
         rowKey={(endpoint) => endpoint.id}
         columns={columns}
         search={{ value: query, onChange: setQuery, placeholder: t('table.search') }}
-        onRefresh={() => void load()}
+        onRefresh={() => void refetchWebhooks()}
         refreshing={loading}
         toolbarRight={capabilities.manage ? (
           <Button color="teal" size="xs" leftSection={<IconWebhook size={13} stroke={1.7} />} onClick={() => setEditor({ mode: 'create' })}>
@@ -287,12 +288,11 @@ export default function WebhookManagement() {
           onSaved={(endpoint, revealed) => {
             setEditor(null);
             if (revealed) setSecret({ kind: 'created', url: endpoint.url, secret: revealed });
-            void load();
           }}
         />
       ) : null}
 
-      <SecretReveal reveal={secret} onClose={() => { setSecret(null); void load(); }} />
+      <SecretReveal reveal={secret} onClose={() => setSecret(null)} />
 
       {deliveriesFor ? <DeliveriesView endpoint={deliveriesFor} canManage={capabilities.manage} onClose={() => setDeliveriesFor(null)} /> : null}
 
@@ -331,7 +331,8 @@ function WebhookForm({
   const [description, setDescription] = useState(editing?.description ?? '');
   const [scope, setScope] = useState<'project' | 'all'>(editing ? scopeOf(editing) : 'project');
   const [events, setEvents] = useState<string[]>(editing?.events ?? []);
-  const [saving, setSaving] = useState(false);
+  const saveWebhook = useSaveWebhook();
+  const saving = saveWebhook.isPending;
 
   const urlOk = isValidWebhookUrl(url);
   const eventsOk = events.length > 0;
@@ -341,24 +342,24 @@ function WebhookForm({
   ];
 
   const save = async () => {
-    setSaving(true);
     try {
-      const result = editing
-        ? await api<{ endpoint: WebhookEndpointRow }>('PATCH', `${API}/${editing.id}`, { url: url.trim(), description: description.trim(), events })
-        : await api<{ endpoint: WebhookEndpointRow & { secret?: string } }>('POST', API, {
-          url: url.trim(),
-          ...(description.trim() ? { description: description.trim() } : {}),
-          events,
-          ...(scope === 'all' ? { projectId: null } : {}),
-        });
-      if (!result.ok) throw new Error(result.data.error || t('errors.save'));
+      const result = await saveWebhook.mutateAsync(
+        editing
+          ? { id: editing.id, body: { url: url.trim(), description: description.trim(), events } }
+          : {
+            body: {
+              url: url.trim(),
+              ...(description.trim() ? { description: description.trim() } : {}),
+              events,
+              ...(scope === 'all' ? { projectId: null } : {}),
+            },
+          },
+      );
       notifications.show({ title: tCommon('success'), message: t(editing ? 'messages.updated' : 'messages.created'), color: 'green' });
-      const saved = result.data.endpoint as WebhookEndpointRow & { secret?: string };
+      const saved = result.endpoint as WebhookSecretEndpoint;
       onSaved(saved, editing ? undefined : saved.secret);
     } catch (error) {
-      notifications.show({ title: tNotifications('errorTitle'), message: error instanceof Error ? error.message : t('errors.save'), color: 'red' });
-    } finally {
-      setSaving(false);
+      notifications.show({ title: tNotifications('errorTitle'), message: errorMessage(error, t('errors.save')), color: 'red' });
     }
   };
 
@@ -534,38 +535,33 @@ function DeliveriesView({ endpoint, canManage, onClose }: { endpoint: WebhookEnd
   const t = useTranslations('webhooks');
   const tCommon = useTranslations('common');
   const tNotifications = useTranslations('notifications');
-  const [rows, setRows] = useState<WebhookDeliveryRow[]>([]);
-  const [hasMore, setHasMore] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const deliveries = useWebhookDeliveries(endpoint.id);
+  const restart = useRestartWebhookDeliveries(endpoint.id);
+  const redeliverWebhook = useRedeliverWebhook();
+  const rows = useMemo(() => deliveries.data?.pages.flatMap((page) => page.deliveries) ?? [], [deliveries.data]);
+  const hasMore = Boolean(deliveries.hasNextPage);
+  const loading = deliveries.isFetching;
+  const fetchNextPage = deliveries.fetchNextPage;
 
-  const fetchPage = useCallback(async (skip: number) => {
-    setLoading(true);
-    try {
-      const result = await api<{ deliveries: WebhookDeliveryRow[]; hasMore: boolean }>(
-        'GET', `${API}/${endpoint.id}/deliveries?limit=${DELIVERY_PAGE}&skip=${skip}`,
-      );
-      if (!result.ok) throw new Error(result.data.error || t('errors.load'));
-      setRows((current) => (skip === 0 ? result.data.deliveries : [...current, ...result.data.deliveries]));
-      setHasMore(Boolean(result.data.hasMore));
-    } catch (error) {
-      notifications.show({ title: tNotifications('errorTitle'), message: error instanceof Error ? error.message : t('errors.load'), color: 'red' });
-    } finally {
-      setLoading(false);
-    }
-  }, [endpoint.id, t, tNotifications]);
-
+  // A failed page says so once per failure.
+  const failedAt = deliveries.errorUpdatedAt;
+  const loadError = deliveries.error;
   useEffect(() => {
-    void fetchPage(0);
-  }, [fetchPage]);
+    if (loadError) {
+      notifications.show({ title: tNotifications('errorTitle'), message: errorMessage(loadError, t('errors.load')), color: 'red' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failedAt]);
 
   const redeliver = async (delivery: WebhookDeliveryRow) => {
-    const result = await api('POST', `${API}/deliveries/${delivery.id}/redeliver`);
-    if (!result.ok) {
-      notifications.show({ title: tNotifications('errorTitle'), message: result.data.error || t('errors.action'), color: 'red' });
+    try {
+      await redeliverWebhook.mutateAsync(delivery.id);
+    } catch (error) {
+      notifications.show({ title: tNotifications('errorTitle'), message: errorMessage(error, t('errors.action')), color: 'red' });
       return;
     }
     notifications.show({ title: tCommon('success'), message: t('messages.redelivering'), color: 'green' });
-    void fetchPage(0);
+    void restart();
   };
 
   return (
@@ -575,7 +571,7 @@ function DeliveriesView({ endpoint, canManage, onClose }: { endpoint: WebhookEnd
       icon={<IconHistory size={16} />}
       title={t('deliveries.title')}
       subtitle={endpoint.url}
-      primaryAction={{ label: t('actions.refresh'), icon: <IconRefresh size={14} />, loading, onClick: () => void fetchPage(0) }}
+      primaryAction={{ label: t('actions.refresh'), icon: <IconRefresh size={14} />, loading, onClick: () => void restart() }}
       secondaryAction={{ label: t('actions.close'), onClick: onClose }}
     >
       <FormSection title={t('deliveries.subtitle')}>
@@ -630,7 +626,7 @@ function DeliveriesView({ endpoint, canManage, onClose }: { endpoint: WebhookEnd
         )}
         {hasMore ? (
           <Group justify="center" mt="md">
-            <Button variant="default" size="xs" loading={loading} onClick={() => void fetchPage(rows.length)}>{t('deliveries.loadMore')}</Button>
+            <Button variant="default" size="xs" loading={loading} onClick={() => void fetchNextPage()}>{t('deliveries.loadMore')}</Button>
           </Group>
         ) : null}
       </FormSection>

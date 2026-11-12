@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { NO_POLICY, normalizeTokenPolicy, type TokenPolicyView } from './tokenModel';
+import { useTokenPolicyQuery } from '@/lib/api/queries/tokens';
+import { NO_POLICY, type TokenPolicyView } from './tokenModel';
 
 export interface TokenPolicyState {
   policy: TokenPolicyView;
@@ -21,28 +21,11 @@ export interface TokenPolicyState {
  * changed in the meantime is picked up.
  */
 export function useTokenPolicy(enabled: boolean): TokenPolicyState {
-  const [state, setState] = useState<TokenPolicyState>({ policy: NO_POLICY, loading: false, ready: false, failed: false });
-
-  useEffect(() => {
-    if (!enabled) {
-      setState((previous) => (previous.ready ? { ...previous, ready: false } : previous));
-      return;
-    }
-    const controller = new AbortController();
-    setState((previous) => ({ ...previous, loading: true, ready: false, failed: false }));
-    (async () => {
-      try {
-        const response = await fetch('/api/tokens/policy', { cache: 'no-store', signal: controller.signal });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const policy = normalizeTokenPolicy(await response.json());
-        setState({ policy, loading: false, ready: true, failed: false });
-      } catch (error) {
-        if ((error as { name?: string })?.name === 'AbortError') return;
-        setState({ policy: NO_POLICY, loading: false, ready: true, failed: true });
-      }
-    })();
-    return () => controller.abort();
-  }, [enabled]);
-
-  return state;
+  const query = useTokenPolicyQuery(enabled);
+  // A read is in flight from the moment the form opens until it answers (a cached answer of an earlier open is
+  // shown meanwhile, as the form's own state did, but `ready` waits for the new one).
+  const loading = enabled && query.isFetching;
+  const ready = enabled && !query.isFetching;
+  const failed = ready && query.isError;
+  return { policy: failed || query.data === undefined ? NO_POLICY : query.data, loading, ready, failed };
 }

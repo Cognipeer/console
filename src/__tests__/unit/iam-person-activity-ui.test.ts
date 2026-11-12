@@ -9,7 +9,6 @@ import {
   installApiMock,
   installDomStubs,
   jsonResponse,
-  mount,
   q,
   qa,
   settle,
@@ -17,6 +16,7 @@ import {
   type Mounted,
   type RouteHandler,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import { CAPS_ADMIN, directoryRoutes, EMPTY_ACTIVITY } from '../helpers/iamDirectoryFixtures';
 import { parsePersonActivity } from '@/components/iam/principals/directoryApi';
 
@@ -55,7 +55,7 @@ async function open(activity: RouteHandler, locale = 'en') {
   nav.search = '';
   window.history.replaceState(null, '', '/dashboard/iam/principals/user/u-ann');
   api = installApiMock([...directoryRoutes(CAPS_ADMIN), ['GET', ACTIVITY_URL, activity]]);
-  mounted = await mount(createElement(PrincipalDetailPage, { type: 'user', id: 'u-ann', canManage: true }), locale);
+  mounted = await renderWithQuery(createElement(PrincipalDetailPage, { type: 'user', id: 'u-ann', canManage: true }), { locale });
   await settle(300);
 }
 const section = () => q('[data-testid="section-activity"]');

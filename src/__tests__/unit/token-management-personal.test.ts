@@ -12,7 +12,6 @@ import {
   installApiMock,
   installDomStubs,
   jsonResponse,
-  mount,
   q,
   qa,
   setInput,
@@ -21,6 +20,7 @@ import {
   type ApiMock,
   type Mounted,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
@@ -60,7 +60,7 @@ describe('TokenManagement', () => {
       ['GET', /^\/api\/projects\/[^/]+\/tokens$/, () => ({ tokens: TOKENS })],
       ['GET', '/api/tokens/policy', () => POLICY],
     ]);
-    mounted = await mount(createElement(TokenManagement, props));
+    mounted = await renderWithQuery(createElement(TokenManagement, props));
     await settle(100);
   }
 
@@ -101,7 +101,7 @@ describe('CreateTokenModal', () => {
       ['GET', '/api/tokens/policy', () => POLICY],
       ['POST', '/api/tokens', () => jsonResponse({ id: 't9', token: 'cp_secret', label: 'mine' }, 201)],
     ]);
-    mounted = await mount(createElement(CreateTokenModal, { opened: true, onClose: vi.fn(), onSuccess: vi.fn() }));
+    mounted = await renderWithQuery(createElement(CreateTokenModal, { opened: true, onClose: vi.fn(), onSuccess: vi.fn() }));
     await settle(80);
     await setInput(q<HTMLInputElement>('input[placeholder^="Production API"]')!, 'mine');
     await click(buttonByText('Create Token'));
@@ -114,7 +114,7 @@ describe('CreateTokenModal', () => {
 
   it('renders a lead section before the label, numbers the sections after it, and holds the submit until it is complete', async () => {
     api = installApiMock([['GET', '/api/tokens/policy', () => POLICY]]);
-    mounted = await mount(
+    mounted = await renderWithQuery(
       createElement(CreateTokenModal, {
         opened: true,
         onClose: vi.fn(),

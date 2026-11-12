@@ -1,6 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ApiError } from '@/lib/api/client';
+import { useProjects } from '@/lib/api/queries/projects';
+import { useDeleteQuotaPolicy, useQuotaPolicies, useSaveQuotaPolicy, useSetQuotaPolicyEnabled } from '@/lib/api/queries/quota';
 import type { QuotaPolicyFormData } from '@/components/quota/QuotaPolicyModal';
 import { applyTargetPatches, parseLimitRows, type LimitRow, type TargetPatchEntry } from './limitsModel';
 import { createResolutionCache, resolveLimitTargets } from './resolveTargets';
@@ -17,23 +20,24 @@ export class LimitsApiError extends Error {
   }
 }
 
-async function call(url: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(url, {
-    cache: 'no-store',
-    ...init,
-    // Fastify refuses a JSON content type on a request without a body (DELETE).
-    headers: { ...(init?.body ? { 'content-type': 'application/json' } : {}), ...(init?.headers ?? {}) },
-  });
-  const body: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const record = (body && typeof body === 'object' ? body : {}) as { error?: unknown; code?: unknown };
-    throw new LimitsApiError(
-      typeof record.error === 'string' ? record.error : `Request failed (${response.status})`,
-      response.status,
-      typeof record.code === 'string' ? record.code : undefined,
-    );
+/** A failed call to the quota API as `LimitsApiError`: the server's message (or the status), status and code. */
+function toLimitsError(error: unknown): unknown {
+  if (!(error instanceof ApiError)) return error;
+  const record = (error.payload && typeof error.payload === 'object' ? error.payload : {}) as { error?: unknown; code?: unknown };
+  return new LimitsApiError(
+    typeof record.error === 'string' ? record.error : `Request failed (${error.status})`,
+    error.status,
+    typeof record.code === 'string' ? record.code : undefined,
+  );
+}
+
+/** Runs a call of the quota hooks and throws its failure as `LimitsApiError`. */
+async function asLimitsError<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    throw toLimitsError(error);
   }
-  return body;
 }
 
 export interface ProjectOption {
@@ -43,30 +47,17 @@ export interface ProjectOption {
 
 /** The tenant's projects as select options (a tenant has tens, so the list is loaded whole). */
 export function useProjectOptions(): ProjectOption[] {
-  const [options, setOptions] = useState<ProjectOption[]>([]);
-  useEffect(() => {
-    let cancelled = false;
-    call('/api/projects')
-      .then((body) => {
-        if (cancelled) return;
-        const list = (body && typeof body === 'object' ? (body as { projects?: unknown }).projects : undefined);
-        setOptions(
-          (Array.isArray(list) ? list : []).flatMap((raw): ProjectOption[] => {
-            const project = raw as { _id?: unknown; name?: unknown; key?: unknown };
-            if (typeof project._id !== 'string') return [];
-            const name = typeof project.name === 'string' ? project.name : project._id;
-            return [{ value: project._id, label: typeof project.key === 'string' ? `${name} (${project.key})` : name }];
-          }),
-        );
-      })
-      .catch(() => {
-        // The editor still works: it just cannot offer a project list.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  return options;
+  // The editor still works when the list cannot be read: it just cannot offer a project list.
+  const list = useProjects<{ _id?: unknown; name?: unknown; key?: unknown }>().data?.projects;
+  return useMemo(
+    () =>
+      (Array.isArray(list) ? list : []).flatMap((project): ProjectOption[] => {
+        if (typeof project._id !== 'string') return [];
+        const name = typeof project.name === 'string' ? project.name : project._id;
+        return [{ value: project._id, label: typeof project.key === 'string' ? `${name} (${project.key})` : name }];
+      }),
+    [list],
+  );
 }
 
 /** Create / update body: the editor's form data without keys the server would ignore. */
@@ -91,13 +82,13 @@ export interface UseLimits {
 
 /** Every quota policy of the tenant, with the names of what they point at. */
 export function useLimits(): UseLimits {
-  const [loadedRows, setRows] = useState<LimitRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [forbidden, setForbidden] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const loaded = useRef(false);
+  const policies = useQuotaPolicies();
+  const savePolicy = useSaveQuotaPolicy();
+  const setPolicyEnabled = useSetQuotaPolicyEnabled();
+  const deletePolicy = useDeleteQuotaPolicy();
+  const loadedRows = useMemo(() => (policies.data === undefined ? [] : parseLimitRows(policies.data)), [policies.data]);
+  // A switch is shown at once; the reload that follows the call puts it back if the server said no.
+  const [shownEnabled, setShownEnabled] = useState<ReadonlyMap<string, boolean>>(() => new Map());
 
   // The API names people, groups, tokens and agents; models, indexes, buckets and providers are named
   // from the resource registry (see resolveTargets.ts). Rows show at once, the names follow.
@@ -116,70 +107,65 @@ export function useLimits(): UseLimits {
       });
     return () => controller.abort();
   }, [loadedRows]);
-  const rows = useMemo(() => applyTargetPatches(loadedRows, patches), [loadedRows, patches]);
+  const rows = useMemo(
+    () =>
+      applyTargetPatches(loadedRows, patches).map((row) => {
+        const enabled = shownEnabled.get(String(row._id));
+        return enabled === undefined ? row : { ...row, enabled };
+      }),
+    [loadedRows, patches, shownEnabled],
+  );
 
+  const refetch = policies.refetch;
   const reload = useCallback(async () => {
-    if (loaded.current) setRefreshing(true);
-    try {
-      setRows(parseLimitRows(await call('/api/quota/policies?include=targets')));
-      setError(null);
-      setForbidden(false);
-      loaded.current = true;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setForbidden(err instanceof LimitsApiError && err.status === 403);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void reload();
-  }, [reload]);
+    await refetch();
+  }, [refetch]);
 
   const save = useCallback(
     async (id: string | null, data: QuotaPolicyFormData) => {
-      setSaving(true);
-      try {
-        const body = (await call(id ? `/api/quota/policies/${encodeURIComponent(id)}` : '/api/quota/policies', {
-          method: id ? 'PATCH' : 'POST',
-          body: JSON.stringify(toBody(data)),
-        })) as { warnings?: unknown } | null;
-        await reload();
-        return { warnings: Array.isArray(body?.warnings) ? body.warnings.filter((w): w is string => typeof w === 'string') : [] };
-      } finally {
-        setSaving(false);
-      }
+      const body = (await asLimitsError(() => savePolicy.mutateAsync({ id, body: toBody(data) }))) as { warnings?: unknown } | null;
+      return { warnings: Array.isArray(body?.warnings) ? body.warnings.filter((w): w is string => typeof w === 'string') : [] };
     },
-    [reload],
+    [savePolicy],
   );
 
   const setEnabled = useCallback(
     async (row: LimitRow, enabled: boolean) => {
-      // Shown at once; put back by the reload below if the server said no.
-      setRows((current) => current.map((r) => (r._id === row._id ? { ...r, enabled } : r)));
+      const id = String(row._id);
+      setShownEnabled((current) => new Map(current).set(id, enabled));
       try {
-        await call(`/api/quota/policies/${encodeURIComponent(String(row._id))}`, {
-          method: 'PATCH',
-          body: JSON.stringify({ enabled }),
-        });
+        await asLimitsError(() => setPolicyEnabled.mutateAsync({ id, enabled }));
       } finally {
-        await reload();
+        setShownEnabled((current) => {
+          const next = new Map(current);
+          next.delete(id);
+          return next;
+        });
       }
     },
-    [reload],
+    [setPolicyEnabled],
   );
 
   const remove = useCallback(
     async (row: LimitRow) => {
       // Addressed by the project it is in, so the server can confirm which project the policy is in.
-      const query = row.projectId ? `?projectId=${encodeURIComponent(row.projectId)}` : '';
-      await call(`/api/quota/policies/${encodeURIComponent(String(row._id))}${query}`, { method: 'DELETE' });
-      await reload();
+      await asLimitsError(() => deletePolicy.mutateAsync({ id: String(row._id), projectId: row.projectId || undefined }));
     },
-    [reload],
+    [deletePolicy],
   );
 
-  return { rows, loading, refreshing, error, forbidden, saving, reload, save, setEnabled, remove };
+  const failure = policies.error ? toLimitsError(policies.error) : null;
+  const error = failure ? (failure instanceof Error ? failure.message : String(failure)) : null;
+  return {
+    rows,
+    loading: policies.isPending,
+    refreshing: policies.isFetching && policies.data !== undefined,
+    error,
+    forbidden: policies.error instanceof ApiError && policies.error.status === 403,
+    saving: savePolicy.isPending,
+    reload,
+    save,
+    setEnabled,
+    remove,
+  };
 }
