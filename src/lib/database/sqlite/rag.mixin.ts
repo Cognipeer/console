@@ -40,6 +40,57 @@ type RagDocumentCountFilters = Pick<
   'status' | 'search' | 'folderId' | 'ids' | 'access' | 'aclMode' | 'aclManaged' | 'withUnscoped'
 >;
 
+/**
+ * The SET clause and parameters of a partial document update, shared by `updateRagDocument` and
+ * `updateRagDocumentReturningPrevious` so both write exactly the same columns.
+ */
+function ragDocumentUpdate(
+  id: string,
+  data: Partial<Omit<IRagDocument, 'tenantId' | 'ragModuleKey' | 'createdBy'>>,
+  now: string,
+  toJson: (value: unknown) => string,
+): { sets: string[]; params: Record<string, unknown> } {
+  const sets: string[] = ['updatedAt = @updatedAt'];
+  const params: Record<string, unknown> = { id, updatedAt: now };
+
+  if (data.fileKey !== undefined) { sets.push('fileKey = @fileKey'); params.fileKey = data.fileKey; }
+  if (data.fileName !== undefined) { sets.push('fileName = @fileName'); params.fileName = data.fileName; }
+  if (data.contentType !== undefined) { sets.push('contentType = @contentType'); params.contentType = data.contentType; }
+  if (data.size !== undefined) { sets.push('size = @size'); params.size = data.size; }
+  if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status; }
+  if (data.chunkCount !== undefined) { sets.push('chunkCount = @chunkCount'); params.chunkCount = data.chunkCount; }
+  if (data.errorMessage !== undefined) { sets.push('errorMessage = @errorMessage'); params.errorMessage = data.errorMessage; }
+  if (data.lastIndexedAt !== undefined) { sets.push('lastIndexedAt = @lastIndexedAt'); params.lastIndexedAt = data.lastIndexedAt instanceof Date ? data.lastIndexedAt.toISOString() : data.lastIndexedAt; }
+  if (data.fileBucketKey !== undefined) { sets.push('fileBucketKey = @fileBucketKey'); params.fileBucketKey = data.fileBucketKey; }
+  if (data.fileProviderKey !== undefined) { sets.push('fileProviderKey = @fileProviderKey'); params.fileProviderKey = data.fileProviderKey; }
+  // Presence, not value. re-ingest passes an explicit `undefined` to CLEAR
+  // sourceHash when the text it stored is a reconstruction; a
+  // `!== undefined` guard would skip that and leave the stale hash of the
+  // true original sitting next to the join, so the user's corrective
+  // re-upload would be de-duplicated away against a hash of content that is
+  // no longer there.
+  const clearableDoc = [
+    ['chunkConfig', () => (data.chunkConfig ? toJson(data.chunkConfig) : null)],
+    ['extraction', () => (data.extraction ? toJson(data.extraction) : null)],
+    ['sourceText', () => data.sourceText ?? null],
+    ['sourceTextKey', () => data.sourceTextKey ?? null],
+    ['sourceHash', () => data.sourceHash ?? null],
+    // Moving a document back to the top level, or back to "inherit", is an
+    // explicit `undefined` too.
+    ['folderId', () => data.folderId ?? null],
+    ['aclMode', () => data.aclMode ?? null],
+    ['aclManaged', () => data.aclManaged ?? null],
+  ] as const;
+  for (const [column, value] of clearableDoc) {
+    if (!Object.hasOwn(data, column)) continue;
+    sets.push(`${column} = @${column}`);
+    params[column] = value();
+  }
+  if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = toJson(data.metadata); }
+  if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
+  return { sets, params };
+}
+
 /** The distinct, non-empty strings of `values`. */
 /** A list handed to SQL as one JSON array: no bound variable per element, so no variable limit. */
 function jsonList(values: readonly string[]): string {
@@ -318,53 +369,39 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       data: Partial<Omit<IRagDocument, 'tenantId' | 'ragModuleKey' | 'createdBy'>>,
     ): Promise<IRagDocument | null> {
       const db = this.getTenantDb();
-      const now = this.now();
-      const sets: string[] = ['updatedAt = @updatedAt'];
-      const params: Record<string, unknown> = { id, updatedAt: now };
-
-      if (data.fileKey !== undefined) { sets.push('fileKey = @fileKey'); params.fileKey = data.fileKey; }
-      if (data.fileName !== undefined) { sets.push('fileName = @fileName'); params.fileName = data.fileName; }
-      if (data.contentType !== undefined) { sets.push('contentType = @contentType'); params.contentType = data.contentType; }
-      if (data.size !== undefined) { sets.push('size = @size'); params.size = data.size; }
-      if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status; }
-      if (data.chunkCount !== undefined) { sets.push('chunkCount = @chunkCount'); params.chunkCount = data.chunkCount; }
-      if (data.errorMessage !== undefined) { sets.push('errorMessage = @errorMessage'); params.errorMessage = data.errorMessage; }
-      if (data.lastIndexedAt !== undefined) { sets.push('lastIndexedAt = @lastIndexedAt'); params.lastIndexedAt = data.lastIndexedAt instanceof Date ? data.lastIndexedAt.toISOString() : data.lastIndexedAt; }
-      if (data.fileBucketKey !== undefined) { sets.push('fileBucketKey = @fileBucketKey'); params.fileBucketKey = data.fileBucketKey; }
-      if (data.fileProviderKey !== undefined) { sets.push('fileProviderKey = @fileProviderKey'); params.fileProviderKey = data.fileProviderKey; }
-      // Presence, not value. re-ingest passes an explicit `undefined` to CLEAR
-      // sourceHash when the text it stored is a reconstruction; a
-      // `!== undefined` guard would skip that and leave the stale hash of the
-      // true original sitting next to the join, so the user's corrective
-      // re-upload would be de-duplicated away against a hash of content that is
-      // no longer there.
-      const clearableDoc = [
-        ['chunkConfig', () => (data.chunkConfig ? this.toJson(data.chunkConfig) : null)],
-        ['extraction', () => (data.extraction ? this.toJson(data.extraction) : null)],
-        ['sourceText', () => data.sourceText ?? null],
-        ['sourceTextKey', () => data.sourceTextKey ?? null],
-        ['sourceHash', () => data.sourceHash ?? null],
-        // Moving a document back to the top level, or back to "inherit", is an
-        // explicit `undefined` too.
-        ['folderId', () => data.folderId ?? null],
-        ['aclMode', () => data.aclMode ?? null],
-        ['aclManaged', () => data.aclManaged ?? null],
-      ] as const;
-      for (const [column, value] of clearableDoc) {
-        if (!Object.hasOwn(data, column)) continue;
-        sets.push(`${column} = @${column}`);
-        params[column] = value();
-      }
-      if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
-      if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
-
+      const { sets, params } = ragDocumentUpdate(id, data, this.now(), (value) => this.toJson(value));
       db.prepare(`UPDATE ${TABLES.ragDocuments} SET ${sets.join(', ')} WHERE id = @id`).run(params);
       return this.findRagDocumentById(id);
     }
 
+    async updateRagDocumentReturningPrevious(
+      id: string,
+      data: Partial<Omit<IRagDocument, 'tenantId' | 'ragModuleKey' | 'createdBy'>>,
+    ): Promise<IRagDocument | null> {
+      const db = this.getTenantDb();
+      const { sets, params } = ragDocumentUpdate(id, data, this.now(), (value) => this.toJson(value));
+      const read = db.prepare(`SELECT * FROM ${TABLES.ragDocuments} WHERE id = @id`);
+      const write = db.prepare(`UPDATE ${TABLES.ragDocuments} SET ${sets.join(', ')} WHERE id = @id`);
+      // Read and write under one write lock (IMMEDIATE), so the row answered is the one this write replaced.
+      const swap = db.transaction(() => {
+        const row = read.get({ id }) as SqliteRow | undefined;
+        if (!row) return undefined;
+        write.run(params);
+        return row;
+      });
+      const before = swap.immediate();
+      return before ? this.mapDocRow(before) : null;
+    }
+
     async deleteRagDocument(id: string): Promise<boolean> {
+      return (await this.deleteRagDocumentReturningPrevious(id)) !== null;
+    }
+
+    async deleteRagDocumentReturningPrevious(id: string): Promise<IRagDocument | null> {
       const db = this.getTenantDb();
       const remove = db.transaction((documentId: string) => {
+        const row = db.prepare(`SELECT * FROM ${TABLES.ragDocuments} WHERE id = @id`).get({ id: documentId }) as SqliteRow | undefined;
+        if (!row) return undefined;
         // The permission entries that sat on this document go with it (the
         // module key narrows the delete to the entries index).
         db.prepare(
@@ -372,9 +409,11 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
            WHERE nodeType = 'document' AND nodeId = @id
              AND ragModuleKey IN (SELECT ragModuleKey FROM ${TABLES.ragDocuments} WHERE id = @id)`,
         ).run({ id: documentId });
-        return db.prepare(`DELETE FROM ${TABLES.ragDocuments} WHERE id = @id`).run({ id: documentId }).changes > 0;
+        db.prepare(`DELETE FROM ${TABLES.ragDocuments} WHERE id = @id`).run({ id: documentId });
+        return row;
       });
-      return remove(id);
+      const before = remove.immediate(id);
+      return before ? this.mapDocRow(before) : null;
     }
 
     async findRagDocumentById(id: string): Promise<IRagDocument | null> {

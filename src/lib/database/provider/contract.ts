@@ -1458,7 +1458,19 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     id: string,
     data: Partial<Omit<IRagDocument, 'tenantId' | 'ragModuleKey' | 'createdBy'>>,
   ): Promise<IRagDocument | null>;
+  /**
+   * `updateRagDocument` that answers the row as it was just before this write, read in the same atomic step
+   * (null when there is no such document). The module totals move by what a lifecycle write changed, so the
+   * "before" must be the row this write replaced, not a copy read earlier: two re-ingests, an ingest and a
+   * delete can overlap on one document.
+   */
+  updateRagDocumentReturningPrevious(
+    id: string,
+    data: Partial<Omit<IRagDocument, 'tenantId' | 'ragModuleKey' | 'createdBy'>>,
+  ): Promise<IRagDocument | null>;
   deleteRagDocument(id: string): Promise<boolean>;
+  /** `deleteRagDocument` that answers the row it removed, read in the same atomic step (null when there was none). */
+  deleteRagDocumentReturningPrevious(id: string): Promise<IRagDocument | null>;
   findRagDocumentById(id: string): Promise<IRagDocument | null>;
   findRagDocumentByFileName(
     ragModuleKey: string,

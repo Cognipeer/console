@@ -4,7 +4,7 @@
  * Includes RAG modules, documents, chunks, and query logs.
  */
 
-import { ObjectId, type Filter } from 'mongodb';
+import { ObjectId, type Db, type Filter } from 'mongodb';
 import type {
   IRagModule,
   IRagDocument,
@@ -87,6 +87,31 @@ function toRagDocument(doc: { _id?: unknown }): IRagDocument {
   const out: Record<string, unknown> = { ...doc, _id: doc._id?.toString() };
   dropEmptyFields(out, DOCUMENT_NULLABLE_FIELDS);
   return out as unknown as IRagDocument;
+}
+
+/**
+ * The partial document update both `updateRagDocument` (answers the row after the write) and
+ * `updateRagDocumentReturningPrevious` (the row before it) run. findOneAndUpdate reads and writes in one atomic
+ * step, so the row it answers is the one this write produced or replaced, never one another writer changed meanwhile.
+ */
+async function writeRagDocumentRow(
+  db: Db,
+  id: string,
+  data: Partial<Omit<IRagDocument, 'tenantId' | 'ragModuleKey' | 'createdBy'>>,
+  returnDocument: 'before' | 'after',
+): Promise<IRagDocument | null> {
+  const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
+  delete updateData._id;
+  const unset = takeClearedFields(updateData, DOCUMENT_NULLABLE_FIELDS);
+  const result = await db
+    .collection<IRagDocument>(COLLECTIONS.ragDocuments)
+    .findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      Object.keys(unset).length > 0 ? { $set: updateData, $unset: unset } : { $set: updateData },
+      { returnDocument },
+    );
+  if (!result) return null;
+  return toRagDocument(result);
 }
 
 export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
@@ -241,32 +266,31 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
       id: string,
       data: Partial<Omit<IRagDocument, 'tenantId' | 'ragModuleKey' | 'createdBy'>>,
     ): Promise<IRagDocument | null> {
-      const db = this.getTenantDb();
-      const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
-      delete updateData._id;
-      const unset = takeClearedFields(updateData, DOCUMENT_NULLABLE_FIELDS);
-      const result = await db
-        .collection<IRagDocument>(COLLECTIONS.ragDocuments)
-        .findOneAndUpdate(
-          { _id: new ObjectId(id) },
-          Object.keys(unset).length > 0 ? { $set: updateData, $unset: unset } : { $set: updateData },
-          { returnDocument: 'after' },
-        );
-      if (!result) return null;
-      return toRagDocument(result);
+      return writeRagDocumentRow(this.getTenantDb(), id, data, 'after');
+    }
+
+    async updateRagDocumentReturningPrevious(
+      id: string,
+      data: Partial<Omit<IRagDocument, 'tenantId' | 'ragModuleKey' | 'createdBy'>>,
+    ): Promise<IRagDocument | null> {
+      return writeRagDocumentRow(this.getTenantDb(), id, data, 'before');
     }
 
     async deleteRagDocument(id: string): Promise<boolean> {
+      return (await this.deleteRagDocumentReturningPrevious(id)) !== null;
+    }
+
+    async deleteRagDocumentReturningPrevious(id: string): Promise<IRagDocument | null> {
       const db = this.getTenantDb();
       const removed = await db
-        .collection(COLLECTIONS.ragDocuments)
-        .findOneAndDelete({ _id: new ObjectId(id) }, { projection: { ragModuleKey: 1 } });
-      if (!removed) return false;
+        .collection<IRagDocument>(COLLECTIONS.ragDocuments)
+        .findOneAndDelete({ _id: new ObjectId(id) });
+      if (!removed) return null;
       // The permission entries that sat on this document go with it.
       await db
         .collection(COLLECTIONS.ragAclEntries)
         .deleteMany({ ragModuleKey: removed.ragModuleKey, nodeType: 'document', nodeId: id });
-      return true;
+      return toRagDocument(removed);
     }
 
     async findRagDocumentById(id: string): Promise<IRagDocument | null> {

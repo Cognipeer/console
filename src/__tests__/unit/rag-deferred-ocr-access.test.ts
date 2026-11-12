@@ -268,6 +268,9 @@ describeForEachProvider('Deferred OCR ingest into a knowledge base with access c
       chunkConfig: CHUNK_CONFIG,
       extraction: { ocr: OCR },
       status: 'active',
+      // Same starting counters as createRagModule in the service.
+      totalDocuments: 0,
+      totalChunks: 0,
       ...(access ? { access } : {}),
       createdBy: 'seed',
     }));
@@ -380,17 +383,29 @@ describeForEachProvider('Deferred OCR ingest into a knowledge base with access c
    */
   function watch() {
     const db = getDb();
-    const real = { update: db.updateRagDocument.bind(db), replaceAcl: db.replaceRagAclEntries.bind(db) };
+    const real = {
+      update: db.updateRagDocument.bind(db),
+      updateLifecycle: db.updateRagDocumentReturningPrevious.bind(db),
+      replaceAcl: db.replaceRagAclEntries.bind(db),
+    };
     const patches: Patch[] = [];
-    const update = vi.spyOn(db, 'updateRagDocument').mockImplementation(async (id, patch) => {
+    const record = (id: unknown, patch: object) => {
       patches.push({ id: String(id), patch: { ...patch }, by: adminOps > 0 ? 'admin' : 'job' });
+    };
+    const update = vi.spyOn(db, 'updateRagDocument').mockImplementation(async (id, patch) => {
+      record(id, patch);
       return real.update(id, patch);
+    });
+    // The status writes (the ones that move the knowledge base's totals) answer the row they replaced.
+    const updateLifecycle = vi.spyOn(db, 'updateRagDocumentReturningPrevious').mockImplementation(async (id, patch) => {
+      record(id, patch);
+      return real.updateLifecycle(id, patch);
     });
     const create = vi.spyOn(db, 'createRagDocument');
     const replaceAcl = vi.spyOn(db, 'replaceRagAclEntries');
     const createFolder = vi.spyOn(db, 'createRagFolder');
-    watched.push(update, create, replaceAcl, createFolder);
-    return { patches, update, create, replaceAcl, createFolder, real };
+    watched.push(update, updateLifecycle, create, replaceAcl, createFolder);
+    return { patches, update, updateLifecycle, create, replaceAcl, createFolder, real };
   }
   type Watch = ReturnType<typeof watch>;
 
@@ -416,6 +431,7 @@ describeForEachProvider('Deferred OCR ingest into a knowledge base with access c
     expect(h.extract).not.toHaveBeenCalled();
     expect(w.create).not.toHaveBeenCalled();
     expect(w.update).not.toHaveBeenCalled();
+    expect(w.updateLifecycle).not.toHaveBeenCalled();
     expect(w.replaceAcl).not.toHaveBeenCalled();
   }
 
@@ -562,6 +578,7 @@ describeForEachProvider('Deferred OCR ingest into a knowledge base with access c
       expect(order(w.create)).toBeLessThan(order(w.replaceAcl));
       expect(order(w.replaceAcl)).toBeLessThan(order(h.publish));
       expect(w.update).not.toHaveBeenCalled();
+      expect(w.updateLifecycle).not.toHaveBeenCalled();
       expect(h.published).toEqual([{ tenantDbName, tenantId, projectId, ragModuleKey: kb.key, documentId: id }]);
       expect(h.extract).not.toHaveBeenCalled();
     });
@@ -602,6 +619,7 @@ describeForEachProvider('Deferred OCR ingest into a knowledge base with access c
       expect(w.create.mock.calls[0][0]).not.toHaveProperty('aclMode');
       expect(w.replaceAcl).not.toHaveBeenCalled();
       expect(w.update).not.toHaveBeenCalled();
+      expect(w.updateLifecycle).not.toHaveBeenCalled();
       expect(await readsOf(kb.key, (await rowOf(id))!)).toEqual({ admin: true, member: true, outsider: false });
       expect(await listedFor(kb.key, 'outsider')).toEqual([]);
     });
@@ -983,6 +1001,7 @@ describeForEachProvider('Deferred OCR ingest into a knowledge base with access c
       expect(h.embed).not.toHaveBeenCalled();
       expect(h.upsert).not.toHaveBeenCalled();
       expect(w.update).not.toHaveBeenCalled();
+      expect(w.updateLifecycle).not.toHaveBeenCalled();
       expect(w.create).not.toHaveBeenCalled();
       expect(await rowOf(gone)).toBeNull();
       expect(await chunksOf(gone)).toEqual([]);
