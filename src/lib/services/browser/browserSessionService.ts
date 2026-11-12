@@ -13,7 +13,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
 import { getThisNodeName, routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
-import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import { downloadFile, uploadFile } from '@/lib/services/files';
 import { imageDimensions } from '@/lib/services/tools/mediaSniff';
 import { toolOutput, type ToolOutput } from '@/lib/services/tools/toolOutput';
@@ -50,12 +50,6 @@ import type {
 
 const logger = createLogger('browser:session-service');
 
-async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
-}
-
 /**
  * Teach the manager how to turn Files ids into upload payloads.
  *
@@ -66,33 +60,34 @@ async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
  * tenant's bucket anyway.
  */
 browserManager.setUploadResolver(async (ctx, fileIds) => {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const resolved: Array<{ name: string; mimeType: string; buffer: Buffer }> = [];
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const resolved: Array<{ name: string; mimeType: string; buffer: Buffer }> = [];
 
-  for (const fileId of fileIds) {
-    const record = await db.findFileRecordById(fileId);
-    if (
-      !record
-      || record.tenantId !== ctx.tenantId
-      || !matchesProjectScope(record.projectId, ctx.projectId)
-    ) {
-      throw new Error(`File not found: ${fileId}`);
+    for (const fileId of fileIds) {
+      const record = await db.findFileRecordById(fileId);
+      if (
+        !record
+        || record.tenantId !== ctx.tenantId
+        || !matchesProjectScope(record.projectId, ctx.projectId)
+      ) {
+        throw new Error(`File not found: ${fileId}`);
+      }
+      const download = await downloadFile(
+        ctx.tenantDbName,
+        ctx.tenantId,
+        record.projectId ?? ctx.projectId ?? '',
+        record.bucketKey,
+        record.key,
+      );
+      resolved.push({
+        name: record.name || record.key,
+        mimeType: download.contentType ?? record.contentType ?? 'application/octet-stream',
+        buffer: download.data,
+      });
     }
-    const download = await downloadFile(
-      ctx.tenantDbName,
-      ctx.tenantId,
-      record.projectId ?? ctx.projectId ?? '',
-      record.bucketKey,
-      record.key,
-    );
-    resolved.push({
-      name: record.name || record.key,
-      mimeType: download.contentType ?? record.contentType ?? 'application/octet-stream',
-      buffer: download.data,
-    });
-  }
 
-  return resolved;
+    return resolved;
+  });
 });
 
 function serializeSession(record: IBrowserSession): BrowserSessionView {
@@ -139,206 +134,206 @@ export async function createBrowserSession(
   const cfg = getConfig().browser;
   const sessionKey = `bs_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
 
-  const db = await withTenantDb(ctx.tenantDbName);
-  // Resolve parent Browser to inherit defaults
-  const browser = await db.findBrowserById(input.browserId);
-  if (
-    !browser
-    || browser.tenantId !== ctx.tenantId
-    || !matchesProjectScope(browser.projectId, ctx.projectId)
-  ) {
-    throw new Error(`Browser not found: ${input.browserId}`);
-  }
-  if (browser.status !== 'active') {
-    throw new Error(`Browser ${browser.key} is not active`);
-  }
-  // The browser's signed-in profile is the LOWEST-priority source: an
-  // explicit `config.storageState` on the request wins, and passing `null`
-  // clears it for one session (a flow that must start logged out).
-  const storedProfile = readBrowserStorageState(browser);
-  const config: IBrowserSessionConfig = {
-    ...(storedProfile ? { storageState: storedProfile } : {}),
-    ...(browser.defaultSessionConfig ?? {}),
-    ...(input.config ?? {}),
-  };
-  if (input.config && 'storageState' in input.config && !input.config.storageState) {
-    delete config.storageState;
-  }
-  const artifactBucketKey = input.artifactBucketKey ?? browser.artifactBucketKey ?? cfg.defaultArtifactBucketKey;
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    // Resolve parent Browser to inherit defaults
+    const browser = await db.findBrowserById(input.browserId);
+    if (
+      !browser
+      || browser.tenantId !== ctx.tenantId
+      || !matchesProjectScope(browser.projectId, ctx.projectId)
+    ) {
+      throw new Error(`Browser not found: ${input.browserId}`);
+    }
+    if (browser.status !== 'active') {
+      throw new Error(`Browser ${browser.key} is not active`);
+    }
+    // The browser's signed-in profile is the LOWEST-priority source: an
+    // explicit `config.storageState` on the request wins, and passing `null`
+    // clears it for one session (a flow that must start logged out).
+    const storedProfile = readBrowserStorageState(browser);
+    const config: IBrowserSessionConfig = {
+      ...(storedProfile ? { storageState: storedProfile } : {}),
+      ...(browser.defaultSessionConfig ?? {}),
+      ...(input.config ?? {}),
+    };
+    if (input.config && 'storageState' in input.config && !input.config.storageState) {
+      delete config.storageState;
+    }
+    const artifactBucketKey = input.artifactBucketKey ?? browser.artifactBucketKey ?? cfg.defaultArtifactBucketKey;
 
-  // Quota, BEFORE anything is launched. "Open" sessions are counted per caller
-  // (same user, else same API token) from the persisted rows; a caller with
-  // neither is counted against the whole project.
-  const caller = resolveUsageAttribution();
-  // Only the open statuses are read: the project's session history can be long.
-  const openRows = (await Promise.all(
-    (['pending', 'running', 'idle'] as const).map((status) =>
-      db.listBrowserSessions(ctx.tenantId, { projectId: ctx.projectId, status })),
-  )).flat();
-  const active = openRows.filter((row) => {
-    if (caller.userId) return row.userId === caller.userId;
-    if (caller.apiTokenId) return row.apiTokenId === caller.apiTokenId;
-    return true;
-  }).length;
-  await enforceServiceQuota(
-    { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
-    { domain: 'browser', resourceKey: browser.key, cost: { requests: 1 }, concurrency: { active } },
-  );
+    // Quota, BEFORE anything is launched. "Open" sessions are counted per caller
+    // (same user, else same API token) from the persisted rows; a caller with
+    // neither is counted against the whole project.
+    const caller = resolveUsageAttribution();
+    // Only the open statuses are read: the project's session history can be long.
+    const openRows = (await Promise.all(
+      (['pending', 'running', 'idle'] as const).map((status) =>
+        db.listBrowserSessions(ctx.tenantId, { projectId: ctx.projectId, status })),
+    )).flat();
+    const active = openRows.filter((row) => {
+      if (caller.userId) return row.userId === caller.userId;
+      if (caller.apiTokenId) return row.apiTokenId === caller.apiTokenId;
+      return true;
+    }).length;
+    await enforceServiceQuota(
+      { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+      { domain: 'browser', resourceKey: browser.key, cost: { requests: 1 }, concurrency: { active } },
+    );
 
-  // Plan limit (browser sessions): a lease per open session, held until it closes (onClose covers manual,
-  // idle, lifetime, shutdown and delete) or fails to open. Refused when the plan's browser pool is full
-  // ('on' only; shadow measures). The pod-memory semaphore in browserManager stays as a platform guard.
-  const leaseAttempt = await tryPoolLease({
-    tenantId: ctx.tenantId,
-    pool: 'browser',
-    holderId: sessionKey,
-    source: { type: 'user', id: caller.userId ?? caller.apiTokenId },
-  });
-  if (leaseAttempt.refused) throw concurrencyRefusal('browser', leaseAttempt.decision, 'browser sessions');
-  if (leaseAttempt.lease) sessionLeases.set(sessionKey, leaseAttempt.lease);
-  const releaseOwnSessionLease = () => releaseSessionLease(sessionKey);
-
-  // What the session ROW stores is not what the context gets. `storageState`
-  // is a live login and `proxy`/`httpCredentials` carry passwords; the row is
-  // read by the sessions list, the API and the UI, so the secrets stay in the
-  // in-memory `config` and never reach the database.
-  const persistedConfig: IBrowserSessionConfig = { ...config };
-  delete persistedConfig.storageState;
-  delete persistedConfig.httpCredentials;
-  if (persistedConfig.proxy) {
-    persistedConfig.proxy = { ...persistedConfig.proxy, password: undefined };
-  }
-
-  // Attribution is stamped at creation (request ALS in scope); the rollup
-  // event is emitted once per session when it ends.
-  const attribution = resolveUsageAttribution();
-  const created = await db.createBrowserSession({
-    userId: attribution.userId,
-    apiTokenId: attribution.apiTokenId,
-    actorType: attribution.actorType,
-    tenantId: ctx.tenantId,
-    projectId: ctx.projectId,
-    browserId: input.browserId,
-    sessionKey,
-    name: input.name,
-    agentId: input.agentId,
-    agentKey: input.agentKey,
-    status: 'pending',
-    config: persistedConfig,
-    artifactBucketKey,
-    eventCount: 0,
-    metadata: input.metadata,
-    createdBy: input.createdBy,
-    // browserManager.openSession below always runs on whichever node handled
-    // this request (session creation is not itself assignment-routed) — this
-    // is what boot reconciliation checks before treating an unknown session
-    // as orphaned.
-    ownerNode: getThisNodeName(),
-  }).catch(async (error: unknown) => {
-    await releaseOwnSessionLease();
-    throw error;
-  });
-
-  const sessionId = created._id ? String(created._id) : '';
-
-  try {
-    await browserManager.openSession({
+    // Plan limit (browser sessions): a lease per open session, held until it closes (onClose covers manual,
+    // idle, lifetime, shutdown and delete) or fails to open. Refused when the plan's browser pool is full
+    // ('on' only; shadow measures). The pod-memory semaphore in browserManager stays as a platform guard.
+    const leaseAttempt = await tryPoolLease({
       tenantId: ctx.tenantId,
-      tenantDbName: ctx.tenantDbName,
+      pool: 'browser',
+      holderId: sessionKey,
+      source: { type: 'user', id: caller.userId ?? caller.apiTokenId },
+    });
+    if (leaseAttempt.refused) throw concurrencyRefusal('browser', leaseAttempt.decision, 'browser sessions');
+    if (leaseAttempt.lease) sessionLeases.set(sessionKey, leaseAttempt.lease);
+    const releaseOwnSessionLease = () => releaseSessionLease(sessionKey);
+
+    // What the session ROW stores is not what the context gets. `storageState`
+    // is a live login and `proxy`/`httpCredentials` carry passwords; the row is
+    // read by the sessions list, the API and the UI, so the secrets stay in the
+    // in-memory `config` and never reach the database.
+    const persistedConfig: IBrowserSessionConfig = { ...config };
+    delete persistedConfig.storageState;
+    delete persistedConfig.httpCredentials;
+    if (persistedConfig.proxy) {
+      persistedConfig.proxy = { ...persistedConfig.proxy, password: undefined };
+    }
+
+    // Attribution is stamped at creation (request ALS in scope); the rollup
+    // event is emitted once per session when it ends.
+    const attribution = resolveUsageAttribution();
+    const created = await db.createBrowserSession({
+      userId: attribution.userId,
+      apiTokenId: attribution.apiTokenId,
+      actorType: attribution.actorType,
+      tenantId: ctx.tenantId,
       projectId: ctx.projectId,
+      browserId: input.browserId,
       sessionKey,
-      config,
-      onClose: async (reason) => {
-        try {
-          // The manager invokes this from its reaper timer / shutdown path —
-          // outside any request tenant scope — so bind the tenant explicitly
-          // (the captured `db` handle would otherwise fall back to whatever
-          // tenant a concurrent request last bound).
-          await runWithTenantScope(ctx.tenantDbName, async () => {
-          await persistEvent(ctx, sessionId, sessionKey, 'close', {
-            status: 'success',
-            data: { reason },
-          });
-          await db.updateBrowserSession(sessionId, {
-            status: reason === 'shutdown' ? 'closed' : reason === 'idle-timeout' || reason === 'max-lifetime' ? 'expired' : 'closed',
-            endedAt: new Date(),
-          });
-          // Rollup event at session end — onClose fires exactly once for every
-          // manager-side close (manual, idle, lifetime, shutdown, deleted).
-          // The manager callback runs outside the request ALS, so pass the
-          // attribution stamped on the row at creation.
-          const row = await db.findBrowserSessionById(sessionId);
-          const durationMs = row?.startedAt && row?.endedAt
-            ? new Date(row.endedAt).getTime() - new Date(row.startedAt).getTime()
-            : undefined;
-          recordUsageEvent({
-            tenantDbName: ctx.tenantDbName,
-            tenantId: ctx.tenantId,
-            projectId: ctx.projectId,
-            service: 'browser',
-            refKey: browser.key,
-            status: 'success',
-            latencyMs: durationMs,
-            attribution: {
-              userId: row?.userId ?? attribution.userId,
-              apiTokenId: row?.apiTokenId ?? attribution.apiTokenId,
-              actorType: row?.actorType ?? attribution.actorType,
-            },
-          });
-          });
-        } catch (err) {
-          logger.warn('Failed to persist close metadata', {
-            sessionId,
-            error: err instanceof Error ? err.message : err,
-          });
-        } finally {
-          await releaseOwnSessionLease();
-        }
-      },
+      name: input.name,
+      agentId: input.agentId,
+      agentKey: input.agentKey,
+      status: 'pending',
+      config: persistedConfig,
+      artifactBucketKey,
+      eventCount: 0,
+      metadata: input.metadata,
+      createdBy: input.createdBy,
+      // browserManager.openSession below always runs on whichever node handled
+      // this request (session creation is not itself assignment-routed) — this
+      // is what boot reconciliation checks before treating an unknown session
+      // as orphaned.
+      ownerNode: getThisNodeName(),
+    }).catch(async (error: unknown) => {
+      await releaseOwnSessionLease();
+      throw error;
     });
 
-    await db.updateBrowserSession(sessionId, {
-      status: 'idle',
-      startedAt: new Date(),
-      lastActivityAt: new Date(),
-    });
+    const sessionId = created._id ? String(created._id) : '';
 
-    await persistEvent(ctx, sessionId, sessionKey, 'create', {
-      status: 'success',
-      data: { sessionKey, agentKey: input.agentKey },
-    });
+    try {
+      await browserManager.openSession({
+        tenantId: ctx.tenantId,
+        tenantDbName: ctx.tenantDbName,
+        projectId: ctx.projectId,
+        sessionKey,
+        config,
+        onClose: async (reason) => {
+          try {
+            // The manager invokes this from its reaper timer / shutdown path —
+            // outside any request tenant scope — so it re-enters the tenant
+            // scope itself and uses the handle that scope provides.
+            await runWithTenantScope(ctx.tenantDbName, async (db) => {
+            await persistEvent(ctx, sessionId, sessionKey, 'close', {
+              status: 'success',
+              data: { reason },
+            });
+            await db.updateBrowserSession(sessionId, {
+              status: reason === 'shutdown' ? 'closed' : reason === 'idle-timeout' || reason === 'max-lifetime' ? 'expired' : 'closed',
+              endedAt: new Date(),
+            });
+            // Rollup event at session end — onClose fires exactly once for every
+            // manager-side close (manual, idle, lifetime, shutdown, deleted).
+            // The manager callback runs outside the request ALS, so pass the
+            // attribution stamped on the row at creation.
+            const row = await db.findBrowserSessionById(sessionId);
+            const durationMs = row?.startedAt && row?.endedAt
+              ? new Date(row.endedAt).getTime() - new Date(row.startedAt).getTime()
+              : undefined;
+            recordUsageEvent({
+              tenantDbName: ctx.tenantDbName,
+              tenantId: ctx.tenantId,
+              projectId: ctx.projectId,
+              service: 'browser',
+              refKey: browser.key,
+              status: 'success',
+              latencyMs: durationMs,
+              attribution: {
+                userId: row?.userId ?? attribution.userId,
+                apiTokenId: row?.apiTokenId ?? attribution.apiTokenId,
+                actorType: row?.actorType ?? attribution.actorType,
+              },
+            });
+            });
+          } catch (err) {
+            logger.warn('Failed to persist close metadata', {
+              sessionId,
+              error: err instanceof Error ? err.message : err,
+            });
+          } finally {
+            await releaseOwnSessionLease();
+          }
+        },
+      });
 
-    const refreshed = await db.findBrowserSessionById(sessionId);
-    return serializeSession(refreshed ?? created);
-  } catch (err) {
-    // This used to be persisted only to the DB row, never to the pod's own
-    // logs -- diagnosing a live incident meant querying Mongo to find out a
-    // session failed to open at all, with nothing in `oc logs` naming why.
-    logger.error('Browser session failed to open', { error: err, sessionKey, tenantId: ctx.tenantId });
-    // The manager session never opened, so onClose will not fire: the slot is given back here.
-    await releaseOwnSessionLease();
-    await db.updateBrowserSession(sessionId, {
-      status: 'errored',
-      errorMessage: err instanceof Error ? err.message : String(err),
-      endedAt: new Date(),
-    });
-    // The manager session never opened, so onClose will not fire — this is
-    // the session's only rollup event.
-    recordUsageEvent({
-      tenantDbName: ctx.tenantDbName,
-      tenantId: ctx.tenantId,
-      projectId: ctx.projectId,
-      service: 'browser',
-      refKey: browser.key,
-      status: 'error',
-      attribution: {
-        userId: attribution.userId,
-        apiTokenId: attribution.apiTokenId,
-        actorType: attribution.actorType,
-      },
-    });
-    throw err;
-  }
+      await db.updateBrowserSession(sessionId, {
+        status: 'idle',
+        startedAt: new Date(),
+        lastActivityAt: new Date(),
+      });
+
+      await persistEvent(ctx, sessionId, sessionKey, 'create', {
+        status: 'success',
+        data: { sessionKey, agentKey: input.agentKey },
+      });
+
+      const refreshed = await db.findBrowserSessionById(sessionId);
+      return serializeSession(refreshed ?? created);
+    } catch (err) {
+      // This used to be persisted only to the DB row, never to the pod's own
+      // logs -- diagnosing a live incident meant querying Mongo to find out a
+      // session failed to open at all, with nothing in `oc logs` naming why.
+      logger.error('Browser session failed to open', { error: err, sessionKey, tenantId: ctx.tenantId });
+      // The manager session never opened, so onClose will not fire: the slot is given back here.
+      await releaseOwnSessionLease();
+      await db.updateBrowserSession(sessionId, {
+        status: 'errored',
+        errorMessage: err instanceof Error ? err.message : String(err),
+        endedAt: new Date(),
+      });
+      // The manager session never opened, so onClose will not fire — this is
+      // the session's only rollup event.
+      recordUsageEvent({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        service: 'browser',
+        refKey: browser.key,
+        status: 'error',
+        attribution: {
+          userId: attribution.userId,
+          apiTokenId: attribution.apiTokenId,
+          actorType: attribution.actorType,
+        },
+      });
+      throw err;
+    }
+  });
 }
 
 export async function listBrowserSessions(
@@ -353,42 +348,46 @@ export async function listBrowserSessions(
     limit?: number;
   },
 ): Promise<BrowserSessionView[]> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const records = await db.listBrowserSessions(ctx.tenantId, {
-    projectId: ctx.projectId,
-    ...filters,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const records = await db.listBrowserSessions(ctx.tenantId, {
+      projectId: ctx.projectId,
+      ...filters,
+    });
+    return records.map(serializeSession);
   });
-  return records.map(serializeSession);
 }
 
 export async function getBrowserSession(
   ctx: SessionContext,
   sessionId: string,
 ): Promise<BrowserSessionView | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const record = await db.findBrowserSessionById(sessionId);
-  if (!canAccessSession(ctx, record)) return null;
-  return serializeSession(record);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const record = await db.findBrowserSessionById(sessionId);
+    if (!canAccessSession(ctx, record)) return null;
+    return serializeSession(record);
+  });
 }
 
 export async function getBrowserSessionByKey(
   ctx: SessionContext,
   sessionKey: string,
 ): Promise<BrowserSessionView | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const record = await db.findBrowserSessionByKey(ctx.tenantId, sessionKey, ctx.projectId);
-  if (!canAccessSession(ctx, record)) return null;
-  return serializeSession(record);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const record = await db.findBrowserSessionByKey(ctx.tenantId, sessionKey, ctx.projectId);
+    if (!canAccessSession(ctx, record)) return null;
+    return serializeSession(record);
+  });
 }
 
 async function loadSessionForKey(
   ctx: SessionContext,
   sessionKey: string,
 ): Promise<{ id: string; record: IBrowserSession }> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const record = await db.findBrowserSessionByKey(ctx.tenantId, sessionKey, ctx.projectId);
-  if (!canAccessSession(ctx, record)) throw new Error(`Browser session not found: ${sessionKey}`);
-  return { id: String(record._id), record };
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const record = await db.findBrowserSessionByKey(ctx.tenantId, sessionKey, ctx.projectId);
+    if (!canAccessSession(ctx, record)) throw new Error(`Browser session not found: ${sessionKey}`);
+    return { id: String(record._id), record };
+  });
 }
 
 /**
@@ -403,15 +402,16 @@ async function loadActiveSessionForKey(
 ): Promise<{ id: string; record: IBrowserSession }> {
   await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'browser');
   const loaded = await loadSessionForKey(ctx, sessionKey);
-  const db = await withTenantDb(ctx.tenantDbName);
-  const browser = await db.findBrowserById(loaded.record.browserId);
-  if (browser && browser.status === 'active') return loaded;
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const browser = await db.findBrowserById(loaded.record.browserId);
+    if (browser && browser.status === 'active') return loaded;
 
-  await browserManager.closeSession(sessionKey, 'manual').catch(() => false);
-  await db
-    .updateBrowserSession(loaded.id, { status: 'closed', endedAt: new Date() })
-    .catch(() => undefined);
-  throw new Error(`Browser ${browser?.key ?? loaded.record.browserId} is not active`);
+    await browserManager.closeSession(sessionKey, 'manual').catch(() => false);
+    await db
+      .updateBrowserSession(loaded.id, { status: 'closed', endedAt: new Date() })
+      .catch(() => undefined);
+    throw new Error(`Browser ${browser?.key ?? loaded.record.browserId} is not active`);
+  });
 }
 
 async function persistEvent(
@@ -430,40 +430,41 @@ async function persistEvent(
     errorMessage?: string;
   },
 ): Promise<BrowserSessionEventView> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const sequence = (await db.countBrowserSessionEvents(sessionId)) + 1;
-  const sanitizedUrl = sanitizePersistedUrl(payload.url);
-  const event = await db.createBrowserSessionEvent({
-    tenantId: ctx.tenantId,
-    projectId: ctx.projectId,
-    sessionId,
-    sequence,
-    type,
-    status: payload.status,
-    url: sanitizedUrl,
-    selector: payload.selector,
-    ref: payload.ref,
-    durationMs: payload.durationMs,
-    artifact: payload.artifact
-      ? {
-          bucketKey: payload.artifact.bucketKey,
-          fileId: payload.artifact.fileId,
-          objectKey: payload.artifact.objectKey,
-          contentType: payload.artifact.contentType,
-        }
-      : undefined,
-    data: payload.data,
-    errorMessage: payload.errorMessage,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const sequence = (await db.countBrowserSessionEvents(sessionId)) + 1;
+    const sanitizedUrl = sanitizePersistedUrl(payload.url);
+    const event = await db.createBrowserSessionEvent({
+      tenantId: ctx.tenantId,
+      projectId: ctx.projectId,
+      sessionId,
+      sequence,
+      type,
+      status: payload.status,
+      url: sanitizedUrl,
+      selector: payload.selector,
+      ref: payload.ref,
+      durationMs: payload.durationMs,
+      artifact: payload.artifact
+        ? {
+            bucketKey: payload.artifact.bucketKey,
+            fileId: payload.artifact.fileId,
+            objectKey: payload.artifact.objectKey,
+            contentType: payload.artifact.contentType,
+          }
+        : undefined,
+      data: payload.data,
+      errorMessage: payload.errorMessage,
+    });
+    // Update parent session counters / activity (best-effort).
+    await db
+      .updateBrowserSession(sessionId, {
+        eventCount: sequence,
+        lastActivityAt: new Date(),
+        currentUrl: sanitizedUrl,
+      })
+      .catch(() => undefined);
+    return serializeEvent(event);
   });
-  // Update parent session counters / activity (best-effort).
-  await db
-    .updateBrowserSession(sessionId, {
-      eventCount: sequence,
-      lastActivityAt: new Date(),
-      currentUrl: sanitizedUrl,
-    })
-    .catch(() => undefined);
-  return serializeEvent(event);
 }
 
 export async function runBrowserAction(
@@ -685,19 +686,20 @@ async function persistScreenshotBuffer(
     data: { fullPage: input.fullPage ?? false, type: input.type ?? 'png' },
   });
 
-  const db = await withTenantDb(ctx.tenantDbName);
-  await db
-    .updateBrowserSession(id, {
-      lastScreenshot: {
-        bucketKey,
-        fileId: upload.record.id,
-        objectKey: upload.record.key,
-        capturedAt: new Date(),
-      },
-    })
-    .catch(() => undefined);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    await db
+      .updateBrowserSession(id, {
+        lastScreenshot: {
+          bucketKey,
+          fileId: upload.record.id,
+          objectKey: upload.record.key,
+          capturedAt: new Date(),
+        },
+      })
+      .catch(() => undefined);
 
-  return { artifact, eventId: event.id };
+    return { artifact, eventId: event.id };
+  });
 }
 
 /**
@@ -819,13 +821,14 @@ export async function closeBrowserSession(
   await releaseSessionLease(sessionKey);
 
   if (id) {
-    const db = await withTenantDb(ctx.tenantDbName);
-    await db
-      .updateBrowserSession(id, {
-        status: 'closed',
-        endedAt: new Date(),
-      })
-      .catch(() => undefined);
+    await runWithTenantScope(ctx.tenantDbName, async (db) => {
+      await db
+        .updateBrowserSession(id, {
+          status: 'closed',
+          endedAt: new Date(),
+        })
+        .catch(() => undefined);
+    });
   }
   return { closed };
 }
@@ -835,24 +838,26 @@ export async function listBrowserSessionEvents(
   sessionId: string,
   options?: { limit?: number; skip?: number },
 ): Promise<BrowserSessionEventView[]> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const session = await db.findBrowserSessionById(sessionId);
-  if (!canAccessSession(ctx, session)) return [];
-  const events = await db.listBrowserSessionEvents(sessionId, options);
-  return events.map(serializeEvent);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const session = await db.findBrowserSessionById(sessionId);
+    if (!canAccessSession(ctx, session)) return [];
+    const events = await db.listBrowserSessionEvents(sessionId, options);
+    return events.map(serializeEvent);
+  });
 }
 
 export async function deleteBrowserSession(
   ctx: SessionContext,
   sessionId: string,
 ): Promise<boolean> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const session = await db.findBrowserSessionById(sessionId);
-  if (!canAccessSession(ctx, session)) return false;
-  // Best-effort: ensure manager-side session is closed first
-  await browserManager.closeSession(session.sessionKey, 'deleted').catch(() => undefined);
-  await releaseSessionLease(session.sessionKey);
-  return db.deleteBrowserSession(sessionId);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const session = await db.findBrowserSessionById(sessionId);
+    if (!canAccessSession(ctx, session)) return false;
+    // Best-effort: ensure manager-side session is closed first
+    await browserManager.closeSession(session.sessionKey, 'deleted').catch(() => undefined);
+    await releaseSessionLease(session.sessionKey);
+    return db.deleteBrowserSession(sessionId);
+  });
 }
 
 function redactAction(action: BrowserAction): Record<string, unknown> {

@@ -18,7 +18,7 @@ import {
   redactLogPayload,
   redactLogString,
 } from '@/lib/services/logRedaction';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
 import type { RuntimeAuthLogInfo } from '@/lib/services/runtimeContext';
@@ -55,21 +55,20 @@ async function generateUniqueKey(
   projectId: string | undefined,
   desiredKey: string,
 ): Promise<string> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const base = normalizeKey(desiredKey);
+    let attempt = 0;
+    let candidate = base;
 
-  const base = normalizeKey(desiredKey);
-  let attempt = 0;
-  let candidate = base;
+    while (attempt < MAX_KEY_ATTEMPTS) {
+      const existing = await db.findToolByKey(candidate, projectId);
+      if (!existing) return candidate;
+      attempt++;
+      candidate = `${base}-${attempt}`;
+    }
 
-  while (attempt < MAX_KEY_ATTEMPTS) {
-    const existing = await db.findToolByKey(candidate, projectId);
-    if (!existing) return candidate;
-    attempt++;
-    candidate = `${base}-${attempt}`;
-  }
-
-  throw new Error(`Could not generate a unique key for tool "${desiredKey}"`);
+    throw new Error(`Could not generate a unique key for tool "${desiredKey}"`);
+  });
 }
 
 // ── OpenAPI Parsing ───────────────────────────────────────────────────────
@@ -283,30 +282,29 @@ export async function createTool(
     );
   }
 
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const tool = await db.createTool({
+      tenantId,
+      projectId: projectId ?? undefined,
+      key,
+      name: input.name.trim(),
+      description: input.description?.trim(),
+      type: input.type,
+      status: 'active',
+      actions,
+      openApiSpec: normalizedSpec,
+      upstreamBaseUrl,
+      upstreamAuth: input.upstreamAuth
+        ? sealAuthConfig(input.upstreamAuth as IToolAuthConfig)
+        : undefined,
+      mcpEndpoint: input.mcpEndpoint,
+      mcpTransport: input.mcpTransport,
+      createdBy: userId,
+    });
 
-  const tool = await db.createTool({
-    tenantId,
-    projectId: projectId ?? undefined,
-    key,
-    name: input.name.trim(),
-    description: input.description?.trim(),
-    type: input.type,
-    status: 'active',
-    actions,
-    openApiSpec: normalizedSpec,
-    upstreamBaseUrl,
-    upstreamAuth: input.upstreamAuth
-      ? sealAuthConfig(input.upstreamAuth as IToolAuthConfig)
-      : undefined,
-    mcpEndpoint: input.mcpEndpoint,
-    mcpTransport: input.mcpTransport,
-    createdBy: userId,
+    logger.info('Tool created', { key, type: input.type, tenantId, actionCount: actions.length });
+    return tool;
   });
-
-  logger.info('Tool created', { key, type: input.type, tenantId, actionCount: actions.length });
-  return tool;
 }
 
 export async function updateTool(
@@ -315,67 +313,66 @@ export async function updateTool(
   userId: string,
   input: UpdateToolInput,
 ): Promise<ITool | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const updateData: Record<string, unknown> = { updatedBy: userId };
 
-  const updateData: Record<string, unknown> = { updatedBy: userId };
-
-  // Fetched lazily, at most once, by whichever branch below needs the
-  // currently-stored tool (existing metadata for the runtime-header merge,
-  // or the existing sealed auth config to preserve/re-seal on update).
-  let existingTool: ITool | null | undefined;
-  const loadExisting = async () => {
-    if (existingTool === undefined) existingTool = await db.findToolById(toolId);
-    return existingTool;
-  };
-
-  if ((input.upstreamAuth as IToolAuthConfig | undefined)?.type === 'connector') {
-    throw new Error(MANAGED_AUTH_ERROR);
-  }
-  if (isManagedTool(await loadExisting())) throw new Error(MANAGED_TOOL_ERROR);
-
-  if (input.name !== undefined) updateData.name = input.name.trim();
-  if (input.description !== undefined) updateData.description = input.description.trim();
-  if (input.status !== undefined) updateData.status = input.status;
-  if (input.upstreamBaseUrl !== undefined) updateData.upstreamBaseUrl = input.upstreamBaseUrl;
-  if (input.upstreamAuth !== undefined) {
-    const existing = await loadExisting();
-    updateData.upstreamAuth = mergeAuthConfigUpdate(existing?.upstreamAuth, input.upstreamAuth);
-  }
-  if (input.mcpEndpoint !== undefined) updateData.mcpEndpoint = input.mcpEndpoint;
-  if (input.mcpTransport !== undefined) updateData.mcpTransport = input.mcpTransport;
-
-  // Runtime-header passthrough policy lives in the metadata blob (no schema
-  // migration needed in either DB tree).
-  if (input.runtimeHeaders !== undefined) {
-    const existing = await loadExisting();
-    updateData.metadata = {
-      ...(existing?.metadata ?? {}),
-      runtimeHeaders: input.runtimeHeaders === null
-        ? undefined
-        : {
-          allow: input.runtimeHeaders.allow === true,
-          ...(input.runtimeHeaders.allowedNames?.length
-            ? { allowedNames: input.runtimeHeaders.allowedNames.filter((n) => typeof n === 'string' && n.trim()) }
-            : {}),
-        },
+    // Fetched lazily, at most once, by whichever branch below needs the
+    // currently-stored tool (existing metadata for the runtime-header merge,
+    // or the existing sealed auth config to preserve/re-seal on update).
+    let existingTool: ITool | null | undefined;
+    const loadExisting = async () => {
+      if (existingTool === undefined) existingTool = await db.findToolById(toolId);
+      return existingTool;
     };
-  }
 
-  // Re-parse spec or re-discover MCP tools if source config changed
-  if (input.openApiSpec !== undefined) {
-    const { actions, baseUrl: specBaseUrl, normalizedSpec } = parseOpenApiToActions(
-      input.openApiSpec,
-      input.specFormat,
-    );
-    updateData.openApiSpec = normalizedSpec;
-    updateData.actions = actions;
-    if (!input.upstreamBaseUrl && specBaseUrl) {
-      updateData.upstreamBaseUrl = specBaseUrl;
+    if ((input.upstreamAuth as IToolAuthConfig | undefined)?.type === 'connector') {
+      throw new Error(MANAGED_AUTH_ERROR);
     }
-  }
+    if (isManagedTool(await loadExisting())) throw new Error(MANAGED_TOOL_ERROR);
 
-  return db.updateTool(toolId, updateData as Partial<ITool>);
+    if (input.name !== undefined) updateData.name = input.name.trim();
+    if (input.description !== undefined) updateData.description = input.description.trim();
+    if (input.status !== undefined) updateData.status = input.status;
+    if (input.upstreamBaseUrl !== undefined) updateData.upstreamBaseUrl = input.upstreamBaseUrl;
+    if (input.upstreamAuth !== undefined) {
+      const existing = await loadExisting();
+      updateData.upstreamAuth = mergeAuthConfigUpdate(existing?.upstreamAuth, input.upstreamAuth);
+    }
+    if (input.mcpEndpoint !== undefined) updateData.mcpEndpoint = input.mcpEndpoint;
+    if (input.mcpTransport !== undefined) updateData.mcpTransport = input.mcpTransport;
+
+    // Runtime-header passthrough policy lives in the metadata blob (no schema
+    // migration needed in either DB tree).
+    if (input.runtimeHeaders !== undefined) {
+      const existing = await loadExisting();
+      updateData.metadata = {
+        ...(existing?.metadata ?? {}),
+        runtimeHeaders: input.runtimeHeaders === null
+          ? undefined
+          : {
+            allow: input.runtimeHeaders.allow === true,
+            ...(input.runtimeHeaders.allowedNames?.length
+              ? { allowedNames: input.runtimeHeaders.allowedNames.filter((n) => typeof n === 'string' && n.trim()) }
+              : {}),
+          },
+      };
+    }
+
+    // Re-parse spec or re-discover MCP tools if source config changed
+    if (input.openApiSpec !== undefined) {
+      const { actions, baseUrl: specBaseUrl, normalizedSpec } = parseOpenApiToActions(
+        input.openApiSpec,
+        input.specFormat,
+      );
+      updateData.openApiSpec = normalizedSpec;
+      updateData.actions = actions;
+      if (!input.upstreamBaseUrl && specBaseUrl) {
+        updateData.upstreamBaseUrl = specBaseUrl;
+      }
+    }
+
+    return db.updateTool(toolId, updateData as Partial<ITool>);
+  });
 }
 
 // ── Managed tools ─────────────────────────────────────────────────────────
@@ -400,27 +397,27 @@ export async function createManagedTool(
   input: ManagedToolInput,
 ): Promise<ITool> {
   const key = await generateUniqueKey(tenantDbName, projectId, input.key?.trim() || input.name);
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const tool = await db.createTool({
-    tenantId,
-    projectId: projectId ?? undefined,
-    key,
-    name: input.name.trim(),
-    description: input.description?.trim(),
-    type: input.type,
-    status: input.status ?? 'active',
-    actions: input.actions,
-    openApiSpec: input.openApiSpec,
-    upstreamBaseUrl: input.upstreamBaseUrl,
-    upstreamAuth: { type: 'connector', connectorId: input.connectorId },
-    mcpEndpoint: input.mcpEndpoint,
-    mcpTransport: input.mcpTransport,
-    metadata: input.metadata,
-    createdBy: userId,
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const tool = await db.createTool({
+      tenantId,
+      projectId: projectId ?? undefined,
+      key,
+      name: input.name.trim(),
+      description: input.description?.trim(),
+      type: input.type,
+      status: input.status ?? 'active',
+      actions: input.actions,
+      openApiSpec: input.openApiSpec,
+      upstreamBaseUrl: input.upstreamBaseUrl,
+      upstreamAuth: { type: 'connector', connectorId: input.connectorId },
+      mcpEndpoint: input.mcpEndpoint,
+      mcpTransport: input.mcpTransport,
+      metadata: input.metadata,
+      createdBy: userId,
+    });
+    logger.info('Managed tool created', { key, type: input.type, tenantId, actionCount: input.actions.length });
+    return tool;
   });
-  logger.info('Managed tool created', { key, type: input.type, tenantId, actionCount: input.actions.length });
-  return tool;
 }
 
 /** Updates a tool the given connector owns; refuses any other tool. */
@@ -431,42 +428,42 @@ export async function updateManagedTool(
   userId: string,
   patch: ManagedToolUpdate,
 ): Promise<ITool | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const existing = await db.findToolById(toolId);
-  if (!existing) return null;
-  if (existing.upstreamAuth?.type !== 'connector' || existing.upstreamAuth.connectorId !== connectorId) {
-    throw new Error('The tool is not managed by this connector');
-  }
-  const update: Partial<ITool> = { updatedBy: userId };
-  if (patch.name !== undefined) update.name = patch.name.trim();
-  if (patch.description !== undefined) update.description = patch.description.trim();
-  if (patch.status !== undefined) update.status = patch.status;
-  if (patch.actions !== undefined) update.actions = patch.actions;
-  if (patch.mcpEndpoint !== undefined) update.mcpEndpoint = patch.mcpEndpoint;
-  if (patch.mcpTransport !== undefined) update.mcpTransport = patch.mcpTransport;
-  if (patch.upstreamBaseUrl !== undefined) update.upstreamBaseUrl = patch.upstreamBaseUrl;
-  if (patch.openApiSpec !== undefined) update.openApiSpec = patch.openApiSpec;
-  if (patch.metadata !== undefined) update.metadata = patch.metadata;
-  return db.updateTool(toolId, update);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const existing = await db.findToolById(toolId);
+    if (!existing) return null;
+    if (existing.upstreamAuth?.type !== 'connector' || existing.upstreamAuth.connectorId !== connectorId) {
+      throw new Error('The tool is not managed by this connector');
+    }
+    const update: Partial<ITool> = { updatedBy: userId };
+    if (patch.name !== undefined) update.name = patch.name.trim();
+    if (patch.description !== undefined) update.description = patch.description.trim();
+    if (patch.status !== undefined) update.status = patch.status;
+    if (patch.actions !== undefined) update.actions = patch.actions;
+    if (patch.mcpEndpoint !== undefined) update.mcpEndpoint = patch.mcpEndpoint;
+    if (patch.mcpTransport !== undefined) update.mcpTransport = patch.mcpTransport;
+    if (patch.upstreamBaseUrl !== undefined) update.upstreamBaseUrl = patch.upstreamBaseUrl;
+    if (patch.openApiSpec !== undefined) update.openApiSpec = patch.openApiSpec;
+    if (patch.metadata !== undefined) update.metadata = patch.metadata;
+    return db.updateTool(toolId, update);
+  });
 }
 
 export async function deleteTool(
   tenantDbName: string,
   toolId: string,
 ): Promise<boolean> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.deleteTool(toolId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.deleteTool(toolId);
+  });
 }
 
 export async function getTool(
   tenantDbName: string,
   toolId: string,
 ): Promise<ITool | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.findToolById(toolId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.findToolById(toolId);
+  });
 }
 
 export async function getToolByKey(
@@ -474,9 +471,9 @@ export async function getToolByKey(
   key: string,
   projectId?: string | null,
 ): Promise<ITool | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.findToolByKey(key, projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.findToolByKey(key, projectId);
+  });
 }
 
 export async function listTools(
@@ -488,18 +485,18 @@ export async function listTools(
     search?: string;
   },
 ): Promise<ITool[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.listTools(filters);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.listTools(filters);
+  });
 }
 
 export async function countTools(
   tenantDbName: string,
   projectId?: string,
 ): Promise<number> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.countTools(projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.countTools(projectId);
+  });
 }
 
 /**
@@ -510,31 +507,30 @@ export async function syncToolActions(
   toolId: string,
   userId: string,
 ): Promise<ITool | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const tool = await db.findToolById(toolId);
+    if (!tool) throw new Error('Tool not found');
 
-  const tool = await db.findToolById(toolId);
-  if (!tool) throw new Error('Tool not found');
+    // A connector tool's actions are the connector's own: only its owner changes them.
+    if (tool.type === 'connector') return tool;
 
-  // A connector tool's actions are the connector's own: only its owner changes them.
-  if (tool.type === 'connector') return tool;
+    let actions: IToolAction[] = [];
 
-  let actions: IToolAction[] = [];
+    if (tool.type === 'openapi' && tool.openApiSpec) {
+      const parsed = parseOpenApiToActions(tool.openApiSpec);
+      actions = parsed.actions;
+    } else if (tool.type === 'mcp' && tool.mcpEndpoint) {
+      const upstream = await resolveUpstreamAuth(tool);
+      actions = await discoverMcpTools(
+        tool.mcpEndpoint,
+        tool.mcpTransport || 'streamable-http',
+        upstream.auth,
+        upstream.headers,
+      );
+    }
 
-  if (tool.type === 'openapi' && tool.openApiSpec) {
-    const parsed = parseOpenApiToActions(tool.openApiSpec);
-    actions = parsed.actions;
-  } else if (tool.type === 'mcp' && tool.mcpEndpoint) {
-    const upstream = await resolveUpstreamAuth(tool);
-    actions = await discoverMcpTools(
-      tool.mcpEndpoint,
-      tool.mcpTransport || 'streamable-http',
-      upstream.auth,
-      upstream.headers,
-    );
-  }
-
-  return db.updateTool(toolId, { actions, updatedBy: userId });
+    return db.updateTool(toolId, { actions, updatedBy: userId });
+  });
 }
 
 // ── Execution ─────────────────────────────────────────────────────────────
@@ -847,32 +843,32 @@ export async function logToolRequest(
     latencyMs,
   });
   try {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    await db.createToolRequestLog({
-      userId: attribution.userId,
-      apiTokenId: attribution.apiTokenId,
-      actorType: attribution.actorType,
-      tenantId,
-      projectId,
-      toolKey,
-      actionKey,
-      actionName,
-      status,
-      latencyMs,
-      // Runtime-auth usage rides inside the payload blob so both DB schemas
-      // persist it without a migration. Header names only — values never land here.
-      // Scrub echoed secrets / sensitive keys and cap size before persisting.
-      requestPayload: redactLogPayload(
-        runtimeAuth
-          ? { ...(requestPayload ?? {}), _runtimeAuth: runtimeAuth as unknown as Record<string, unknown> }
-          : requestPayload,
-        { secretValues },
-      ),
-      responsePayload: redactLogPayload(responsePayload, { secretValues }),
-      errorMessage: redactLogString(errorMessage, secretValues),
-      callerType,
-      callerTokenId,
+    await runWithTenantScope(tenantDbName, async (db) => {
+      await db.createToolRequestLog({
+        userId: attribution.userId,
+        apiTokenId: attribution.apiTokenId,
+        actorType: attribution.actorType,
+        tenantId,
+        projectId,
+        toolKey,
+        actionKey,
+        actionName,
+        status,
+        latencyMs,
+        // Runtime-auth usage rides inside the payload blob so both DB schemas
+        // persist it without a migration. Header names only — values never land here.
+        // Scrub echoed secrets / sensitive keys and cap size before persisting.
+        requestPayload: redactLogPayload(
+          runtimeAuth
+            ? { ...(requestPayload ?? {}), _runtimeAuth: runtimeAuth as unknown as Record<string, unknown> }
+            : requestPayload,
+          { secretValues },
+        ),
+        responsePayload: redactLogPayload(responsePayload, { secretValues }),
+        errorMessage: redactLogString(errorMessage, secretValues),
+        callerType,
+        callerTokenId,
+      });
     });
   } catch (err) {
     logger.error('Failed to log tool request', { toolKey, actionKey, error: err });
@@ -892,9 +888,9 @@ export async function listToolRequestLogs(
     keyword?: string;
   },
 ) {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.listToolRequestLogs(toolKey, options);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.listToolRequestLogs(toolKey, options);
+  });
 }
 
 export async function countToolRequestLogs(
@@ -902,9 +898,9 @@ export async function countToolRequestLogs(
   toolKey: string,
   options?: { from?: Date; to?: Date; status?: string; actionKey?: string; keyword?: string },
 ) {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.countToolRequestLogs(toolKey, options);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.countToolRequestLogs(toolKey, options);
+  });
 }
 
 export async function aggregateToolRequestLogs(
@@ -912,7 +908,7 @@ export async function aggregateToolRequestLogs(
   toolKey: string,
   options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
 ) {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.aggregateToolRequestLogs(toolKey, options);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.aggregateToolRequestLogs(toolKey, options);
+  });
 }

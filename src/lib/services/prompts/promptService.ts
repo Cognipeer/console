@@ -1,6 +1,6 @@
 import slugify from 'slugify';
 import { randomUUID } from 'node:crypto';
-import { getDatabase, type IPrompt, type IPromptVersion, type IPromptComment } from '@/lib/database';
+import { runWithTenantScope, type IPrompt, type IPromptVersion, type IPromptComment } from '@/lib/database';
 import type {
 	CreateCommentInput,
 	CreatePromptInput,
@@ -154,23 +154,22 @@ async function generateUniqueKey(
 	projectId: string,
 	desiredKey: string,
 ): Promise<string> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const base = normalizeKeyCandidate(desiredKey);
+		let attempt = 0;
+		let candidate = base;
 
-	const base = normalizeKeyCandidate(desiredKey);
-	let attempt = 0;
-	let candidate = base;
-
-	while (attempt < MAX_KEY_ATTEMPTS) {
-		const existing = await db.findPromptByKey(candidate, projectId);
-		if (!existing) {
-			return candidate;
+		while (attempt < MAX_KEY_ATTEMPTS) {
+			const existing = await db.findPromptByKey(candidate, projectId);
+			if (!existing) {
+				return candidate;
+			}
+			attempt += 1;
+			candidate = `${base}-${attempt + 1}`;
 		}
-		attempt += 1;
-		candidate = `${base}-${attempt + 1}`;
-	}
 
-	throw new Error('Could not generate unique prompt key');
+		throw new Error('Could not generate unique prompt key');
+	});
 }
 
 export async function listPrompts(
@@ -178,15 +177,14 @@ export async function listPrompts(
 	projectId: string,
 	options?: ListPromptsOptions,
 ): Promise<PromptView[]> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const prompts = await db.listPrompts({
+			projectId,
+			search: options?.search,
+		});
 
-	const prompts = await db.listPrompts({
-		projectId,
-		search: options?.search,
+		return prompts.map((prompt) => serializePrompt(prompt));
 	});
-
-	return prompts.map((prompt) => serializePrompt(prompt));
 }
 
 export async function getPromptById(
@@ -194,11 +192,10 @@ export async function getPromptById(
 	projectId: string,
 	id: string,
 ): Promise<PromptView | null> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
-
-	const prompt = await db.findPromptById(id, projectId);
-	return prompt ? serializePrompt(prompt) : null;
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const prompt = await db.findPromptById(id, projectId);
+		return prompt ? serializePrompt(prompt) : null;
+	});
 }
 
 export async function getPromptByKey(
@@ -206,11 +203,10 @@ export async function getPromptByKey(
 	projectId: string,
 	key: string,
 ): Promise<PromptView | null> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
-
-	const prompt = await db.findPromptByKey(key, projectId);
-	return prompt ? serializePrompt(prompt) : null;
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const prompt = await db.findPromptByKey(key, projectId);
+		return prompt ? serializePrompt(prompt) : null;
+	});
 }
 
 export async function createPrompt(
@@ -220,44 +216,43 @@ export async function createPrompt(
 	userId: string,
 	payload: CreatePromptInput,
 ): Promise<PromptView> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const keyCandidate = payload.key || payload.name;
+		const key = await generateUniqueKey(tenantDbName, projectId, keyCandidate);
 
-	const keyCandidate = payload.key || payload.name;
-	const key = await generateUniqueKey(tenantDbName, projectId, keyCandidate);
+		const newPrompt: Omit<IPrompt, '_id' | 'createdAt' | 'updatedAt'> = {
+			tenantId,
+			projectId,
+			key,
+			name: payload.name,
+			description: payload.description,
+			template: payload.template,
+			metadata: payload.metadata ?? {},
+			currentVersion: 1,
+			createdBy: userId,
+			updatedBy: userId,
+		};
 
-	const newPrompt: Omit<IPrompt, '_id' | 'createdAt' | 'updatedAt'> = {
-		tenantId,
-		projectId,
-		key,
-		name: payload.name,
-		description: payload.description,
-		template: payload.template,
-		metadata: payload.metadata ?? {},
-		currentVersion: 1,
-		createdBy: userId,
-		updatedBy: userId,
-	};
+		const created = await db.createPrompt(newPrompt);
+		const promptId = typeof created._id === 'string'
+			? created._id
+			: (created._id?.toString() ?? '');
 
-	const created = await db.createPrompt(newPrompt);
-	const promptId = typeof created._id === 'string'
-		? created._id
-		: (created._id?.toString() ?? '');
+		await db.createPromptVersion({
+			tenantId,
+			projectId,
+			promptId,
+			version: 1,
+			name: created.name,
+			description: created.description,
+			template: created.template,
+			metadata: created.metadata ?? {},
+			comment: payload.versionComment,
+			createdBy: userId,
+		});
 
-	await db.createPromptVersion({
-		tenantId,
-		projectId,
-		promptId,
-		version: 1,
-		name: created.name,
-		description: created.description,
-		template: created.template,
-		metadata: created.metadata ?? {},
-		comment: payload.versionComment,
-		createdBy: userId,
+		return serializePrompt(created);
 	});
-
-	return serializePrompt(created);
 }
 
 export async function updatePrompt(
@@ -266,42 +261,41 @@ export async function updatePrompt(
 	id: string,
 	updates: UpdatePromptInput & { updatedBy?: string },
 ): Promise<PromptView | null> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const existing = await db.findPromptById(id, projectId);
+		if (!existing) {
+			return null;
+		}
 
-	const existing = await db.findPromptById(id, projectId);
-	if (!existing) {
-		return null;
-	}
+		const nextVersion = (existing.currentVersion ?? 1) + 1;
+		const updatedPrompt = await db.updatePrompt(id, {
+			name: updates.name ?? existing.name,
+			description: updates.description ?? existing.description,
+			template: updates.template ?? existing.template,
+			metadata: updates.metadata ?? existing.metadata,
+			currentVersion: nextVersion,
+			updatedBy: updates.updatedBy,
+		});
 
-	const nextVersion = (existing.currentVersion ?? 1) + 1;
-	const updatedPrompt = await db.updatePrompt(id, {
-		name: updates.name ?? existing.name,
-		description: updates.description ?? existing.description,
-		template: updates.template ?? existing.template,
-		metadata: updates.metadata ?? existing.metadata,
-		currentVersion: nextVersion,
-		updatedBy: updates.updatedBy,
+		if (!updatedPrompt) {
+			return null;
+		}
+
+		await db.createPromptVersion({
+			tenantId: existing.tenantId,
+			projectId: existing.projectId,
+			promptId: id,
+			version: nextVersion,
+			name: updates.name ?? existing.name,
+			description: updates.description ?? existing.description,
+			template: updates.template ?? existing.template,
+			metadata: updates.metadata ?? existing.metadata ?? {},
+			comment: updates.versionComment,
+			createdBy: updates.updatedBy ?? existing.updatedBy ?? existing.createdBy,
+		});
+
+		return serializePrompt(updatedPrompt);
 	});
-
-	if (!updatedPrompt) {
-		return null;
-	}
-
-	await db.createPromptVersion({
-		tenantId: existing.tenantId,
-		projectId: existing.projectId,
-		promptId: id,
-		version: nextVersion,
-		name: updates.name ?? existing.name,
-		description: updates.description ?? existing.description,
-		template: updates.template ?? existing.template,
-		metadata: updates.metadata ?? existing.metadata ?? {},
-		comment: updates.versionComment,
-		createdBy: updates.updatedBy ?? existing.updatedBy ?? existing.createdBy,
-	});
-
-	return serializePrompt(updatedPrompt);
 }
 
 export async function deletePrompt(
@@ -309,11 +303,10 @@ export async function deletePrompt(
 	projectId: string,
 	id: string,
 ): Promise<boolean> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
-
-	await db.deletePromptVersions(id, projectId);
-	return db.deletePrompt(id);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		await db.deletePromptVersions(id, projectId);
+		return db.deletePrompt(id);
+	});
 }
 
 export async function listPromptVersions(
@@ -321,16 +314,15 @@ export async function listPromptVersions(
 	projectId: string,
 	promptId: string,
 ): Promise<PromptVersionView[]> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const prompt = await db.findPromptById(promptId, projectId);
+		if (!prompt) {
+			return [];
+		}
 
-	const prompt = await db.findPromptById(promptId, projectId);
-	if (!prompt) {
-		return [];
-	}
-
-	const versions = await db.listPromptVersions(promptId, projectId);
-	return versions.map((version) => serializeVersion(version, prompt.currentVersion));
+		const versions = await db.listPromptVersions(promptId, projectId);
+		return versions.map((version) => serializeVersion(version, prompt.currentVersion));
+	});
 }
 
 export async function setPromptLatestVersion(
@@ -340,24 +332,23 @@ export async function setPromptLatestVersion(
 	versionId: string,
 	userId: string,
 ): Promise<PromptView | null> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const version = await db.findPromptVersionById(versionId, promptId, projectId);
+		if (!version) {
+			return null;
+		}
 
-	const version = await db.findPromptVersionById(versionId, promptId, projectId);
-	if (!version) {
-		return null;
-	}
+		const updated = await db.updatePrompt(promptId, {
+			name: version.name,
+			description: version.description,
+			template: version.template,
+			metadata: version.metadata,
+			currentVersion: version.version,
+			updatedBy: userId,
+		});
 
-	const updated = await db.updatePrompt(promptId, {
-		name: version.name,
-		description: version.description,
-		template: version.template,
-		metadata: version.metadata,
-		currentVersion: version.version,
-		updatedBy: userId,
+		return updated ? serializePrompt(updated) : null;
 	});
-
-	return updated ? serializePrompt(updated) : null;
 }
 
 async function findPromptVersionOrNull(
@@ -366,11 +357,10 @@ async function findPromptVersionOrNull(
 	promptId: string,
 	versionId: string,
 ): Promise<PromptVersionView | null> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
-
-	const version = await db.findPromptVersionById(versionId, promptId, projectId);
-	return version ? serializeVersion(version) : null;
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const version = await db.findPromptVersionById(versionId, promptId, projectId);
+		return version ? serializeVersion(version) : null;
+	});
 }
 
 export async function listPromptDeployments(
@@ -381,41 +371,40 @@ export async function listPromptDeployments(
 	deployments: Partial<Record<PromptEnvironment, PromptDeploymentStateView>>;
 	history: PromptDeploymentEventView[];
 } | null> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const prompt = await db.findPromptById(promptId, projectId);
+		if (!prompt) {
+			return null;
+		}
 
-	const prompt = await db.findPromptById(promptId, projectId);
-	if (!prompt) {
-		return null;
-	}
+		const deploymentEntries = Object.entries(
+			(prompt.deployments ?? {}) as Partial<Record<PromptEnvironment, PromptDeploymentStateRecord>>,
+		) as Array<[PromptEnvironment, PromptDeploymentStateRecord]>;
 
-	const deploymentEntries = Object.entries(
-		(prompt.deployments ?? {}) as Partial<Record<PromptEnvironment, PromptDeploymentStateRecord>>,
-	) as Array<[PromptEnvironment, PromptDeploymentStateRecord]>;
+		const deployments = deploymentEntries.reduce(
+			(acc, [environment, state]) => {
+				acc[environment] = {
+					...state,
+					updatedAt: state.updatedAt,
+				};
+				return acc;
+			},
+			{} as Partial<Record<PromptEnvironment, PromptDeploymentStateView>>,
+		);
 
-	const deployments = deploymentEntries.reduce(
-		(acc, [environment, state]) => {
-			acc[environment] = {
-				...state,
-				updatedAt: state.updatedAt,
-			};
-			return acc;
-		},
-		{} as Partial<Record<PromptEnvironment, PromptDeploymentStateView>>,
-	);
+		const history = (prompt.deploymentHistory ?? [])
+			.map((event) => serializeDeploymentEvent(event as PromptDeploymentEventRecord))
+			.sort((left, right) => {
+				const leftTs = left.createdAt ? new Date(left.createdAt).getTime() : 0;
+				const rightTs = right.createdAt ? new Date(right.createdAt).getTime() : 0;
+				return rightTs - leftTs;
+			});
 
-	const history = (prompt.deploymentHistory ?? [])
-		.map((event) => serializeDeploymentEvent(event as PromptDeploymentEventRecord))
-		.sort((left, right) => {
-			const leftTs = left.createdAt ? new Date(left.createdAt).getTime() : 0;
-			const rightTs = right.createdAt ? new Date(right.createdAt).getTime() : 0;
-			return rightTs - leftTs;
-		});
-
-	return {
-		deployments,
-		history,
-	};
+		return {
+			deployments,
+			history,
+		};
+	});
 }
 
 export async function promotePromptVersion(
@@ -429,60 +418,59 @@ export async function promotePromptVersion(
 		throw new Error('Invalid environment');
 	}
 
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const prompt = await db.findPromptById(promptId, projectId);
+		if (!prompt) {
+			return null;
+		}
 
-	const prompt = await db.findPromptById(promptId, projectId);
-	if (!prompt) {
-		return null;
-	}
+		const version = await db.findPromptVersionById(input.versionId, promptId, projectId);
+		if (!version) {
+			throw new Error('Version not found');
+		}
 
-	const version = await db.findPromptVersionById(input.versionId, promptId, projectId);
-	if (!version) {
-		throw new Error('Version not found');
-	}
+		const deployments = {
+			...(prompt.deployments ?? {}),
+		} as Partial<Record<PromptEnvironment, PromptDeploymentStateRecord>>;
+		const existing = deployments[input.environment];
 
-	const deployments = {
-		...(prompt.deployments ?? {}),
-	} as Partial<Record<PromptEnvironment, PromptDeploymentStateRecord>>;
-	const existing = deployments[input.environment];
+		deployments[input.environment] = {
+			environment: input.environment,
+			versionId: typeof version._id === 'string' ? version._id : (version._id?.toString() ?? input.versionId),
+			version: version.version,
+			rolloutStatus: 'planned',
+			rolloutStrategy: 'manual',
+			rollbackVersionId:
+				existing?.rolloutStatus === 'active' && existing.versionId !== input.versionId
+					? existing.versionId
+					: existing?.rollbackVersionId,
+			rollbackVersion:
+				existing?.rolloutStatus === 'active' && existing.versionId !== input.versionId
+					? existing.version
+					: existing?.rollbackVersion,
+			note: input.note,
+			updatedBy: userId,
+			updatedAt: new Date(),
+		};
 
-	deployments[input.environment] = {
-		environment: input.environment,
-		versionId: typeof version._id === 'string' ? version._id : (version._id?.toString() ?? input.versionId),
-		version: version.version,
-		rolloutStatus: 'planned',
-		rolloutStrategy: 'manual',
-		rollbackVersionId:
-			existing?.rolloutStatus === 'active' && existing.versionId !== input.versionId
-				? existing.versionId
-				: existing?.rollbackVersionId,
-		rollbackVersion:
-			existing?.rolloutStatus === 'active' && existing.versionId !== input.versionId
-				? existing.version
-				: existing?.rollbackVersion,
-		note: input.note,
-		updatedBy: userId,
-		updatedAt: new Date(),
-	};
+		const deploymentHistory = appendDeploymentEvent(
+			prompt,
+			'promote',
+			input.environment,
+			deployments[input.environment]?.versionId ?? input.versionId,
+			version.version,
+			userId,
+			input.note,
+		);
 
-	const deploymentHistory = appendDeploymentEvent(
-		prompt,
-		'promote',
-		input.environment,
-		deployments[input.environment]?.versionId ?? input.versionId,
-		version.version,
-		userId,
-		input.note,
-	);
+		const updated = await db.updatePrompt(promptId, {
+			deployments,
+			deploymentHistory,
+			updatedBy: userId,
+		});
 
-	const updated = await db.updatePrompt(promptId, {
-		deployments,
-		deploymentHistory,
-		updatedBy: userId,
+		return updated ? serializePrompt(updated) : null;
 	});
-
-	return updated ? serializePrompt(updated) : null;
 }
 
 export async function planPromptDeployment(
@@ -496,49 +484,48 @@ export async function planPromptDeployment(
 		throw new Error('Invalid environment');
 	}
 
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const prompt = await db.findPromptById(promptId, projectId);
+		if (!prompt) {
+			return null;
+		}
 
-	const prompt = await db.findPromptById(promptId, projectId);
-	if (!prompt) {
-		return null;
-	}
+		const deployments = {
+			...(prompt.deployments ?? {}),
+		} as Partial<Record<PromptEnvironment, PromptDeploymentStateRecord>>;
+		const environmentState = deployments[input.environment];
 
-	const deployments = {
-		...(prompt.deployments ?? {}),
-	} as Partial<Record<PromptEnvironment, PromptDeploymentStateRecord>>;
-	const environmentState = deployments[input.environment];
+		if (!environmentState) {
+			throw new Error('Promote a version before planning deployment');
+		}
 
-	if (!environmentState) {
-		throw new Error('Promote a version before planning deployment');
-	}
+		deployments[input.environment] = {
+			...environmentState,
+			rolloutStatus: 'planned',
+			rolloutStrategy: 'manual',
+			note: input.note ?? environmentState.note,
+			updatedBy: userId,
+			updatedAt: new Date(),
+		};
 
-	deployments[input.environment] = {
-		...environmentState,
-		rolloutStatus: 'planned',
-		rolloutStrategy: 'manual',
-		note: input.note ?? environmentState.note,
-		updatedBy: userId,
-		updatedAt: new Date(),
-	};
+		const deploymentHistory = appendDeploymentEvent(
+			prompt,
+			'plan',
+			input.environment,
+			environmentState.versionId,
+			environmentState.version,
+			userId,
+			input.note,
+		);
 
-	const deploymentHistory = appendDeploymentEvent(
-		prompt,
-		'plan',
-		input.environment,
-		environmentState.versionId,
-		environmentState.version,
-		userId,
-		input.note,
-	);
+		const updated = await db.updatePrompt(promptId, {
+			deployments,
+			deploymentHistory,
+			updatedBy: userId,
+		});
 
-	const updated = await db.updatePrompt(promptId, {
-		deployments,
-		deploymentHistory,
-		updatedBy: userId,
+		return updated ? serializePrompt(updated) : null;
 	});
-
-	return updated ? serializePrompt(updated) : null;
 }
 
 export async function activatePromptDeployment(
@@ -553,48 +540,47 @@ export async function activatePromptDeployment(
 		throw new Error('Invalid environment');
 	}
 
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const prompt = await db.findPromptById(promptId, projectId);
+		if (!prompt) {
+			return null;
+		}
 
-	const prompt = await db.findPromptById(promptId, projectId);
-	if (!prompt) {
-		return null;
-	}
+		const deployments = {
+			...(prompt.deployments ?? {}),
+		} as Partial<Record<PromptEnvironment, PromptDeploymentStateRecord>>;
+		const environmentState = deployments[environment];
 
-	const deployments = {
-		...(prompt.deployments ?? {}),
-	} as Partial<Record<PromptEnvironment, PromptDeploymentStateRecord>>;
-	const environmentState = deployments[environment];
+		if (!environmentState) {
+			throw new Error('Promote a version before activation');
+		}
 
-	if (!environmentState) {
-		throw new Error('Promote a version before activation');
-	}
+		deployments[environment] = {
+			...environmentState,
+			rolloutStatus: 'active',
+			note: note ?? environmentState.note,
+			updatedBy: userId,
+			updatedAt: new Date(),
+		};
 
-	deployments[environment] = {
-		...environmentState,
-		rolloutStatus: 'active',
-		note: note ?? environmentState.note,
-		updatedBy: userId,
-		updatedAt: new Date(),
-	};
+		const deploymentHistory = appendDeploymentEvent(
+			prompt,
+			'activate',
+			environment,
+			environmentState.versionId,
+			environmentState.version,
+			userId,
+			note,
+		);
 
-	const deploymentHistory = appendDeploymentEvent(
-		prompt,
-		'activate',
-		environment,
-		environmentState.versionId,
-		environmentState.version,
-		userId,
-		note,
-	);
+		const updated = await db.updatePrompt(promptId, {
+			deployments,
+			deploymentHistory,
+			updatedBy: userId,
+		});
 
-	const updated = await db.updatePrompt(promptId, {
-		deployments,
-		deploymentHistory,
-		updatedBy: userId,
+		return updated ? serializePrompt(updated) : null;
 	});
-
-	return updated ? serializePrompt(updated) : null;
 }
 
 export async function rollbackPromptDeployment(
@@ -609,63 +595,62 @@ export async function rollbackPromptDeployment(
 		throw new Error('Invalid environment');
 	}
 
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const prompt = await db.findPromptById(promptId, projectId);
+		if (!prompt) {
+			return null;
+		}
 
-	const prompt = await db.findPromptById(promptId, projectId);
-	if (!prompt) {
-		return null;
-	}
+		const deployments = {
+			...(prompt.deployments ?? {}),
+		} as Partial<Record<PromptEnvironment, PromptDeploymentStateRecord>>;
+		const environmentState = deployments[environment];
 
-	const deployments = {
-		...(prompt.deployments ?? {}),
-	} as Partial<Record<PromptEnvironment, PromptDeploymentStateRecord>>;
-	const environmentState = deployments[environment];
+		if (!environmentState?.rollbackVersionId || !environmentState.rollbackVersion) {
+			throw new Error('Rollback target not available for this environment');
+		}
 
-	if (!environmentState?.rollbackVersionId || !environmentState.rollbackVersion) {
-		throw new Error('Rollback target not available for this environment');
-	}
+		const rollbackVersion = await findPromptVersionOrNull(
+			tenantDbName,
+			projectId,
+			promptId,
+			environmentState.rollbackVersionId,
+		);
 
-	const rollbackVersion = await findPromptVersionOrNull(
-		tenantDbName,
-		projectId,
-		promptId,
-		environmentState.rollbackVersionId,
-	);
+		if (!rollbackVersion) {
+			throw new Error('Rollback version not found');
+		}
 
-	if (!rollbackVersion) {
-		throw new Error('Rollback version not found');
-	}
+		deployments[environment] = {
+			...environmentState,
+			versionId: rollbackVersion.id,
+			version: rollbackVersion.version,
+			rolloutStatus: 'active',
+			rollbackVersionId: environmentState.versionId,
+			rollbackVersion: environmentState.version,
+			note: note ?? environmentState.note,
+			updatedBy: userId,
+			updatedAt: new Date(),
+		};
 
-	deployments[environment] = {
-		...environmentState,
-		versionId: rollbackVersion.id,
-		version: rollbackVersion.version,
-		rolloutStatus: 'active',
-		rollbackVersionId: environmentState.versionId,
-		rollbackVersion: environmentState.version,
-		note: note ?? environmentState.note,
-		updatedBy: userId,
-		updatedAt: new Date(),
-	};
+		const deploymentHistory = appendDeploymentEvent(
+			prompt,
+			'rollback',
+			environment,
+			rollbackVersion.id,
+			rollbackVersion.version,
+			userId,
+			note,
+		);
 
-	const deploymentHistory = appendDeploymentEvent(
-		prompt,
-		'rollback',
-		environment,
-		rollbackVersion.id,
-		rollbackVersion.version,
-		userId,
-		note,
-	);
+		const updated = await db.updatePrompt(promptId, {
+			deployments,
+			deploymentHistory,
+			updatedBy: userId,
+		});
 
-	const updated = await db.updatePrompt(promptId, {
-		deployments,
-		deploymentHistory,
-		updatedBy: userId,
+		return updated ? serializePrompt(updated) : null;
 	});
-
-	return updated ? serializePrompt(updated) : null;
 }
 
 export async function comparePromptVersions(
@@ -675,55 +660,54 @@ export async function comparePromptVersions(
 	fromVersionId: string,
 	toVersionId: string,
 ): Promise<PromptCompareView | null> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const prompt = await db.findPromptById(promptId, projectId);
+		if (!prompt) {
+			return null;
+		}
 
-	const prompt = await db.findPromptById(promptId, projectId);
-	if (!prompt) {
-		return null;
-	}
+		const [fromVersionRecord, toVersionRecord] = await Promise.all([
+			db.findPromptVersionById(fromVersionId, promptId, projectId),
+			db.findPromptVersionById(toVersionId, promptId, projectId),
+		]);
 
-	const [fromVersionRecord, toVersionRecord] = await Promise.all([
-		db.findPromptVersionById(fromVersionId, promptId, projectId),
-		db.findPromptVersionById(toVersionId, promptId, projectId),
-	]);
+		if (!fromVersionRecord || !toVersionRecord) {
+			return null;
+		}
 
-	if (!fromVersionRecord || !toVersionRecord) {
-		return null;
-	}
+		const fromVersion = serializeVersion(fromVersionRecord);
+		const toVersion = serializeVersion(toVersionRecord);
 
-	const fromVersion = serializeVersion(fromVersionRecord);
-	const toVersion = serializeVersion(toVersionRecord);
+		const comments = await db.listPromptComments(promptId, { projectId });
+		const relatedComments = comments
+			.filter((comment) => {
+				const versionId = comment.versionId;
+				if (versionId && (versionId === fromVersionId || versionId === toVersionId)) {
+					return true;
+				}
 
-	const comments = await db.listPromptComments(promptId, { projectId });
-	const relatedComments = comments
-		.filter((comment) => {
-			const versionId = comment.versionId;
-			if (versionId && (versionId === fromVersionId || versionId === toVersionId)) {
-				return true;
-			}
+				return comment.version === fromVersion.version || comment.version === toVersion.version;
+			})
+			.map(serializeComment);
 
-			return comment.version === fromVersion.version || comment.version === toVersion.version;
-		})
-		.map(serializeComment);
+		const deploymentHistory = ((prompt.deploymentHistory ?? []) as PromptDeploymentEventRecord[])
+			.filter((event) => event.versionId === fromVersionId || event.versionId === toVersionId)
+			.map(serializeDeploymentEvent)
+			.sort((left, right) => {
+				const leftTs = left.createdAt ? new Date(left.createdAt).getTime() : 0;
+				const rightTs = right.createdAt ? new Date(right.createdAt).getTime() : 0;
+				return rightTs - leftTs;
+			});
 
-	const deploymentHistory = ((prompt.deploymentHistory ?? []) as PromptDeploymentEventRecord[])
-		.filter((event) => event.versionId === fromVersionId || event.versionId === toVersionId)
-		.map(serializeDeploymentEvent)
-		.sort((left, right) => {
-			const leftTs = left.createdAt ? new Date(left.createdAt).getTime() : 0;
-			const rightTs = right.createdAt ? new Date(right.createdAt).getTime() : 0;
-			return rightTs - leftTs;
-		});
-
-	return {
-		fromVersion,
-		toVersion,
-		templateDiff: buildTemplateDiff(fromVersion.template, toVersion.template),
-		metadataDiff: buildMetadataDiff(fromVersion.metadata, toVersion.metadata),
-		deploymentHistory,
-		comments: relatedComments,
-	};
+		return {
+			fromVersion,
+			toVersion,
+			templateDiff: buildTemplateDiff(fromVersion.template, toVersion.template),
+			metadataDiff: buildMetadataDiff(fromVersion.metadata, toVersion.metadata),
+			deploymentHistory,
+			comments: relatedComments,
+		};
+	});
 }
 
 export async function resolvePromptForEnvironment(
@@ -796,21 +780,20 @@ export async function createPromptComment(
 	userName: string,
 	input: CreateCommentInput,
 ): Promise<PromptCommentView> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const comment = await db.createPromptComment({
+			tenantId,
+			projectId,
+			promptId,
+			versionId: input.versionId,
+			version: input.version,
+			content: input.content,
+			createdBy: userId,
+			createdByName: userName,
+		});
 
-	const comment = await db.createPromptComment({
-		tenantId,
-		projectId,
-		promptId,
-		versionId: input.versionId,
-		version: input.version,
-		content: input.content,
-		createdBy: userId,
-		createdByName: userName,
+		return serializeComment(comment);
 	});
-
-	return serializeComment(comment);
 }
 
 export async function listPromptComments(
@@ -819,19 +802,17 @@ export async function listPromptComments(
 	promptId: string,
 	versionId?: string,
 ): Promise<PromptCommentView[]> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
-
-	const comments = await db.listPromptComments(promptId, { versionId, projectId });
-	return comments.map(serializeComment);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		const comments = await db.listPromptComments(promptId, { versionId, projectId });
+		return comments.map(serializeComment);
+	});
 }
 
 export async function deletePromptComment(
 	tenantDbName: string,
 	commentId: string,
 ): Promise<boolean> {
-	const db = await getDatabase();
-	await db.switchToTenant(tenantDbName);
-
-	return db.deletePromptComment(commentId);
+	return runWithTenantScope(tenantDbName, async (db) => {
+		return db.deletePromptComment(commentId);
+	});
 }

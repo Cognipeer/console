@@ -1,4 +1,4 @@
-import { getDatabase, type IAuditLog } from '@/lib/database';
+import { runWithTenantScope, type IAuditLog } from '@/lib/database';
 
 export interface AuditWriteContext {
   tenantDbName: string;
@@ -20,11 +20,11 @@ export async function recordAuditLog(
   context: AuditWriteContext,
   input: AuditLogInput,
 ): Promise<void> {
-  const db = await getDatabase();
-  await db.switchToTenant(context.tenantDbName);
-  await db.createAuditLog({
-    ...input,
-    tenantId: context.tenantId,
+  return runWithTenantScope(context.tenantDbName, async (db) => {
+    await db.createAuditLog({
+      ...input,
+      tenantId: context.tenantId,
+    });
   });
 }
 
@@ -46,18 +46,18 @@ export async function listAuditLogs(
   context: AuditWriteContext,
   filters: AuditLogListFilters = {},
 ): Promise<IAuditLog[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(context.tenantDbName);
-  return db.listAuditLogs(filters);
+  return runWithTenantScope(context.tenantDbName, async (db) => {
+    return db.listAuditLogs(filters);
+  });
 }
 
 export async function countAuditLogs(
   context: AuditWriteContext,
   filters: Omit<AuditLogListFilters, 'limit' | 'skip'> = {},
 ): Promise<number> {
-  const db = await getDatabase();
-  await db.switchToTenant(context.tenantDbName);
-  return db.countAuditLogs(filters);
+  return runWithTenantScope(context.tenantDbName, async (db) => {
+    return db.countAuditLogs(filters);
+  });
 }
 
 export function sanitizeAuditLog(log: IAuditLog): IAuditLog & { id: string } {
