@@ -75,11 +75,20 @@ export async function toIamApiError(res: Response): Promise<IamApiError> {
 
 /** JSON request helper of the IAM center. Resolves `null` for a 204. */
 export async function iamRequest(url: string, init?: RequestInit): Promise<unknown> {
+  let result: unknown;
   try {
-    return (await apiRequest<unknown>(url, init)) ?? null;
+    result = await apiRequest<unknown>(url, init);
   } catch (error) {
     if (error instanceof ApiError) throw iamApiErrorFrom(error.status, error.payload);
     throw error;
+  }
+  // A body not typed as JSON comes back as text: an empty one is "no content", anything else must still parse.
+  if (typeof result !== 'string') return result ?? null;
+  if (result === '') return null;
+  try {
+    return JSON.parse(result);
+  } catch {
+    throw new IamApiError('Invalid JSON in response', 200, 'invalid_response');
   }
 }
 

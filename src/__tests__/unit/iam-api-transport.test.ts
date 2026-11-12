@@ -5,7 +5,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IamApiError, iamApi } from '@/components/iam/api';
-import { iamRequest } from '@/components/iam/principals/client';
+import { IamApiError as PrincipalsApiError, iamRequest } from '@/components/iam/principals/client';
 import { DelegationApiError, delegationApi } from '@/components/iam/tokens/delegationApi';
 import { tokenCallError } from '@/components/iam/tokens/tokenErrors';
 import { ApiError } from '@/lib/api/client';
@@ -40,6 +40,22 @@ describe('the IAM center client', () => {
 
     stubFetch(() => new Response('', { status: 200, headers: { 'Content-Type': 'text/plain' } }));
     await expect(iamApi.deletePolicy('p1')).resolves.toBeUndefined();
+  });
+
+  it('iamRequest: a success that is not JSON is an invalid_response error, an empty one is null, a JSON text still parses', async () => {
+    stubFetch(() => new Response('not json', { status: 200, headers: { 'Content-Type': 'text/plain' } }));
+    const error = await iamRequest('/x').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PrincipalsApiError);
+    expect(error).toMatchObject({ code: 'invalid_response', message: 'Invalid JSON in response' });
+
+    stubFetch(() => new Response('', { status: 200, headers: { 'Content-Type': 'text/plain' } }));
+    await expect(iamRequest('/x')).resolves.toBeNull();
+
+    stubFetch(() => new Response('{"items":[]}', { status: 200, headers: { 'Content-Type': 'text/plain' } }));
+    await expect(iamRequest('/x')).resolves.toEqual({ items: [] });
+
+    stubFetch(() => json({ items: [1] }));
+    await expect(iamRequest('/x')).resolves.toEqual({ items: [1] });
   });
 
   it('keeps the message, the code and the details of a refusal, and falls back to the message field', async () => {
