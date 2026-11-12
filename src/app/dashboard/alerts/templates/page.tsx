@@ -8,7 +8,7 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import LoadError from '@/components/alerts/LoadError';
-import { readApiError } from '@/components/alerts/apiError';
+import { apiErrorMessage } from '@/components/alerts/apiError';
 import {
   createAlertCatalog,
   formatMinutes,
@@ -19,14 +19,13 @@ import {
 } from '@/components/alerts/alertCatalog';
 import type {
   AlertRuleDto,
-  AlertTemplateApplyResultDto,
   AlertTemplateCategoryDto,
   AlertTemplateItemDto,
-  AlertTemplateListDto,
   BacktestResultDto,
 } from '@/components/alerts/alertTypes';
 import { pluralKey } from '@/components/alerts/plural';
 import { useAlertMeta } from '@/components/alerts/useAlertMeta';
+import { useAlertTemplates, useApplyAlertTemplates, useBacktestAlertRule } from '@/lib/api/queries/alerts';
 import { useLocale, useTranslations } from '@/lib/i18n';
 
 type ShowFilter = 'all' | 'default' | 'missing';
@@ -244,51 +243,43 @@ function TemplatesGallery() {
   const { meta } = useAlertMeta();
   const catalog = useMemo(() => createAlertCatalog(meta?.catalog), [meta?.catalog]);
 
-  const [data, setData] = useState<AlertTemplateListDto | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const initialShow = searchParams?.get('show');
   const [show, setShow] = useState<ShowFilter>(initialShow === 'default' || initialShow === 'missing' ? initialShow : 'all');
   const [category, setCategory] = useState<AlertTemplateCategoryDto | 'all'>('all');
   const [moduleFilter, setModuleFilter] = useState('all');
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [adding, setAdding] = useState(false);
   const [backtests, setBacktests] = useState<Record<string, BacktestState>>({});
   const requested = useRef<Set<string>>(new Set());
   const preselect = searchParams?.get('select') === 'default';
 
-  const load = useCallback(async () => {
-    setLoadError(null);
-    try {
-      const res = await fetch('/api/alerts/templates');
-      if (!res.ok) throw new Error(await readApiError(res, t('templates.loadFailed')));
-      const body = (await res.json()) as AlertTemplateListDto;
-      setData(body);
-      if (preselect) {
-        setSelected(new Set(body.items.filter((item) => item.default && selectable(item) && item.state === 'available').map((item) => item.key)));
-      }
-    } catch (error) {
-      setLoadError(error instanceof Error ? error.message : t('templates.loadFailed'));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const templatesRequest = useAlertTemplates();
+  const data = templatesRequest.data ?? null;
+  // A retry shows the loader again (the error stays in the query until the new answer lands).
+  const loadError = templatesRequest.isError && !templatesRequest.isFetching ? apiErrorMessage(templatesRequest.error, t('templates.loadFailed')) : null;
+  const { refetch: refetchTemplates } = templatesRequest;
+  const load = useCallback(() => void refetchTemplates(), [refetchTemplates]);
 
+  // Each answer of the list (the first, a retry) pre-selects the default templates that are still available.
+  const answeredAt = templatesRequest.dataUpdatedAt;
+  useEffect(() => {
+    if (!preselect || !answeredAt) return;
+    const body = templatesRequest.data;
+    if (!body) return;
+    setSelected(new Set(body.items.filter((item) => item.default && selectable(item) && item.state === 'available').map((item) => item.key)));
+    // `answeredAt` is the signal; `templatesRequest.data` is what it stands for
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [answeredAt, preselect]);
+
+  const { mutateAsync: runBacktestRequest } = useBacktestAlertRule();
   const runBacktest = useCallback((item: AlertTemplateItemDto) => {
     if (requested.current.has(item.key)) return;
     requested.current.add(item.key);
     setBacktests((current) => ({ ...current, [item.key]: { status: 'loading' } }));
-    fetch('/api/alerts/rules/backtest', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rule: item.input, days: 7 }),
-    })
-      .then((res) => (res.ok ? (res.json() as Promise<BacktestResultDto>) : Promise.reject(new Error('backtest'))))
+    runBacktestRequest({ rule: item.input, days: 7 })
       .then((result) => setBacktests((current) => ({ ...current, [item.key]: { status: 'done', result } })))
       .catch(() => setBacktests((current) => ({ ...current, [item.key]: { status: 'failed' } })));
-  }, []);
+  }, [runBacktestRequest]);
 
   const items = useMemo(() => data?.items ?? [], [data]);
   const modules = useMemo(() => Array.from(new Set(items.map((item) => item.module))), [items]);
@@ -318,17 +309,13 @@ function TemplatesGallery() {
       return next;
     });
 
+  const apply = useApplyAlertTemplates();
+  // After a save the page navigates away: the button stays busy until then.
+  const adding = apply.isPending || apply.isSuccess;
   const add = async () => {
     if (selected.size === 0) return;
-    setAdding(true);
     try {
-      const res = await fetch('/api/alerts/templates', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keys: Array.from(selected) }),
-      });
-      if (!res.ok) throw new Error(await readApiError(res, t('templates.addFailed')));
-      const result = (await res.json()) as AlertTemplateApplyResultDto;
+      const result = await apply.mutateAsync(Array.from(selected));
       notifications.show({
         title: t('templates.added'),
         message: t(pluralKey('templates.addedMessage', result.created.length), { count: result.created.length }),
@@ -338,10 +325,9 @@ function TemplatesGallery() {
     } catch (error) {
       notifications.show({
         title: t('error'),
-        message: error instanceof Error ? error.message : t('templates.addFailed'),
+        message: apiErrorMessage(error, t('templates.addFailed')),
         color: 'red',
       });
-      setAdding(false);
     }
   };
 
@@ -362,7 +348,7 @@ function TemplatesGallery() {
       />
 
       {loadError ? (
-        <LoadError message={loadError} onRetry={() => void load()} />
+        <LoadError message={loadError} onRetry={load} />
       ) : !data ? (
         <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
           <Loader size="sm" />

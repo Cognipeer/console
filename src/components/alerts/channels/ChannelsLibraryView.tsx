@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Badge, Button, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconBroadcast, IconEdit, IconPlus, IconSend, IconTrash } from '@tabler/icons-react';
@@ -9,9 +9,11 @@ import { useDeleteResource } from '@/components/common/confirm';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { formatRelative } from '@/components/iam/timeFormat';
+import { isApiError } from '@/lib/api/client';
+import { useAuthMe, useDeleteLibraryChannel, useTestChannel } from '@/lib/api/queries/alerts';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import type { LibraryChannelDto } from '../alertTypes';
-import { readApiError } from '../apiError';
+import { apiErrorMessage } from '../apiError';
 import LoadError from '../LoadError';
 import { pluralKey } from '../plural';
 import LibraryChannelForm from './LibraryChannelForm';
@@ -26,25 +28,16 @@ export default function ChannelsLibraryView() {
   const locale = useLocale();
   const deleteResource = useDeleteResource();
   const library = useChannelLibrary({ fallbackError: t('libraryUx.loadError') });
-  const [canManage, setCanManage] = useState(false);
   const [search, setSearch] = useState('');
   const [formOpened, setFormOpened] = useState(false);
   const [editing, setEditing] = useState<LibraryChannelDto | null>(null);
-  const [testing, setTesting] = useState<string | null>(null);
+  const testChannel = useTestChannel();
+  const deleteChannel = useDeleteLibraryChannel();
+  const testing = testChannel.isPending ? testChannel.variables?.id ?? null : null;
 
   // The server enforces the role; the UI only hides what would be refused.
-  useEffect(() => {
-    let cancelled = false;
-    void fetch('/api/auth/me')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((me: { role?: string } | null) => {
-        if (!cancelled) setCanManage(MANAGER_ROLES.has(me?.role ?? ''));
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const me = useAuthMe();
+  const canManage = MANAGER_ROLES.has(me.data?.role ?? '');
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -62,20 +55,15 @@ export default function ChannelsLibraryView() {
   };
 
   const sendTest = async (entry: LibraryChannelDto) => {
-    setTesting(entry.id);
     try {
-      const res = await fetch(`/api/alerts/channels/library/${entry.id}/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      const data = (await res.json().catch(() => null)) as { result?: { success?: boolean; error?: string }; message?: string; error?: string } | null;
-      if (!res.ok || !data?.result) throw new Error(data?.message ?? data?.error ?? t('channels.testNoDetail'));
+      const result = await testChannel.mutateAsync({ id: entry.id });
       notifications.show(
-        data.result.success
+        result.success
           ? { title: t('libraryUx.testSent'), message: t('channels.testOk'), color: 'teal' }
-          : { title: t('error'), message: t('channels.testFailed', { error: data.result.error || t('channels.testNoDetail') }), color: 'red' },
+          : { title: t('error'), message: t('channels.testFailed', { error: result.error || t('channels.testNoDetail') }), color: 'red' },
       );
     } catch (error) {
-      notifications.show({ title: t('error'), message: error instanceof Error ? error.message : t('channels.testNoDetail'), color: 'red' });
-    } finally {
-      setTesting(null);
+      notifications.show({ title: t('error'), message: apiErrorMessage(error, t('channels.testNoDetail')), color: 'red' });
     }
   };
 
@@ -89,19 +77,19 @@ export default function ChannelsLibraryView() {
       noun: t('libraryUx.noun'),
       name: entry.name,
       action: async () => {
-        const res = await fetch(`/api/alerts/channels/library/${entry.id}`, { method: 'DELETE' });
-        if (!res.ok) {
-          const data = (await res.json().catch(() => null)) as { code?: string; rules?: Array<{ name: string }> } | null;
-          if (data?.code === 'channel_in_use') {
-            throw new Error(t('libraryUx.inUse', { rules: (data.rules ?? []).map((rule) => rule.name).slice(0, 5).join(', ') }));
+        try {
+          await deleteChannel.mutateAsync(entry.id);
+        } catch (error) {
+          if (isApiError(error) && error.code === 'channel_in_use') {
+            const rules = (error.payload as { rules?: Array<{ name: string }> } | undefined)?.rules ?? [];
+            throw new Error(t('libraryUx.inUse', { rules: rules.map((rule) => rule.name).slice(0, 5).join(', ') }));
           }
-          throw new Error(await readApiError(res, t('libraryUx.deleteFailed')));
+          throw new Error(apiErrorMessage(error, t('libraryUx.deleteFailed')));
         }
       },
     });
     if (!done) return;
     notifications.show({ title: t('libraryUx.deleted'), message: t('libraryUx.deletedMessage', { name: entry.name }), color: 'teal' });
-    library.reload();
   };
 
   const columns: DataGridColumn<LibraryChannelDto>[] = [
@@ -212,7 +200,7 @@ export default function ChannelsLibraryView() {
           footerLeft={canManage ? undefined : t('libraryUx.readOnlyNote')}
         />
       )}
-      <LibraryChannelForm opened={formOpened} onClose={() => setFormOpened(false)} onSaved={library.reload} entry={editing} />
+      <LibraryChannelForm opened={formOpened} onClose={() => setFormOpened(false)} entry={editing} />
     </PageContainer>
   );
 }

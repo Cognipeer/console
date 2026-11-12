@@ -4,16 +4,17 @@ import { useState } from 'react';
 import { Button, Menu, Modal, Text, TextInput } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconBellOff, IconBellRinging, IconChevronDown } from '@tabler/icons-react';
+import { useMuteAlertRule } from '@/lib/api/queries/alerts';
 import { useTranslations } from '@/lib/i18n';
 import type { AlertRuleDto } from '../alertTypes';
-import { readApiError } from '../apiError';
+import { apiErrorMessage } from '../apiError';
 import { MUTE_PRESETS, muteUntilForPreset, validateMuteUntil, type MutePresetId } from './ruleListUi';
 
 export interface MuteMenuProps {
   rule: Pick<AlertRuleDto, '_id' | 'name'>;
   muted: boolean;
-  /** The server's answer (`rule` of `POST /alerts/rules/:id/mute`). */
-  onChanged: (rule: AlertRuleDto) => void;
+  /** The server's answer (`rule` of `POST /alerts/rules/:id/mute`); the rule lists reload on their own. */
+  onChanged?: (rule: AlertRuleDto) => void;
   disabled?: boolean;
 }
 
@@ -30,22 +31,16 @@ function toLocalInput(time: number): string {
  */
 export default function MuteMenu({ rule, muted, onChanged, disabled }: MuteMenuProps) {
   const t = useTranslations('alerts');
-  const [busy, setBusy] = useState(false);
+  const mute = useMuteAlertRule();
+  const busy = mute.isPending;
   const [customOpen, setCustomOpen] = useState(false);
   const [customValue, setCustomValue] = useState('');
   const [reason, setReason] = useState('');
 
   const send = async (until: string | null, why?: string) => {
-    setBusy(true);
     try {
-      const res = await fetch(`/api/alerts/rules/${rule._id}/mute`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ until, ...(why?.trim() ? { reason: why.trim() } : {}) }),
-      });
-      if (!res.ok) throw new Error(await readApiError(res, t('rulesUx.muteError')));
-      const data = (await res.json()) as { rule?: AlertRuleDto };
-      if (data.rule) onChanged(data.rule);
+      const updated = await mute.mutateAsync({ id: rule._id, until, reason: why });
+      if (updated) onChanged?.(updated);
       notifications.show({
         title: t(until ? 'rulesUx.muted' : 'rulesUx.unmuted'),
         message: t(until ? 'rulesUx.mutedMessage' : 'rulesUx.unmutedMessage', { name: rule.name }),
@@ -54,9 +49,7 @@ export default function MuteMenu({ rule, muted, onChanged, disabled }: MuteMenuP
       setCustomOpen(false);
       setReason('');
     } catch (error) {
-      notifications.show({ title: t('error'), message: error instanceof Error ? error.message : t('rulesUx.muteError'), color: 'red' });
-    } finally {
-      setBusy(false);
+      notifications.show({ title: t('error'), message: apiErrorMessage(error, t('rulesUx.muteError')), color: 'red' });
     }
   };
 

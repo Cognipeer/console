@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Group, TagsInput, Text } from '@mantine/core';
 import { useDebouncedValue } from '@mantine/hooks';
+import { useAlertEntities, type EntitySuggestion } from '@/lib/api/queries/alerts';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import { entityTypeLabel } from './alertCatalog';
 import type { EntityMetricType } from './alertTypes';
@@ -11,11 +12,7 @@ import { pluralKey } from './plural';
 const MAX_KEYS = 50;
 const MAX_KEY_LENGTH = 200;
 
-interface EntitySuggestion {
-  key: string;
-  requests: number;
-  lastSeenMs: number;
-}
+const NO_SUGGESTIONS: EntitySuggestion[] = [];
 
 export interface EntityPickerProps {
   entityType: EntityMetricType;
@@ -36,32 +33,10 @@ export default function EntityPicker({ entityType, value, onChange, disabled, er
   const locale = useLocale();
   const [search, setSearch] = useState('');
   const [debounced] = useDebouncedValue(search, 250);
-  const [suggestions, setSuggestions] = useState<EntitySuggestion[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    const params = new URLSearchParams({ entityType, limit: '50' });
-    if (debounced.trim()) params.set('q', debounced.trim());
-    fetch(`/api/alerts/entities?${params.toString()}`, { signal: controller.signal })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(String(res.status));
-        const data = (await res.json()) as { entities?: EntitySuggestion[] };
-        setSuggestions(Array.isArray(data.entities) ? data.entities : []);
-        setFailed(false);
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-        setSuggestions([]);
-        setFailed(true);
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, [entityType, debounced]);
+  const query = useAlertEntities(entityType, debounced);
+  const suggestions = query.data ?? NO_SUGGESTIONS;
+  const loading = query.isFetching;
+  const failed = query.isError;
 
   const requestsByKey = useMemo(() => new Map(suggestions.map((entry) => [entry.key, entry.requests])), [suggestions]);
   const data = useMemo(() => suggestions.map((entry) => entry.key), [suggestions]);

@@ -5,8 +5,9 @@ import { Alert, Button, Group, Menu, Modal, Stack, Text, Textarea } from '@manti
 import { notifications } from '@mantine/notifications';
 import { IconBellOff, IconBellRinging, IconChevronDown, IconVolume } from '@tabler/icons-react';
 import { formatDateTime } from '@/components/iam/timeFormat';
+import { useMuteAlertRule } from '@/lib/api/queries/alerts';
 import { useLocale, useTranslations } from '@/lib/i18n';
-import { readApiError } from '../apiError';
+import { apiErrorMessage } from '../apiError';
 import type { AlertRuleDto } from '../alertTypes';
 import { MUTE_PRESETS, checkUntil, mutePresetUntil, parseLocalDateTime, toLocalDateTimeValue } from '../inbox/inboxModel';
 
@@ -29,7 +30,8 @@ function isMuted(rule: AlertRuleDto | null): boolean {
 export default function MuteRuleMenu({ ruleId, rule, onChanged }: MuteRuleMenuProps) {
   const t = useTranslations('incidents');
   const locale = useLocale();
-  const [busy, setBusy] = useState(false);
+  const mute = useMuteAlertRule();
+  const busy = mute.isPending;
   const [dialog, setDialog] = useState(false);
   const [custom, setCustom] = useState('');
   const [reason, setReason] = useState('');
@@ -38,16 +40,9 @@ export default function MuteRuleMenu({ ruleId, rule, onChanged }: MuteRuleMenuPr
   const check = custom ? checkUntil(parsed) : 'invalid';
 
   const submit = async (until: Date | null, why?: string) => {
-    setBusy(true);
     try {
-      const res = await fetch(`/api/alerts/rules/${encodeURIComponent(ruleId)}/mute`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ until: until ? until.toISOString() : null, ...(why?.trim() ? { reason: why.trim() } : {}) }),
-      });
-      if (!res.ok) throw new Error(await readApiError(res, t('ux.mute.failed')));
-      const data = (await res.json()) as { rule: AlertRuleDto };
-      onChanged(data.rule);
+      const updated = await mute.mutateAsync({ id: ruleId, until: until ? until.toISOString() : null, reason: why });
+      if (updated) onChanged(updated);
       setDialog(false);
       setCustom('');
       setReason('');
@@ -57,9 +52,7 @@ export default function MuteRuleMenu({ ruleId, rule, onChanged }: MuteRuleMenuPr
         message: until ? t('ux.mute.done', { time: formatDateTime(until.toISOString(), locale) }) : t('ux.mute.undone'),
       });
     } catch (error) {
-      notifications.show({ color: 'red', title: t('error'), message: error instanceof Error ? error.message : t('ux.mute.failed') });
-    } finally {
-      setBusy(false);
+      notifications.show({ color: 'red', title: t('error'), message: apiErrorMessage(error, t('ux.mute.failed')) });
     }
   };
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { Badge, Button, Group, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
@@ -9,12 +9,13 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { formatDateTime, formatRelative } from '@/components/iam/timeFormat';
 import LoadError from '@/components/alerts/LoadError';
-import { isAbortError, readApiError } from '@/components/alerts/apiError';
+import { apiErrorMessage } from '@/components/alerts/apiError';
 import { entityHref, entityOf, entityTypeLabel, metricLabel } from '@/components/alerts/alertCatalog';
 import { useAlertMeta } from '@/components/alerts/useAlertMeta';
 import { userLabel, useUserDirectory } from '@/components/alerts/useUserDirectory';
 import { describeRowValue } from '@/components/alerts/incidentUi';
 import type { AlertEventDto } from '@/components/alerts/alertTypes';
+import { useAcknowledgeAlertEvent, useAlertHistory } from '@/lib/api/queries/alerts';
 import { useLocale, useTranslations } from '@/lib/i18n';
 
 const PAGE_SIZE_OPTIONS = [25, 50];
@@ -32,65 +33,36 @@ export default function AlertHistoryPage() {
   const { catalog } = useAlertMeta();
   const directory = useUserDirectory();
 
-  const [events, setEvents] = useState<AlertEventDto[]>([]);
-  const [activeCount, setActiveCount] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState('');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]!);
 
-  const controllerRef = useRef<AbortController | null>(null);
-  const load = useCallback(
-    async (silent = false) => {
-      controllerRef.current?.abort();
-      const controller = new AbortController();
-      controllerRef.current = controller;
-      if (silent) setRefreshing(true);
-      else setLoading(true);
-      try {
-        const params = new URLSearchParams();
-        if (statusFilter) params.set('status', statusFilter);
-        // One extra row tells whether another page exists.
-        params.set('limit', String(pageSize + 1));
-        params.set('skip', String((page - 1) * pageSize));
-        const res = await fetch(`/api/alerts/history?${params.toString()}`, { signal: controller.signal });
-        if (!res.ok) throw new Error(await readApiError(res, t('loadHistoryError')));
-        const data = (await res.json()) as { events?: AlertEventDto[]; activeCount?: number };
-        const rows = data.events ?? [];
-        setHasMore(rows.length > pageSize);
-        setEvents(rows.slice(0, pageSize));
-        setActiveCount(data.activeCount ?? 0);
-        setLoadError(null);
-      } catch (error) {
-        if (isAbortError(error) || controller.signal.aborted) return;
-        setLoadError(error instanceof Error ? error.message : t('loadHistoryError'));
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-          setRefreshing(false);
-        }
-      }
-    },
-    [statusFilter, page, pageSize, t],
-  );
+  const historyQuery = useMemo(() => {
+    const params = new URLSearchParams();
+    if (statusFilter) params.set('status', statusFilter);
+    // One extra row tells whether another page exists.
+    params.set('limit', String(pageSize + 1));
+    params.set('skip', String((page - 1) * pageSize));
+    return params.toString();
+  }, [statusFilter, page, pageSize]);
+  const history = useAlertHistory(historyQuery);
+  const rawRows = history.data?.events ?? [];
+  const events = rawRows.slice(0, pageSize);
+  const hasMore = rawRows.length > pageSize;
+  const activeCount = history.data?.activeCount ?? 0;
+  // A new filter or page shows the loading state over the rows it replaces; a reload of the same page refreshes in place.
+  const loading = history.isPending || history.isPlaceholderData;
+  const refreshing = history.isFetching && !loading;
+  const loadError = history.isError ? apiErrorMessage(history.error, t('loadHistoryError')) : null;
 
-  useEffect(() => {
-    void load();
-    return () => controllerRef.current?.abort();
-  }, [load]);
-
+  const acknowledgeEvent = useAcknowledgeAlertEvent();
   const acknowledge = async (event: AlertEventDto) => {
     try {
-      const res = await fetch(`/api/alerts/history/${event._id}/acknowledge`, { method: 'PATCH' });
-      if (!res.ok) throw new Error(await readApiError(res, t('acknowledgeError')));
+      await acknowledgeEvent.mutateAsync(event._id);
       notifications.show({ title: t('acknowledged'), message: t('acknowledgedMessage'), color: 'teal' });
-      void load(true);
     } catch (error) {
-      notifications.show({ title: t('error'), message: error instanceof Error ? error.message : t('acknowledgeError'), color: 'red' });
+      notifications.show({ title: t('error'), message: apiErrorMessage(error, t('acknowledgeError')), color: 'red' });
     }
   };
 
@@ -242,7 +214,7 @@ export default function AlertHistoryPage() {
 
       {loadError ? (
         <div style={{ marginBottom: 12 }}>
-          <LoadError message={loadError} onRetry={() => void load(events.length > 0)} />
+          <LoadError message={loadError} onRetry={() => void history.refetch()} />
         </div>
       ) : null}
 
@@ -252,7 +224,7 @@ export default function AlertHistoryPage() {
         columns={columns}
         loading={loading}
         refreshing={refreshing}
-        onRefresh={() => void load(true)}
+        onRefresh={() => void history.refetch()}
         search={{ value: search, onChange: setSearch, placeholder: t('searchHistoryPlaceholder') }}
         filters={[
           {

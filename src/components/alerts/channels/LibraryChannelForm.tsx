@@ -5,9 +5,10 @@ import { Select, Text, TextInput } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconBroadcast } from '@tabler/icons-react';
 import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
+import { useSaveLibraryChannel, useTestChannel } from '@/lib/api/queries/alerts';
 import { useTranslations } from '@/lib/i18n';
 import { ALL_CHANNEL_TYPES, type AlertChannelType, type ChannelTestResult, type LibraryChannelDto } from '../alertTypes';
-import { readApiError } from '../apiError';
+import { apiErrorMessage } from '../apiError';
 import { buildChannelTestBody, channelEditsSecrets, isStoredChannel, type ChannelItem } from '../channelItems';
 import ChannelsEditor from '../ChannelsEditor';
 import { pluralKey } from '../plural';
@@ -25,7 +26,8 @@ import {
 export interface LibraryChannelFormProps {
   opened: boolean;
   onClose: () => void;
-  onSaved: () => void;
+  /** The library reloads on its own after a save; this is for a caller that wants to know. */
+  onSaved?: () => void;
   /** The entry being edited; absent = create. */
   entry?: LibraryChannelDto | null;
 }
@@ -35,7 +37,9 @@ export default function LibraryChannelForm({ opened, onClose, onSaved, entry }: 
   const t = useTranslations('alerts');
   const isEdit = Boolean(entry);
   const [values, setValues] = useState<LibraryFormValues>(() => (entry ? libraryFormFromEntry(entry) : emptyLibraryForm()));
-  const [saving, setSaving] = useState(false);
+  const save = useSaveLibraryChannel();
+  const saving = save.isPending;
+  const testChannel = useTestChannel();
 
   // Re-seed whenever the form opens (or switches entry), from the entry handed in at that moment.
   const entryRef = useRef(entry);
@@ -65,14 +69,11 @@ export default function LibraryChannelForm({ opened, onClose, onSaved, entry }: 
     isStoredChannel(channel) && !channelEditsSecrets(channel) ? Boolean(entry) : buildChannelTestBody(channel, null) !== null;
   const onTest = async (channel: ChannelItem): Promise<ChannelTestResult> => {
     const byReference = isStoredChannel(channel) && !channelEditsSecrets(channel) && entry;
-    const res = await fetch(byReference ? `/api/alerts/channels/library/${entry.id}/test` : '/api/alerts/channels/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: byReference ? '{}' : JSON.stringify(buildChannelTestBody(channel, null)),
-    });
-    const data = (await res.json().catch(() => null)) as { result?: ChannelTestResult; message?: string; error?: string } | null;
-    if (!res.ok || !data?.result) throw new Error(data?.message ?? data?.error ?? t('channels.testNoDetail'));
-    return data.result;
+    try {
+      return await testChannel.mutateAsync(byReference ? { id: entry.id } : { body: buildChannelTestBody(channel, null) });
+    } catch (error) {
+      throw new Error(apiErrorMessage(error, t('channels.testNoDetail')));
+    }
   };
 
   const issueText = (): string | undefined => {
@@ -84,25 +85,17 @@ export default function LibraryChannelForm({ opened, onClose, onSaved, entry }: 
 
   const submit = async () => {
     if (issue) return;
-    setSaving(true);
     try {
-      const res = await fetch(entry ? `/api/alerts/channels/library/${entry.id}` : '/api/alerts/channels/library', {
-        method: entry ? 'PATCH' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(entry ? buildUpdateLibraryBody(values, entry) : buildCreateLibraryBody(values)),
-      });
-      if (!res.ok) throw new Error(await readApiError(res, t('libraryUx.saveFailed')));
+      await save.mutateAsync({ id: entry?.id, body: entry ? buildUpdateLibraryBody(values, entry) : buildCreateLibraryBody(values) });
       notifications.show({
         title: t(isEdit ? 'libraryUx.updated' : 'libraryUx.created'),
         message: t(isEdit ? 'libraryUx.updatedMessage' : 'libraryUx.createdMessage', { name: values.name.trim() }),
         color: 'teal',
       });
-      onSaved();
+      onSaved?.();
       onClose();
     } catch (error) {
-      notifications.show({ title: t('error'), message: error instanceof Error ? error.message : t('libraryUx.saveFailed'), color: 'red' });
-    } finally {
-      setSaving(false);
+      notifications.show({ title: t('error'), message: apiErrorMessage(error, t('libraryUx.saveFailed')), color: 'red' });
     }
   };
 

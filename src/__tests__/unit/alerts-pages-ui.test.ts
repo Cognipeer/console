@@ -11,7 +11,6 @@ import {
   installApiMock,
   installDomStubs,
   jsonResponse,
-  mount,
   q,
   qa,
   setInput,
@@ -20,6 +19,10 @@ import {
   type ApiMock,
   type Mounted,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
+
+/** `mount`, inside a query client (the screens read through React Query). */
+const mount = (element: Parameters<typeof renderWithQuery>[0], locale = 'en') => renderWithQuery(element, { locale });
 
 const nav = vi.hoisted(() => ({ search: '' }));
 const replace = vi.hoisted(() => vi.fn());

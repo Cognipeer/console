@@ -30,7 +30,7 @@ import { useDeleteResource } from '@/components/common/confirm';
 import { formatDateTime, formatRelative } from '@/components/iam/timeFormat';
 import AlertRuleForm from '@/components/alerts/AlertRuleForm';
 import LoadError from '@/components/alerts/LoadError';
-import { isAbortError, readApiError } from '@/components/alerts/apiError';
+import { apiErrorMessage } from '@/components/alerts/apiError';
 import {
   authorableModules,
   conditionMode,
@@ -44,15 +44,7 @@ import {
   summarizeCondition,
   summarizeTarget,
 } from '@/components/alerts/alertCatalog';
-import type {
-  AlertMeta,
-  AlertTemplateListDto,
-  AlertRuleDto,
-  RuleDerivedDto,
-  RuleKpisDto,
-  RuleStatsDto,
-  StateCounts,
-} from '@/components/alerts/alertTypes';
+import type { AlertRuleDto } from '@/components/alerts/alertTypes';
 import MuteMenu from '@/components/alerts/rules/MuteMenu';
 import {
   DEFAULT_RULE_FILTERS,
@@ -68,9 +60,15 @@ import {
   type RuleStatusFilter,
 } from '@/components/alerts/rules/ruleListUi';
 import { useUserDirectory } from '@/components/alerts/useUserDirectory';
-import { primeAlertMeta } from '@/components/alerts/useAlertMeta';
 import { duplicateRuleSeed, prefillFromParams } from '@/components/alerts/ruleForm';
 import { pluralKey } from '@/components/alerts/plural';
+import {
+  useAlertRules,
+  useAlertTemplates,
+  useDeleteAlertRule,
+  usePrimeAlertMeta,
+  useToggleAlertRule,
+} from '@/lib/api/queries/alerts';
 import { useLocale, useTranslations } from '@/lib/i18n';
 
 const PAGE_SIZE = 25;
@@ -85,18 +83,6 @@ export default function AlertsPage() {
   const searchParams = useSearchParams();
   const deleteResource = useDeleteResource();
 
-  const [rules, setRules] = useState<AlertRuleDto[]>([]);
-  const [meta, setMeta] = useState<AlertMeta | null>(null);
-  const [states, setStates] = useState<Record<string, StateCounts>>({});
-  const [derived, setDerived] = useState<Record<string, RuleDerivedDto>>({});
-  const [stats, setStats] = useState<Record<string, RuleStatsDto>>({});
-  const [statsCapped, setStatsCapped] = useState(false);
-  const [kpis, setKpis] = useState<RuleKpisDto | null>(null);
-  const [matching, setMatching] = useState<number | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
   // Status, owner, search and sort are applied by the server; only the module filter works on the loaded list.
   const [filters, setFilters] = useState<RuleListFilters>(DEFAULT_RULE_FILTERS);
   const [searchInput, setSearchInput] = useState('');
@@ -108,24 +94,12 @@ export default function AlertsPage() {
   const [editingRule, setEditingRule] = useState<AlertRuleDto | null>(null);
   const [prefill, setPrefill] = useState<Record<string, unknown> | undefined>();
 
-  const catalog = useMemo(() => createAlertCatalog(meta?.catalog), [meta?.catalog]);
 
   // Rule templates: the default-set banner and the "Customize…" deep link read the template list.
-  const [templateList, setTemplateList] = useState<AlertTemplateListDto | null>(null);
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const templateParam = searchParams?.get('template') ?? null;
-  useEffect(() => {
-    let cancelled = false;
-    fetch('/api/alerts/templates')
-      .then((res) => (res.ok ? (res.json() as Promise<AlertTemplateListDto>) : null))
-      .then((data) => {
-        if (!cancelled && data) setTemplateList(data);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [rules.length]);
+  const templatesQuery = useAlertTemplates();
+  const templateList = templatesQuery.data ?? null;
   const bannerStorageKey = templateList ? `alerts.defaultBanner.dismissed.${templateList.projectId}` : null;
   useEffect(() => {
     if (!bannerStorageKey) return;
@@ -148,58 +122,37 @@ export default function AlertsPage() {
   const missingDefaults = defaultTemplates.filter((item) => item.state === 'available').length;
 
   // ── Load ───────────────────────────────────────────────────────────────
-  const controllerRef = useRef<AbortController | null>(null);
-  const loadedOnce = useRef(false);
   const rulesQuery = useMemo(() => buildRulesQuery(filters), [filters]);
-  const load = useCallback(
-    async (silent = false) => {
-      controllerRef.current?.abort();
-      const controller = new AbortController();
-      controllerRef.current = controller;
-      if (silent) setRefreshing(true);
-      else setLoading(true);
-      try {
-        const res = await fetch(`/api/alerts/rules?${rulesQuery}`, { signal: controller.signal });
-        if (!res.ok) throw new Error(await readApiError(res, t('loadRulesError')));
-        const data = (await res.json()) as {
-          rules?: AlertRuleDto[];
-          meta?: AlertMeta;
-          states?: Record<string, StateCounts>;
-          derived?: Record<string, RuleDerivedDto>;
-          stats?: Record<string, RuleStatsDto>;
-          statsCapped?: boolean;
-          kpis?: RuleKpisDto;
-          total?: number;
-        };
-        setRules(data.rules ?? []);
-        setDerived(data.derived ?? {});
-        setStats(data.stats ?? {});
-        setStatsCapped(Boolean(data.statsCapped));
-        setKpis(data.kpis ?? null);
-        setMatching(typeof data.total === 'number' ? data.total : null);
-        loadedOnce.current = true;
-        setMeta(data.meta ?? null);
-        primeAlertMeta(data.meta);
-        setStates(data.states ?? {});
-        setLoadError(null);
-      } catch (error) {
-        if (isAbortError(error) || controller.signal.aborted) return;
-        setLoadError(error instanceof Error ? error.message : t('loadRulesError'));
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-          setRefreshing(false);
-        }
-      }
-    },
-    [t, rulesQuery],
-  );
-
+  const rulesRequest = useAlertRules(rulesQuery);
+  const data = rulesRequest.data;
+  const rules = useMemo(() => data?.rules ?? [], [data]);
+  const meta = data?.meta ?? null;
+  const states = useMemo(() => data?.states ?? {}, [data]);
+  const derived = useMemo(() => data?.derived ?? {}, [data]);
+  const stats = useMemo(() => data?.stats ?? {}, [data]);
+  const statsCapped = Boolean(data?.statsCapped);
+  const kpis = data?.kpis ?? null;
+  const matching = typeof data?.total === 'number' ? data.total : null;
   // The first load shows the skeleton; a changed filter or sort refreshes in place.
+  const loading = rulesRequest.isPending;
+  const refreshing = rulesRequest.isFetching && !loading;
+  const loadError = rulesRequest.isError ? apiErrorMessage(rulesRequest.error, t('loadRulesError')) : null;
+  const { refetch: refetchRules } = rulesRequest;
+  const reload = useCallback(() => void refetchRules(), [refetchRules]);
+  const catalog = useMemo(() => createAlertCatalog(meta?.catalog), [meta?.catalog]);
+
+  // The other alert screens reuse the server's meta instead of asking for it again.
+  const primeAlertMeta = usePrimeAlertMeta();
+  useEffect(() => primeAlertMeta(meta), [meta, primeAlertMeta]);
+
+  // The template list says which templates already became rules: it is read again when the rule count changes.
+  const reloadTemplates = templatesQuery.refetch;
+  const ruleCount = useRef<number | null>(null);
   useEffect(() => {
-    void load(loadedOnce.current);
-    return () => controllerRef.current?.abort();
-  }, [load]);
+    if (!data) return;
+    if (ruleCount.current !== null && ruleCount.current !== rules.length) void reloadTemplates();
+    ruleCount.current = rules.length;
+  }, [data, rules.length, reloadTemplates]);
 
   // The search box commits to the server query after a pause, not on every keystroke.
   useEffect(() => {
@@ -260,21 +213,16 @@ export default function AlertsPage() {
   }, [editParam, loading, rules]);
 
   // ── Actions ────────────────────────────────────────────────────────────
+  const toggleRule = useToggleAlertRule();
   const handleToggle = async (rule: AlertRuleDto, enabled: boolean) => {
-    setRules((prev) => prev.map((entry) => (entry._id === rule._id ? { ...entry, enabled } : entry)));
     try {
-      const res = await fetch(`/api/alerts/rules/${rule._id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled }),
-      });
-      if (!res.ok) throw new Error(await readApiError(res, t('toggleError')));
+      await toggleRule.mutateAsync({ id: rule._id, enabled });
     } catch (error) {
-      setRules((prev) => prev.map((entry) => (entry._id === rule._id ? { ...entry, enabled: !enabled } : entry)));
-      notifications.show({ title: t('error'), message: error instanceof Error ? error.message : t('toggleError'), color: 'red' });
+      notifications.show({ title: t('error'), message: apiErrorMessage(error, t('toggleError')), color: 'red' });
     }
   };
 
+  const removeRule = useDeleteAlertRule();
   const handleDelete = async (rule: AlertRuleDto) => {
     const done = await deleteResource({
       noun: tq('nouns.alertRule'),
@@ -282,12 +230,14 @@ export default function AlertsPage() {
       type: 'alert-rule',
       id: rule._id,
       action: async () => {
-        const res = await fetch(`/api/alerts/rules/${rule._id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error(await readApiError(res, t('deleteError')));
+        try {
+          await removeRule.mutateAsync(rule._id);
+        } catch (error) {
+          throw new Error(apiErrorMessage(error, t('deleteError')));
+        }
       },
     });
     if (!done) return;
-    setRules((prev) => prev.filter((entry) => entry._id !== rule._id));
     notifications.show({ title: t('ruleDeleted'), message: t('ruleDeletedMessage'), color: 'teal' });
   };
 
@@ -526,7 +476,7 @@ export default function AlertsPage() {
       label: t('rulesUx.muteColumn'),
       align: 'center',
       render: (rule) => (
-        <MuteMenu rule={rule} muted={isMuted(rule, derived[rule._id])} onChanged={() => void load(true)} disabled={!rule.enabled && !isMuted(rule, derived[rule._id])} />
+        <MuteMenu rule={rule} muted={isMuted(rule, derived[rule._id])} disabled={!rule.enabled && !isMuted(rule, derived[rule._id])} />
       ),
     },
     {
@@ -593,7 +543,7 @@ export default function AlertsPage() {
       />
 
       {loadError && rules.length === 0 ? (
-        <LoadError message={loadError} onRetry={() => void load()} />
+        <LoadError message={loadError} onRetry={reload} />
       ) : (
         <>
           {loading ? (
@@ -608,7 +558,7 @@ export default function AlertsPage() {
           )}
           {loadError ? (
             <div style={{ marginBottom: 12 }}>
-              <LoadError message={loadError} onRetry={() => void load(true)} />
+              <LoadError message={loadError} onRetry={reload} />
             </div>
           ) : null}
 
@@ -629,7 +579,7 @@ export default function AlertsPage() {
             columns={columns}
             loading={loading}
             refreshing={refreshing}
-            onRefresh={() => void load(true)}
+            onRefresh={reload}
             onRowClick={openEdit}
             search={{ value: searchInput, onChange: setSearchInput, placeholder: t('searchPlaceholder') }}
             filters={[
@@ -716,7 +666,7 @@ export default function AlertsPage() {
       <AlertRuleForm
         opened={formOpened}
         onClose={closeForm}
-        onSuccess={() => void load(true)}
+        onSuccess={reload}
         mode={editingRule ? 'edit' : 'create'}
         ruleId={editingRule?._id}
         meta={meta}
