@@ -9,21 +9,12 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createElement as h, type ComponentProps, type ReactNode } from 'react';
-import { QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import {
-  buttonByText,
-  click,
-  installApiMock,
-  installDomStubs,
-  mount,
-  q,
-  qa,
-  settle,
-  text,
-  type Mounted,
-} from '../helpers/iamCenterUi';
-import { newTestQueryClient } from '../helpers/renderWithQuery';
+import { buttonByText, click, installApiMock, installDomStubs, q, qa, settle, text, type Mounted } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
+
+/** `mount`, inside a query client (the screens read through React Query). */
+const mount = (element: ReactNode, locale = 'en') => renderWithQuery(element, { locale });
 
 vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(),
@@ -83,11 +74,6 @@ async function render(node: ReactNode) {
 }
 
 const noop = () => {};
-
-/** The PII picker: its create form saves through React Query, so it needs a query client around it. */
-const piiField = (writable: PermissionService[]) =>
-  h(QueryClientProvider, { client: newTestQueryClient() },
-    shell(writable, h(PiiProtectionField, { surface: 'agent', value: null, onChange: noop, policies: NO_PII_POLICIES })));
 
 describe('who may create: canWriteDashboardService', () => {
   const levels = (level: ServicePermissionLevel) =>
@@ -235,13 +221,13 @@ describe('guardrails: + New guardrail', () => {
 
 describe('PII: + New PII policy', () => {
   it('a reader of PII gets no button and reads who can create one', async () => {
-    await render(piiField([]));
+    await render(shell([], h(PiiProtectionField, { surface: 'agent', value: null, onChange: noop, policies: NO_PII_POLICIES })));
     expect(q('[data-testid="pii-policy-create-inline"]')).toBeNull();
     expect(text()).toContain(piiProtectionEn.policy.noneReadOnly);
   });
 
   it('a writer gets it', async () => {
-    await render(piiField(['pii']));
+    await render(shell(['pii'], h(PiiProtectionField, { surface: 'agent', value: null, onChange: noop, policies: NO_PII_POLICIES })));
     expect(q('[data-testid="pii-policy-create-inline"]')).not.toBeNull();
   });
 });
