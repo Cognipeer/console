@@ -37,7 +37,6 @@ import {
   type Mounted,
 } from '../helpers/iamCenterUi';
 import { bucketView, limitsPayload, newQueryClient, until as untilReady } from '../helpers/filesUploadDetailHarness';
-import { renderWithQuery } from '../helpers/renderWithQuery';
 import { MINIO as MINIO_PROVIDER, MIB, bucketDetail, deletingBucket, fileRecord, installBucketServer } from '../helpers/filesBucketUi';
 
 const nav = vi.hoisted(() => ({ search: '', pathname: '/dashboard/providers' }));
@@ -163,7 +162,7 @@ describe('the Providers list', () => {
       bump = rerender;
       return h(TenantProviders);
     }
-    mounted = await renderWithQuery(h(Harness));
+    mounted = await mount(h(QueryClientProvider, { client: newQueryClient() }, h(Harness)));
     await until(() => api.to('GET', '/api/providers').length > 0, 'the provider request');
     await settle(50);
     return () => act(async () => bump());

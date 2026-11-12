@@ -11,23 +11,12 @@ import { createElement } from 'react';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  buttonByText,
-  click,
-  installApiMock,
-  installDomStubs,
-  jsonResponse,
-  mount,
-  q,
-  qa,
-  setInput,
-  settle,
-  wait,
-  type ApiMock,
-  type Mounted,
-  type RouteHandler,
-} from '../helpers/iamCenterUi';
+import { buttonByText, click, installApiMock, installDomStubs, jsonResponse, q, qa, setInput, settle, wait, type ApiMock, type Mounted, type RouteHandler } from '../helpers/iamCenterUi';
+import type { ReactNode } from 'react';
 import { renderWithQuery } from '../helpers/renderWithQuery';
+
+/** `mount`, inside a query client (the screens read through React Query). */
+const mount = (element: ReactNode, locale = 'en') => renderWithQuery(element, { locale });
 import CreateProjectShell from '@/components/projects/CreateProjectShell';
 import { DashboardUserProvider } from '@/components/layout/DashboardUserContext';
 import TenantProviders from '@/components/settings/TenantProviders';
@@ -107,7 +96,7 @@ async function openEditForm(patch: () => unknown) {
     ['GET', /^\/api\/providers\/drivers\/[^/]+\/form$/, () => ({ schema: SCHEMA })],
     ['PATCH', '/api/providers/prov-1', patch],
   ]);
-  mounted = await renderWithQuery(createElement(TenantProviders));
+  mounted = await mount(createElement(TenantProviders));
   await settle(120);
 
   await click(q('button[aria-label="Actions"]'));
@@ -229,7 +218,7 @@ describe('adding a provider', () => {
 
   it('marks the field the server refused on the tenant\'s provider list, and keeps the form open', async () => {
     installCreateApi(refuseEndpoint);
-    mounted = await renderWithQuery(createElement(TenantProviders));
+    mounted = await mount(createElement(TenantProviders));
     await settle(120);
     await click(buttonByText('Add provider'));
     await settle(60);
@@ -269,7 +258,7 @@ describe('adding a provider', () => {
       ['GET', '/api/users', () => ({ users: [] })],
       ['GET', '/api/groups', () => ({ groups: [] })],
     ]);
-    mounted = await renderWithQuery(createElement(CreateProjectShell, { open: true, onClose: vi.fn(), onCreated: vi.fn() }));
+    mounted = await mount(createElement(CreateProjectShell, { open: true, onClose: vi.fn(), onCreated: vi.fn() }));
     await settle(120);
     await click(buttonByText('Add a new provider'));
     await settle(60);
@@ -281,7 +270,7 @@ describe('adding a provider', () => {
 
   it('keeps a refusal that names no field of the form as the message alone', async () => {
     installCreateApi(() => jsonResponse({ error: 'Provider creation failed.' }, 400));
-    mounted = await renderWithQuery(createElement(TenantProviders));
+    mounted = await mount(createElement(TenantProviders));
     await settle(120);
     await click(buttonByText('Add provider'));
     await settle(60);
