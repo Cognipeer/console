@@ -17,10 +17,15 @@ import {
 } from '@tabler/icons-react';
 import ConfirmModal from '@/components/common/ui/ConfirmModal';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
-import { isAbortError } from '@/components/iam/principals/client';
 import { directoryApi } from '@/components/iam/principals/directoryApi';
 import { principalHref } from '@/components/iam/links';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import {
+  useBulkProjectMembers,
+  useProjectMembers,
+  useSetMemberPermissions,
+} from '@/lib/api/queries/projects';
 import { RBAC_SERVICE_DEFINITIONS, type UserServicePermissions } from '@/lib/security/rbac';
 import AddProjectMembersShell from '../AddProjectMembersShell';
 import ProjectPermissionsEditor from '../ProjectPermissionsEditor';
@@ -51,11 +56,6 @@ type Pending =
 
 const EMPTY: ProjectMembersData = { members: [], groups: [], tenantAdmins: [], capabilities: NO_CAPABILITIES };
 
-function messageOf(body: unknown, fallback: string): string {
-  const message = body && typeof body === 'object' ? (body as { error?: unknown }).error : null;
-  return typeof message === 'string' && message ? message : fallback;
-}
-
 /**
  * Project Members: people and groups with where their access comes from, filter
  * chips by source, bulk role change and removal, "Add people" in one full-screen
@@ -69,10 +69,15 @@ export default function MembersTab({ projectId, projectName }: { projectId: stri
   const searchParams = useSearchParams();
   const openMemberId = searchParams?.get('member') ?? null;
 
-  const [data, setData] = useState<ProjectMembersData>(EMPTY);
-  const [loaded, setLoaded] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [reloadKey, setReloadKey] = useState(0);
+  const membersQuery = useProjectMembers(projectId);
+  const bulkMembers = useBulkProjectMembers(projectId);
+  const setPermissions = useSetMemberPermissions(projectId);
+  const data = useMemo<ProjectMembersData>(
+    () => (membersQuery.data === undefined ? EMPTY : parseMembers(membersQuery.data)),
+    [membersQuery.data],
+  );
+  const loaded = membersQuery.data !== undefined;
+  const loading = membersQuery.isFetching;
   const [filter, setFilter] = useState<SourceFilter>('all');
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -83,7 +88,10 @@ export default function MembersTab({ projectId, projectName }: { projectId: stri
   const [editing, setEditing] = useState<MemberRow | null>(null);
   const deepLinkHandled = useRef<string | null>(null);
 
-  const reload = useCallback(() => setReloadKey((k) => k + 1), []);
+  const { refetch: refetchMembers } = membersQuery;
+  const reload = useCallback(() => {
+    void refetchMembers();
+  }, [refetchMembers]);
 
   const notify = useCallback(
     (message: string, color: 'green' | 'red' | 'yellow') =>
@@ -91,27 +99,15 @@ export default function MembersTab({ projectId, projectName }: { projectId: stri
     [tm],
   );
 
+  // A fresh read replaces the selection; a read that failed says so once.
   useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    fetch(`/api/projects/${encodeURIComponent(projectId)}/members`, { cache: 'no-store', signal: controller.signal })
-      .then(async (res) => {
-        const body: unknown = await res.json().catch(() => null);
-        if (!res.ok) throw new Error(messageOf(body, tm('errors.load')));
-        if (controller.signal.aborted) return;
-        setData(parseMembers(body));
-        setLoaded(true);
-        setSelected(new Set());
-      })
-      .catch((err: unknown) => {
-        if (isAbortError(err) || controller.signal.aborted) return;
-        notify(err instanceof Error ? err.message : tm('errors.load'), 'red');
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, [projectId, reloadKey, notify, tm]);
+    if (membersQuery.dataUpdatedAt) setSelected(new Set());
+  }, [membersQuery.dataUpdatedAt]);
+  useEffect(() => {
+    if (!membersQuery.isError) return;
+    notify(errorMessage(membersQuery.error, tm('errors.load')), 'red');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [membersQuery.errorUpdatedAt]);
 
   const caps = data.capabilities;
   const canManage = caps.canAssignMembers || caps.canManageRoles || caps.canRemoveMembers || caps.canManagePermissions;
@@ -139,14 +135,11 @@ export default function MembersTab({ projectId, projectName }: { projectId: stri
   }, [openMemberId, loading, data.members, caps.canManagePermissions]);
 
   const postBulk = async (body: BulkRequestBody) => {
-    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/members/bulk`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const json: unknown = await res.json().catch(() => null);
-    if (!res.ok) throw new Error(messageOf(json, tm('errors.role')));
-    return parseBulkResult(json);
+    try {
+      return parseBulkResult(await bulkMembers.mutateAsync(body));
+    } catch (err) {
+      throw new Error(errorMessage(err, tm('errors.role')));
+    }
   };
 
   const runPending = async () => {
@@ -189,16 +182,13 @@ export default function MembersTab({ projectId, projectName }: { projectId: stri
     if (!editing || busy) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/members/permissions`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ servicePermissions: permissions, userId: editing.userId }),
-      });
-      const body: unknown = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(messageOf(body, tm('errors.permissions')));
+      try {
+        await setPermissions.mutateAsync({ servicePermissions: permissions, userId: editing.userId });
+      } catch (err) {
+        throw new Error(errorMessage(err, tm('errors.permissions')));
+      }
       notify(tm('done.permissions'), 'green');
       setEditing(null);
-      reload();
     } catch (err) {
       notify(err instanceof Error ? err.message : tm('errors.permissions'), 'red');
     } finally {

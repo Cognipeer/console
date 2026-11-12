@@ -10,10 +10,12 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MantineProvider } from '@mantine/core';
+import { QueryClientProvider } from '@tanstack/react-query';
 import AgentSandboxPanel from '@/components/agents/studio/AgentSandboxPanel';
 import type { IAgentSandboxConfig } from '@/lib/database/provider/types.domain';
 import { en } from '@/lib/i18n/messages/en';
 import { tr } from '@/lib/i18n/messages/tr';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 
 (globalThis as { React?: typeof React }).React = React;
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -25,7 +27,7 @@ beforeAll(() => {
     addEventListener: () => undefined, removeEventListener: () => undefined, dispatchEvent: () => false,
   }) as unknown as MediaQueryList);
   (globalThis as { ResizeObserver?: unknown }).ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ available: true, templates: [] }), { status: 200 })));
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ available: true, templates: [] }), { status: 200, headers: { 'content-type': 'application/json' } })));
 });
 
 let root: Root | undefined;
@@ -39,12 +41,14 @@ afterEach(() => {
 
 function mount(initial: IAgentSandboxConfig) {
   const seen: Array<IAgentSandboxConfig | undefined> = [];
+  // The Config picker reads its catalog through React Query.
+  const queryClient = newTestQueryClient();
   function Harness() {
     const [value, setValue] = useState<IAgentSandboxConfig | undefined>(initial);
-    return h(MantineProvider, null, h(AgentSandboxPanel, {
+    return h(QueryClientProvider, { client: queryClient }, h(MantineProvider, null, h(AgentSandboxPanel, {
       value,
       onChange: (next: IAgentSandboxConfig | undefined) => { seen.push(next); setValue(next); },
-    }));
+    })));
   }
   container = document.createElement('div');
   document.body.appendChild(container);

@@ -8,6 +8,8 @@ import { IconAlertTriangle, IconPlus, IconStar, IconUserPlus, IconServer } from 
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { notifyActiveProjectChanged } from '@/components/layout/useEffectivePermissions';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useProjects, useSessionRole, useSetActiveProject } from '@/lib/api/queries/projects';
 import CreateProjectShell from './CreateProjectShell';
 import {
   LAST_LIST_URL_KEY,
@@ -34,11 +36,13 @@ export default function ProjectsList() {
   const pathname = usePathname() ?? LIST_PATH;
   const searchParams = useSearchParams();
 
-  const [rows, setRows] = useState<ProjectListRow[]>([]);
-  const [activeProjectId, setActiveProjectId] = useState<string | undefined>(undefined);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [sessionRole, setSessionRole] = useState<string | undefined>(undefined);
+  const projectsQuery = useProjects<unknown>({ stats: true });
+  const setActiveProject = useSetActiveProject();
+  const { data: sessionRole } = useSessionRole();
+  const rows = useMemo(() => parseProjectRows(projectsQuery.data), [projectsQuery.data]);
+  const activeProjectId = projectsQuery.data?.activeProjectId;
+  const loading = projectsQuery.isPending;
+  const error = projectsQuery.isError ? errorMessage(projectsQuery.error, t('loadFailed')) : null;
   const [createOpen, setCreateOpen] = useState(false);
   const isTenantAdmin = sessionRole === 'owner' || sessionRole === 'admin';
 
@@ -61,35 +65,9 @@ export default function ProjectsList() {
     [router, pathname],
   );
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/projects?include=stats', { cache: 'no-store' });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error || t('loadFailed'));
-      }
-      const body = (await res.json()) as { activeProjectId?: string };
-      setRows(parseProjectRows(body));
-      setActiveProjectId(body.activeProjectId);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('loadFailed'));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  useEffect(() => {
-    fetch('/api/auth/session', { cache: 'no-store' })
-      .then(async (res) => (res.ok ? ((await res.json()) as { role?: string }) : null))
-      .then((data) => setSessionRole(data?.role))
-      .catch(() => setSessionRole(undefined));
-  }, []);
+  const load = async () => {
+    await projectsQuery.refetch();
+  };
 
   const filtered = useMemo(() => filterProjectRows(rows, filters), [rows, filters]);
   const counts = useMemo(() => quickFilterCounts(rows), [rows]);
@@ -100,21 +78,12 @@ export default function ProjectsList() {
   const setActive = async (id: string) => {
     if (id === activeProjectId) return;
     try {
-      const res = await fetch('/api/projects/active', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectId: id }),
-      });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error || t('setActiveFailed'));
-      }
-      await load();
+      await setActiveProject.mutateAsync(id);
       router.refresh();
       // What the navigation shows depends on the active project's limits.
       notifyActiveProjectChanged();
     } catch (err) {
-      notifications.show({ color: 'red', message: err instanceof Error ? err.message : t('setActiveFailed') });
+      notifications.show({ color: 'red', message: errorMessage(err, t('setActiveFailed')) });
     }
   };
 
@@ -220,7 +189,7 @@ export default function ProjectsList() {
           placeholder: t('searchPlaceholder'),
         }}
         onRefresh={() => void load()}
-        refreshing={loading}
+        refreshing={projectsQuery.isFetching}
         toolbarRight={
           <>
             <div className="ds-row ds-gap-sm" role="group" aria-label={t('quickFilters')}>

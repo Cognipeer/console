@@ -9,8 +9,9 @@
  * instead of offering an empty list.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo } from 'react';
 import { envNameFromConfigKey } from '@/lib/config/configRefShared';
+import { isForbidden, useConfigCatalogData, type RawConfigGroup, type RawConfigItem } from '@/lib/api/queries/config';
 
 export interface ConfigCatalogItem {
   id: string;
@@ -43,81 +44,53 @@ export interface ConfigCatalog {
   reload: () => void;
 }
 
-interface RawGroup { _id?: string; id?: string; key: string; name: string; description?: string }
-interface RawItem {
-  _id?: string; id?: string; key: string; name: string; description?: string; groupId: string;
-  isSecret?: boolean; valueType?: string; version?: number;
-}
-
-async function getJson(url: string): Promise<{ status: number; body: unknown }> {
-  const res = await fetch(url, { cache: 'no-store' });
-  const body = res.ok ? await res.json().catch(() => null) : null;
-  return { status: res.status, body };
+function buildGroups(rawGroups: RawConfigGroup[], rawItems: RawConfigItem[]): ConfigCatalogGroup[] {
+  const byGroup = new Map<string, ConfigCatalogItem[]>();
+  for (const raw of rawItems) {
+    const item: ConfigCatalogItem = {
+      id: String(raw._id ?? raw.id ?? ''),
+      key: raw.key,
+      name: raw.name,
+      description: raw.description,
+      groupId: String(raw.groupId),
+      isSecret: Boolean(raw.isSecret),
+      valueType: raw.valueType ?? 'string',
+      version: raw.version ?? 1,
+      envName: envNameFromConfigKey(raw.key),
+    };
+    const list = byGroup.get(item.groupId) ?? [];
+    list.push(item);
+    byGroup.set(item.groupId, list);
+  }
+  return rawGroups
+    .map((raw) => {
+      const id = String(raw._id ?? raw.id ?? '');
+      return {
+        id,
+        key: raw.key,
+        name: raw.name,
+        description: raw.description,
+        items: (byGroup.get(id) ?? []).sort((a, b) => a.key.localeCompare(b.key)),
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export function useConfigCatalog(enabled = true): ConfigCatalog {
-  const [status, setStatus] = useState<ConfigCatalogStatus>('loading');
-  const [groups, setGroups] = useState<ConfigCatalogGroup[]>([]);
-  const [nonce, setNonce] = useState(0);
+  const query = useConfigCatalogData(enabled);
+  const { refetch } = query;
 
-  useEffect(() => {
-    if (!enabled) return;
-    let cancelled = false;
-    setStatus('loading');
-    (async () => {
-      try {
-        const [groupsRes, itemsRes] = await Promise.all([getJson('/api/config/groups'), getJson('/api/config/items')]);
-        if (cancelled) return;
-        if (groupsRes.status === 403 || itemsRes.status === 403) {
-          setGroups([]);
-          setStatus('forbidden');
-          return;
-        }
-        if (groupsRes.status !== 200 || itemsRes.status !== 200) {
-          setStatus('error');
-          return;
-        }
-        const rawGroups = ((groupsRes.body as { groups?: RawGroup[] } | null)?.groups ?? []);
-        const rawItems = ((itemsRes.body as { items?: RawItem[] } | null)?.items ?? []);
-        const byGroup = new Map<string, ConfigCatalogItem[]>();
-        for (const raw of rawItems) {
-          const item: ConfigCatalogItem = {
-            id: String(raw._id ?? raw.id ?? ''),
-            key: raw.key,
-            name: raw.name,
-            description: raw.description,
-            groupId: String(raw.groupId),
-            isSecret: Boolean(raw.isSecret),
-            valueType: raw.valueType ?? 'string',
-            version: raw.version ?? 1,
-            envName: envNameFromConfigKey(raw.key),
-          };
-          const list = byGroup.get(item.groupId) ?? [];
-          list.push(item);
-          byGroup.set(item.groupId, list);
-        }
-        const next = rawGroups
-          .map((raw) => {
-            const id = String(raw._id ?? raw.id ?? '');
-            return {
-              id,
-              key: raw.key,
-              name: raw.name,
-              description: raw.description,
-              items: (byGroup.get(id) ?? []).sort((a, b) => a.key.localeCompare(b.key)),
-            };
-          })
-          .sort((a, b) => a.name.localeCompare(b.name));
-        setGroups(next);
-        setStatus('ready');
-      } catch {
-        if (!cancelled) setStatus('error');
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [enabled, nonce]);
+  const groups = useMemo(
+    () => (query.data ? buildGroups(query.data.groups, query.data.items) : []),
+    [query.data],
+  );
+  const status: ConfigCatalogStatus = query.isError
+    ? isForbidden(query.error)
+      ? 'forbidden'
+      : 'error'
+    : query.isPending
+      ? 'loading'
+      : 'ready';
 
   const itemsById = useMemo(() => {
     const map = new Map<string, ConfigCatalogItem>();
@@ -125,7 +98,9 @@ export function useConfigCatalog(enabled = true): ConfigCatalog {
     return map;
   }, [groups]);
   const groupsById = useMemo(() => new Map(groups.map((group) => [group.id, group])), [groups]);
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
+  const reload = useCallback(() => {
+    void refetch();
+  }, [refetch]);
 
   return { status, groups, itemsById, groupsById, reload };
 }

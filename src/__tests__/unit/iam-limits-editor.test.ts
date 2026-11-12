@@ -8,9 +8,11 @@
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MantineProvider } from '@mantine/core';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { QuotaPolicyModal, type QuotaPolicyFormData } from '@/components/quota/QuotaPolicyModal';
 import type { IQuotaPolicy } from '@/lib/database/provider.interface';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -97,19 +99,23 @@ async function mount({ policy = null, seed = null, projects = PROJECTS, defaultD
   await act(async () => {
     root.render(
       createElement(
-        MantineProvider,
-        null,
-        createElement(QuotaPolicyModal, {
-          opened: true,
-          onClose: () => {},
-          onSubmit,
-          policy: policy as IQuotaPolicy | null,
-          defaultDomain,
-          projects: projects ?? undefined,
-          seed,
-          allowedDomains: ['global', 'llm', 'vector', 'file', 'tracing', 'agent'],
-          allowedScopes: ['tenant', 'group', 'user', 'token', 'resource', 'provider'],
-        }),
+        QueryClientProvider,
+        { client: newTestQueryClient() },
+        createElement(
+          MantineProvider,
+          null,
+          createElement(QuotaPolicyModal, {
+            opened: true,
+            onClose: () => {},
+            onSubmit,
+            policy: policy as IQuotaPolicy | null,
+            defaultDomain,
+            projects: projects ?? undefined,
+            seed,
+            allowedDomains: ['global', 'llm', 'vector', 'file', 'tracing', 'agent'],
+            allowedScopes: ['tenant', 'group', 'user', 'token', 'resource', 'provider'],
+          }),
+        ),
       ),
     );
   });

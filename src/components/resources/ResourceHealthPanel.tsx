@@ -1,10 +1,12 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Alert, Stack, Text } from '@mantine/core';
 import { IconAlertTriangle } from '@tabler/icons-react';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useResourceHealth } from '@/lib/api/queries/resources';
 import { tryTranslate } from './i18nLookup';
 import ProjectCell from './ProjectCell';
 import { edgeKindLabel, type EdgeSeverity, type ResourceRefView } from './ResourceUsagePanel';
@@ -68,23 +70,18 @@ export function SeverityBadge({ severity }: { severity: EdgeSeverity }) {
 
 interface Props {
   types: Array<{ type: string }>;
-  /** Bumped by the explorer to force a reload (refresh button). */
-  reloadToken: number;
   onOpen(ref: ResourceRefView): void;
-  onSummary?(summary: HealthSummary): void;
 }
 
-export default function ResourceHealthPanel({ types, reloadToken, onOpen, onSummary }: Props) {
+export default function ResourceHealthPanel({ types, onOpen }: Props) {
   const t = useTranslations('resources');
   const [severity, setSeverity] = useState('');
   const [kind, setKind] = useState('');
   const [type, setType] = useState('');
-  const [data, setData] = useState<HealthResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const seq = useRef(0);
-  const summaryCb = useRef(onSummary);
-  summaryCb.current = onSummary;
+  const healthQuery = useResourceHealth<HealthResponse>({ severity, kind, type });
+  const data = healthQuery.data ?? null;
+  const loading = healthQuery.isFetching;
+  const error = healthQuery.isError ? errorMessage(healthQuery.error, t('health.loadFailed')) : null;
 
   const typeLabel = useCallback(
     (v: string) => {
@@ -92,34 +89,6 @@ export default function ResourceHealthPanel({ types, reloadToken, onOpen, onSumm
     },
     [t],
   );
-
-  useEffect(() => {
-    const mine = ++seq.current;
-    setLoading(true);
-    setError(null);
-    const params = new URLSearchParams();
-    if (severity) params.set('severity', severity);
-    if (kind) params.set('kind', kind);
-    if (type) params.set('type', type);
-    void (async () => {
-      try {
-        const res = await fetch(`/api/resources/health?${params.toString()}`, { cache: 'no-store' });
-        if (!res.ok) {
-          const body = await res.json().catch(() => null);
-          throw new Error(body?.error || t('health.loadFailed'));
-        }
-        const body = (await res.json()) as HealthResponse;
-        if (mine !== seq.current) return;
-        setData(body);
-        // Unfiltered summary only: a filtered one would understate the header badge.
-        if (!severity && !kind && !type) summaryCb.current?.(body.summary);
-      } catch (err) {
-        if (mine === seq.current) setError(err instanceof Error ? err.message : t('health.loadFailed'));
-      } finally {
-        if (mine === seq.current) setLoading(false);
-      }
-    })();
-  }, [severity, kind, type, reloadToken, t]);
 
   const columns: DataGridColumn<HealthIssue>[] = [
     { key: 'severity', label: t('health.colSeverity'), render: (row) => <SeverityBadge severity={row.severity} /> },

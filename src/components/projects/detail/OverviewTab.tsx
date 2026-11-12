@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import Link from 'next/link';
 import { Button, Stack, Text } from '@mantine/core';
 import {
@@ -18,9 +18,10 @@ import StatTile from '@/components/common/ui/StatTile';
 import { CardSkeleton, StatGridSkeleton } from '@/components/common/ui/Skeletons';
 import { principalHref, iamHref } from '@/components/iam/links';
 import { formatDateTime, formatRelative } from '@/components/iam/timeFormat';
-import { isAbortError } from '@/components/iam/principals/client';
 import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useProjectOverview } from '@/lib/api/queries/projects';
 import { DOMAIN_LABELS } from '@/lib/services/serviceCatalog';
 import type { ProviderDomain } from '@/lib/database';
 import {
@@ -68,40 +69,13 @@ export default function OverviewTab({ projectId }: { projectId: string }) {
   const user = useDashboardUser();
   const isTenantAdmin = user?.role === 'owner' || user?.role === 'admin';
 
-  const [data, setData] = useState<ProjectOverviewData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
-
-  const reload = useCallback(() => setReloadKey((key) => key + 1), []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    setError(null);
-    fetch(`/api/projects/${encodeURIComponent(projectId)}/overview`, {
-      cache: 'no-store',
-      signal: controller.signal,
-    })
-      .then(async (res) => {
-        const body: unknown = await res.json().catch(() => null);
-        if (!res.ok) {
-          const message = body && typeof body === 'object' ? (body as { error?: unknown }).error : null;
-          throw new Error(typeof message === 'string' && message ? message : t('errors.load'));
-        }
-        const parsed = parseOverview(body);
-        if (!parsed) throw new Error(t('errors.load'));
-        if (!controller.signal.aborted) setData(parsed);
-      })
-      .catch((err: unknown) => {
-        if (isAbortError(err) || controller.signal.aborted) return;
-        setError(err instanceof Error ? err.message : t('errors.load'));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, [projectId, reloadKey, t]);
+  const query = useProjectOverview(projectId);
+  const data = useMemo<ProjectOverviewData | null>(() => parseOverview(query.data), [query.data]);
+  const loading = query.isPending;
+  const error = query.isError ? errorMessage(query.error, t('errors.load')) : null;
+  const reload = () => {
+    void query.refetch();
+  };
 
   const readinessItems = useMemo(
     () => (data ? buildReadinessItems(data.readiness, data.stats, data.defaultAlerts) : []),

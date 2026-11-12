@@ -13,7 +13,6 @@ import {
   installApiMock,
   installDomStubs,
   jsonResponse,
-  mount,
   q,
   qa,
   setInput,
@@ -29,6 +28,7 @@ vi.mock('next/navigation', () => ({
   usePathname: () => '/dashboard/iam',
 }));
 
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import LimitsTab from '@/components/iam/limits/LimitsTab';
 
 beforeAll(() => installDomStubs());
@@ -79,7 +79,7 @@ async function render(policies: unknown[] = POLICIES, search: Parameters<typeof 
     ['GET', '/api/projects', () => ({ projects: [{ _id: 'proj-1', name: 'Retail' }] })],
     ['GET', '/api/resources/search', search],
   ]);
-  mounted = await mount(createElement(LimitsTab, { canManage: true }));
+  mounted = await renderWithQuery(createElement(LimitsTab, { canManage: true }));
   await settle(300);
 }
 
@@ -173,7 +173,7 @@ describe('the Limits table names what a limit points at', () => {
       ['GET', '/api/projects', () => ({ projects: [] })],
       ['GET', '/api/resources/search', registry as never],
     ]);
-    mounted = await mount(createElement(LimitsTab, { canManage: true }), 'tr');
+    mounted = await renderWithQuery(createElement(LimitsTab, { canManage: true }), { locale: 'tr' });
     await settle(300);
     expect(cellText('Retired cap')).toContain('Bulunamadı');
     expect(cellText('Flagship cap')).toMatch(/Model\s*GPT-4ogpt-4o/);

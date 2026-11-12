@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Button, Center, Loader } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useParams, useRouter } from 'next/navigation';
@@ -13,6 +13,13 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { ApiError, errorMessage } from '@/lib/api/client';
+import {
+  useConfigGroup,
+  useDeleteConfigGroup,
+  useDeleteConfigItem,
+  type ConfigItem,
+} from '@/lib/api/queries/config';
 import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import DetailShell from '@/components/common/ui/DetailShell';
 import PageContainer from '@/components/common/ui/PageContainer';
@@ -23,31 +30,6 @@ import { useTableControls } from '@/components/common/ui/useTableControls';
 import CreateConfigItemModal from '@/components/config/CreateConfigItemModal';
 import EditConfigItemModal from '@/components/config/EditConfigItemModal';
 import EditConfigGroupModal from '@/components/config/EditConfigGroupModal';
-
-interface ConfigItem {
-  _id: string;
-  key: string;
-  name: string;
-  description?: string;
-  value: string;
-  valueType: string;
-  isSecret: boolean;
-  tags?: string[];
-  version: number;
-  createdAt?: string;
-  updatedAt?: string;
-}
-
-interface ConfigGroup {
-  _id: string;
-  key: string;
-  name: string;
-  description?: string;
-  tags?: string[];
-  items: ConfigItem[];
-  createdAt?: string;
-  updatedAt?: string;
-}
 
 function formatDate(value?: string | Date) {
   if (!value) return '—';
@@ -64,8 +46,11 @@ export default function ConfigGroupDetailPage() {
   const params = useParams<{ groupId: string }>()!;
   const groupId = params.groupId;
 
-  const [group, setGroup] = useState<ConfigGroup | null>(null);
-  const [loading, setLoading] = useState(true);
+  const groupQuery = useConfigGroup(groupId);
+  const deleteGroup = useDeleteConfigGroup();
+  const deleteItem = useDeleteConfigItem();
+  const group = groupQuery.data ?? null;
+  const loading = groupQuery.isPending;
   const [createItemOpen, setCreateItemOpen] = useState(false);
   const [editGroupOpen, setEditGroupOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<ConfigItem | null>(null);
@@ -78,37 +63,26 @@ export default function ConfigGroupDetailPage() {
     searchPlaceholder: t('itemsSearchPlaceholder'),
   });
 
-  const loadGroup = useCallback(async () => {
-    if (!groupId) return;
-    try {
-      const res = await fetch(`/api/config/groups/${groupId}`, { cache: 'no-store' });
-
-      if (!res.ok) {
-        if (res.status === 404) {
-          notifications.show({ title: t('error'), message: t('groupNotFound'), color: 'red' });
-          router.push('/dashboard/config');
-          return;
-        }
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || t('groupLoadFailed'));
-      }
-
-      const data = await res.json();
-      setGroup(data.group as ConfigGroup);
-    } catch (error) {
-      notifications.show({
-        title: t('error'),
-        message: error instanceof Error ? error.message : t('groupLoadFailed'),
-        color: 'red',
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [groupId, router, t]);
-
+  // The group could not be read (first load or a refresh): say so once per failure. A 404 also leaves the page.
   useEffect(() => {
-    void loadGroup();
-  }, [loadGroup]);
+    if (!groupQuery.isError) return;
+    const error = groupQuery.error;
+    if (error instanceof ApiError && error.status === 404) {
+      notifications.show({ title: t('error'), message: t('groupNotFound'), color: 'red' });
+      router.push('/dashboard/config');
+      return;
+    }
+    notifications.show({
+      title: t('error'),
+      message: errorMessage(error, t('groupLoadFailed')),
+      color: 'red',
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupQuery.errorUpdatedAt]);
+
+  const loadGroup = async () => {
+    await groupQuery.refetch();
+  };
 
   const handleDeleteGroup = async () => {
     if (!group) return;
@@ -119,10 +93,10 @@ export default function ConfigGroupDetailPage() {
       id: group._id,
       extraWarning: tSafe('configGroupExtra'),
       action: async () => {
-        const res = await fetch(`/api/config/groups/${group._id}`, { method: 'DELETE' });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.error || t('deleteError'));
+        try {
+          await deleteGroup.mutateAsync(group._id);
+        } catch (error) {
+          throw new Error(errorMessage(error, t('deleteError')));
         }
         notifications.show({
           title: t('groupDeleted'),
@@ -141,17 +115,16 @@ export default function ConfigGroupDetailPage() {
       type: 'config-item',
       id: item._id,
       action: async () => {
-        const res = await fetch(`/api/config/items/${item._id}`, { method: 'DELETE' });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.error || t('deleteError'));
+        try {
+          await deleteItem.mutateAsync(item._id);
+        } catch (error) {
+          throw new Error(errorMessage(error, t('deleteError')));
         }
         notifications.show({
           title: t('itemDeleted'),
           message: t('itemDeletedMessage'),
           color: 'teal',
         });
-        await loadGroup();
       },
     });
   };
@@ -429,7 +402,6 @@ export default function ConfigGroupDetailPage() {
         onClose={() => setCreateItemOpen(false)}
         onCreated={() => {
           setCreateItemOpen(false);
-          void loadGroup();
         }}
       />
 
@@ -439,7 +411,6 @@ export default function ConfigGroupDetailPage() {
         onClose={() => setEditGroupOpen(false)}
         onUpdated={() => {
           setEditGroupOpen(false);
-          void loadGroup();
         }}
       />
 
@@ -449,7 +420,6 @@ export default function ConfigGroupDetailPage() {
         onClose={() => setEditingItem(null)}
         onUpdated={() => {
           setEditingItem(null);
-          void loadGroup();
         }}
       />
     </DetailShell>

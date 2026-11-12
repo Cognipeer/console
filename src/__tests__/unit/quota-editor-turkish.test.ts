@@ -7,7 +7,8 @@
  */
 import { createElement } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { installApiMock, installDomStubs, mount, q, qa, settle, text, type Mounted } from '../helpers/iamCenterUi';
+import { installApiMock, installDomStubs, q, qa, settle, text, type Mounted } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 import { QuotaPolicyModal } from '@/components/quota/QuotaPolicyModal';
 
 beforeAll(() => installDomStubs());
@@ -27,7 +28,7 @@ async function open(locale: string, props: Record<string, unknown> = {}) {
     ['GET', '/api/iam/principals', () => ({ items: [], nextCursor: null })],
     ['GET', '/api/resources/search', () => ({ items: [], total: 0 })],
   ]);
-  mounted = await mount(
+  mounted = await renderWithQuery(
     createElement(QuotaPolicyModal, {
       opened: true,
       onClose: () => {},
@@ -36,7 +37,7 @@ async function open(locale: string, props: Record<string, unknown> = {}) {
       projects: [{ value: 'p1', label: 'Retail (retail)' }],
       ...props,
     }),
-    locale,
+    { locale },
   );
   await settle(100);
 }
