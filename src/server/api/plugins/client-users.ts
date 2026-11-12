@@ -47,6 +47,10 @@ import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 import { canActOnTokensOf, EXTERNAL_TOKEN_OWNER_REFUSAL } from '@/lib/services/apiTokens/tokenGovernance';
 import { clampScopeToMinter, resolveRequestedTokenScope } from './tokens';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "members" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('members') } as const;
 
 const logger = createLogger('api:client-users');
 
@@ -76,7 +80,7 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
   // Creates a "Programmatic User" — canLogin is always forced to false here,
   // regardless of any input, so an API token can never provision a
   // login-capable account (privilege-escalation guard).
-  app.post('/client/v1/users', withClientApiRequestContext(async (request, reply, auth) => {
+  app.post('/client/v1/users', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
 
@@ -200,7 +204,7 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
   // Mints a token for an existing user — the service-account pattern: a
   // Programmatic User (canLogin=false) can never reach the session-based
   // /tokens endpoint itself, so an admin token mints on its behalf here.
-  app.post('/client/v1/users/:id/tokens', withClientApiRequestContext(async (request, reply, auth) => {
+  app.post('/client/v1/users/:id/tokens', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
 

@@ -26,6 +26,10 @@ import {
   requireSessionContext,
   withApiRequestContext,
 } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "members" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('members') } as const;
 
 const logger = createLogger('api:groups');
 
@@ -64,7 +68,7 @@ function parseTenantRole(value: unknown): { ok: true; role: UserRole | undefined
 
 export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
   // ── List ──────────────────────────────────────────────────────────────────
-  app.get('/groups', withApiRequestContext(async (request, reply) => {
+  app.get('/groups', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -92,7 +96,7 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ── Create ──────────────────────────────────────────────────────────────────
-  app.post('/groups', withApiRequestContext(async (request, reply) => {
+  app.post('/groups', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -136,7 +140,7 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ── Detail (group + members + project assignments) ──────────────────────────
-  app.get('/groups/:id', withApiRequestContext(async (request, reply) => {
+  app.get('/groups/:id', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -192,7 +196,7 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ── Update grants/metadata ──────────────────────────────────────────────────
-  app.patch('/groups/:id', withApiRequestContext(async (request, reply) => {
+  app.patch('/groups/:id', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -248,7 +252,7 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ── Delete ──────────────────────────────────────────────────────────────────
-  app.delete('/groups/:id', withApiRequestContext(async (request, reply) => {
+  app.delete('/groups/:id', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -278,7 +282,7 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ── Membership ──────────────────────────────────────────────────────────────
-  app.post('/groups/:id/members', withApiRequestContext(async (request, reply) => {
+  app.post('/groups/:id/members', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -328,7 +332,7 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/groups/:id/members/:userId', withApiRequestContext(async (request, reply) => {
+  app.delete('/groups/:id/members/:userId', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -357,7 +361,7 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ── Project assignments ─────────────────────────────────────────────────────
-  app.post('/groups/:id/projects', withApiRequestContext(async (request, reply) => {
+  app.post('/groups/:id/projects', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -406,7 +410,7 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/groups/:id/projects/:projectId', withApiRequestContext(async (request, reply) => {
+  app.delete('/groups/:id/projects/:projectId', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {

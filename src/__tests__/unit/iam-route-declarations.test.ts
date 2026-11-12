@@ -72,6 +72,48 @@ describe('route authorization declarations', () => {
   }, 60_000);
 });
 
+describe('prefix-mapped plugins state their service explicitly', () => {
+  // [path prefix, service]: every route of these plugins carries `config: authz.service(<service>)` itself
+  // instead of relying on ROUTE_PREFIXES (which would still decide it, but silently).
+  const EXPLICIT: Array<[string, string]> = [
+    ['/api/groups', 'members'],
+    ['/api/client/v1/members', 'members'],
+    ['/api/client/v1/users', 'members'],
+    ['/api/projects', 'projects'],
+    ['/api/client/v1/projects', 'projects'],
+    ['/api/quota', 'projects'],
+    ['/api/config', 'config'],
+    ['/api/client/v1/config', 'config'],
+    ['/api/license', 'license'],
+    ['/api/client/v1/license', 'license'],
+    ['/api/usage', 'license'],
+    ['/api/resources', 'resources'],
+    ['/api/specs', 'tools'],
+  ];
+
+  it('declares the service its prefix maps to, and nothing else', async () => {
+    const routes = await collectApiRoutes();
+    for (const [prefix, service] of EXPLICIT) {
+      const own = routes.filter((r) => r.url === prefix || r.url.startsWith(`${prefix}/`));
+      expect(own.length, `${prefix} has routes`).toBeGreaterThan(0);
+      for (const route of own) {
+        expect(route.declared, `${route.method} ${route.url} declares its service`).toBe(true);
+        expect(route.kind, `${route.method} ${route.url}`).toBe('service');
+        expect(route.service, `${route.method} ${route.url}`).toBe(service);
+        expect(route.authz, `${route.method} ${route.url}`).toEqual({ kind: 'service', service });
+        expect(route.gated, `${route.method} ${route.url} still runs the permission gate`).toBe(true);
+      }
+    }
+  }, 60_000);
+
+  it('leaves the per-type usage resolver route to the path resolver', async () => {
+    const routes = await collectApiRoutes();
+    const usage = routes.filter((r) => r.url.startsWith('/api/resource-usage/'));
+    expect(usage.length).toBeGreaterThan(0);
+    for (const route of usage) expect(route.declared, `${route.method} ${route.url}`).toBe(false);
+  }, 60_000);
+});
+
 describe('the Authorization center API surface', () => {
   it('has no route left from the retired modes, and keeps the ones the engine-only product uses', async () => {
     const routes = await collectApiRoutes();

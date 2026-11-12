@@ -50,6 +50,10 @@ import {
   withApiRequestContext,
 } from '../fastify-utils';
 import { auditTokenRestrictionChange, editApiTokenForSession, readBodyObject } from './tokens';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "projects" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('projects') } as const;
 
 const logger = createLogger('api:projects');
 
@@ -123,7 +127,7 @@ async function assertProjectAccess(params: {
 }
 
 export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get('/projects', withApiRequestContext(async (request, reply) => {
+  app.get('/projects', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const { db, user } = await loadTenantUser(session);
@@ -217,7 +221,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/projects', withApiRequestContext(async (request, reply) => {
+  app.post('/projects', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canManageProjects(session.userRole)) {
@@ -309,7 +313,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/projects/active', withApiRequestContext(async (request, reply) => {
+  app.post('/projects/active', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const { db, user } = await loadTenantUser(session);
@@ -354,7 +358,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.patch('/projects/:projectId', withApiRequestContext(async (request, reply) => {
+  app.patch('/projects/:projectId', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canManageProjects(session.userRole)) {
@@ -399,7 +403,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/projects/:projectId', withApiRequestContext(async (request, reply) => {
+  app.delete('/projects/:projectId', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canManageProjects(session.userRole)) {
@@ -437,7 +441,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
 
   // ── Project Members ──────────────────────────────────────────────────────
 
-  app.get('/projects/:projectId/members', withApiRequestContext(async (request, reply) => {
+  app.get('/projects/:projectId/members', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const { projectId } = request.params as { projectId: string };
@@ -561,7 +565,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/projects/:projectId/members', withApiRequestContext(async (request, reply) => {
+  app.post('/projects/:projectId/members', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const { projectId } = request.params as { projectId: string };
@@ -614,7 +618,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/projects/:projectId/members', withApiRequestContext(async (request, reply) => {
+  app.delete('/projects/:projectId/members', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const { projectId } = request.params as { projectId: string };
@@ -664,7 +668,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.patch('/projects/:projectId/members', withApiRequestContext(async (request, reply) => {
+  app.patch('/projects/:projectId/members', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const { projectId } = request.params as { projectId: string };
@@ -730,7 +734,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/projects/:projectId/members/bulk', withApiRequestContext(async (request, reply) => {
+  app.post('/projects/:projectId/members/bulk', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const { projectId } = request.params as { projectId: string };
@@ -767,7 +771,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/projects/:projectId/overview', withApiRequestContext(async (request, reply) => {
+  app.get('/projects/:projectId/overview', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const { projectId } = request.params as { projectId: string };
@@ -785,7 +789,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.patch('/projects/:projectId/members/permissions', withApiRequestContext(async (request, reply) => {
+  app.patch('/projects/:projectId/members/permissions', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const { projectId } = request.params as { projectId: string };
@@ -840,7 +844,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/projects/:projectId/member-candidates', withApiRequestContext(async (request, reply) => {
+  app.get('/projects/:projectId/member-candidates', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       const { projectId } = request.params as { projectId: string };
@@ -890,7 +894,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
 
   // ── Project API Tokens ───────────────────────────────────────────────────
 
-  app.get('/projects/:projectId/tokens', withApiRequestContext(async (request, reply) => {
+  app.get('/projects/:projectId/tokens', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canManageProjects(session.userRole)) {
@@ -923,7 +927,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/projects/:projectId/tokens', withApiRequestContext(async (request, reply) => {
+  app.post('/projects/:projectId/tokens', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canManageProjects(session.userRole)) {
@@ -998,7 +1002,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
 
   // Edit label / expiry / IP allowlist of a project token. Same rules and the
   // same implementation as PUT /tokens/:id.
-  app.put('/projects/:projectId/tokens/:id', withApiRequestContext(async (request, reply) => {
+  app.put('/projects/:projectId/tokens/:id', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canManageProjects(session.userRole)) {
@@ -1026,7 +1030,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/projects/:projectId/tokens/:id', withApiRequestContext(async (request, reply) => {
+  app.delete('/projects/:projectId/tokens/:id', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canManageProjects(session.userRole)) {

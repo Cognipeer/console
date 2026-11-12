@@ -25,6 +25,10 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { sendRouteError } from '../routeErrors';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "config" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('config') } as const;
 
 const logger = createLogger('api:client-config');
 
@@ -33,7 +37,7 @@ const sendConfigServiceError = (reply: FastifyReply) => (error: unknown) =>
   error instanceof ConfigServiceError ? reply.code(error.status).send({ error: error.message }) : null;
 
 export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get('/client/v1/config/groups', withClientApiRequestContext(async (request, reply) => {
+  app.get('/client/v1/config/groups', GATE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const query = (request.query ?? {}) as { search?: string; tags?: string };
@@ -48,7 +52,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/client/v1/config/groups', withClientApiRequestContext(async (request, reply) => {
+  app.post('/client/v1/config/groups', GATE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -72,7 +76,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/client/v1/config/groups/:groupKey', withClientApiRequestContext(async (request, reply) => {
+  app.get('/client/v1/config/groups/:groupKey', GATE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { groupKey } = request.params as { groupKey: string };
@@ -100,7 +104,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.patch('/client/v1/config/groups/:groupKey', withClientApiRequestContext(async (request, reply) => {
+  app.patch('/client/v1/config/groups/:groupKey', GATE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { groupKey } = request.params as { groupKey: string };
@@ -136,7 +140,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/client/v1/config/groups/:groupKey', withClientApiRequestContext(async (request, reply) => {
+  app.delete('/client/v1/config/groups/:groupKey', GATE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { groupKey } = request.params as { groupKey: string };
@@ -165,7 +169,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/client/v1/config/groups/:groupKey/items', withClientApiRequestContext(async (request, reply) => {
+  app.get('/client/v1/config/groups/:groupKey/items', GATE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { groupKey } = request.params as { groupKey: string };
@@ -198,7 +202,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/client/v1/config/groups/:groupKey/items', withClientApiRequestContext(async (request, reply) => {
+  app.post('/client/v1/config/groups/:groupKey/items', GATE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { groupKey } = request.params as { groupKey: string };
@@ -245,7 +249,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/client/v1/config/items', withClientApiRequestContext(async (request, reply) => {
+  app.get('/client/v1/config/items', GATE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const query = (request.query ?? {}) as {
@@ -267,7 +271,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/client/v1/config/items/:key', withClientApiRequestContext(async (request, reply) => {
+  app.get('/client/v1/config/items/:key', GATE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { key } = request.params as { key: string };
@@ -283,7 +287,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.patch('/client/v1/config/items/:key', withClientApiRequestContext(async (request, reply) => {
+  app.patch('/client/v1/config/items/:key', GATE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { key } = request.params as { key: string };
@@ -317,7 +321,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/client/v1/config/items/:key', withClientApiRequestContext(async (request, reply) => {
+  app.delete('/client/v1/config/items/:key', GATE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { key } = request.params as { key: string };
@@ -341,7 +345,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/client/v1/config/items/:key/audit', withClientApiRequestContext(async (request, reply) => {
+  app.get('/client/v1/config/items/:key/audit', GATE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { key } = request.params as { key: string };
@@ -359,7 +363,7 @@ export const clientConfigApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/client/v1/config/resolve', withClientApiRequestContext(async (request, reply) => {
+  app.post('/client/v1/config/resolve', GATE, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
