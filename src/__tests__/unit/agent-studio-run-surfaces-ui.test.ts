@@ -196,15 +196,14 @@ describe('a failed load is not an empty list', () => {
   it('triggers: a saved list reads in full — type as text with an icon, status as a dot and a word', async () => {
     fetchMock.mockImplementation(() => json({ data: [{
       id: 'r1', object: 'agent.trigger', agent: 'a', name: 'github-pr-review-with-a-rather-long-name', description: null, enabled: true,
-      type: 'webhook', webhook: { preset: 'github', events: ['pull_request'], retired: true }, prompt: 'x', variables: null, version: null, class: 'default',
+      type: 'webhook', webhook: { preset: 'generic', events: ['pull_request'] }, prompt: 'x', variables: null, version: null, class: 'default',
       metadata: {}, callback: null, response_format: null, next_fire_at: null, last_fire_at: 1_760_000_000, last_run_id: 'run_1', last_status: 'failed', last_error: 'boom',
       created_at: null, updated_at: null,
     }] }));
     mount(h(AgentTriggersPanel, { agentId: 'a1', agentName: 'Support', versions: [], onShowRuns: () => undefined }));
     await flush();
     expect(document.querySelector('table')).toBeNull();
-    expect(text()).toContain('GitHub · pull_request');
-    expect(text()).toContain('Retired');
+    expect(text()).toContain('Generic · pull_request');
     expect(text()).toContain('Failed');
     expect(document.querySelector('[role="img"][aria-label="Webhook"]')).not.toBeNull();
     expect(document.querySelector('[title="github-pr-review-with-a-rather-long-name"]')).not.toBeNull();

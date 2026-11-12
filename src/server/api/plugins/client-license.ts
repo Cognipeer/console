@@ -21,10 +21,14 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { type EffectiveLicense, LicenseManager } from '@/lib/license/license-manager';
 import { invalidateTenantLicenseState } from '@/lib/limits/invalidate';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "license" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('license') } as const;
 
 const logger = createLogger('api:client-license');
 
@@ -41,21 +45,22 @@ function sanitizeLicense(license: EffectiveLicense): Omit<EffectiveLicense, 'pay
 }
 
 export const clientLicenseApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get('/client/v1/license', withClientApiRequestContext(async (_request, reply, auth) => {
+  app.get('/client/v1/license', GATE, withClientApiRequestContext(async (_request, reply, auth) => {
     try {
-      const db = await getDatabase();
-      const tenant = await db.findTenantById(auth.tenantId);
+      const mainDb = await getDatabase();
+      const tenant = await mainDb.findTenantById(auth.tenantId);
       if (!tenant) {
         return reply.code(404).send({ error: 'Tenant not found' });
       }
 
-      await db.switchToTenant(tenant.dbName);
-      const projects = await db.listProjects(auth.tenantId);
-      const license = LicenseManager.getEffectiveLicenseForTenant(tenant);
+      return await runWithTenantScope(tenant.dbName, async (db) => {
+        const projects = await db.listProjects(auth.tenantId);
+        const license = LicenseManager.getEffectiveLicenseForTenant(tenant);
 
-      return reply.code(200).send({
-        license: sanitizeLicense(license),
-        projectCount: projects.length,
+        return reply.code(200).send({
+          license: sanitizeLicense(license),
+          projectCount: projects.length,
+        });
       });
     } catch (error) {
       logger.error('Client get license error', { error });
@@ -64,21 +69,21 @@ export const clientLicenseApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/client/v1/license', withClientApiRequestContext(async (request, reply, auth) => {
+  app.post('/client/v1/license', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       const body = readJsonBody<{ licenseKey?: string }>(request);
       if (!body.licenseKey || body.licenseKey.trim().length < 20) {
         return reply.code(400).send({ error: 'A valid license key is required' });
       }
 
-      const db = await getDatabase();
-      const tenant = await db.findTenantById(auth.tenantId);
+      const mainDb = await getDatabase();
+      const tenant = await mainDb.findTenantById(auth.tenantId);
       if (!tenant) {
         return reply.code(404).send({ error: 'Tenant not found' });
       }
 
       const verified = await LicenseManager.verifyOfflineLicenseKey(body.licenseKey, tenant);
-      const updatedTenant = await db.updateTenant(auth.tenantId, {
+      const updatedTenant = await mainDb.updateTenant(auth.tenantId, {
         licenseActivatedAt: new Date(),
         licenseError: null,
         licenseExpiresAt: verified.expiresAt,
@@ -97,13 +102,14 @@ export const clientLicenseApiPlugin: FastifyPluginAsync = async (app) => {
       // The plan, service availability and enterprise access derived from the license, on every replica.
       await invalidateTenantLicenseState(auth.tenantId);
 
-      await db.switchToTenant(updatedTenant.dbName);
-      const projects = await db.listProjects(auth.tenantId);
-      const license = LicenseManager.getEffectiveLicenseForTenant(updatedTenant);
+      return await runWithTenantScope(updatedTenant.dbName, async (db) => {
+        const projects = await db.listProjects(auth.tenantId);
+        const license = LicenseManager.getEffectiveLicenseForTenant(updatedTenant);
 
-      return reply.code(200).send({
-        license: sanitizeLicense(license),
-        projectCount: projects.length,
+        return reply.code(200).send({
+          license: sanitizeLicense(license),
+          projectCount: projects.length,
+        });
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'License validation failed';
@@ -112,16 +118,16 @@ export const clientLicenseApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/client/v1/license', withClientApiRequestContext(async (_request, reply, auth) => {
+  app.delete('/client/v1/license', GATE, withClientApiRequestContext(async (_request, reply, auth) => {
     try {
-      const db = await getDatabase();
-      const tenant = await db.findTenantById(auth.tenantId);
+      const mainDb = await getDatabase();
+      const tenant = await mainDb.findTenantById(auth.tenantId);
       if (!tenant) {
         return reply.code(404).send({ error: 'Tenant not found' });
       }
 
       const freeLicense = LicenseManager.getDefaultFreeLicense();
-      const updatedTenant = await db.updateTenant(auth.tenantId, {
+      const updatedTenant = await mainDb.updateTenant(auth.tenantId, {
         licenseActivatedAt: null,
         licenseError: null,
         licenseExpiresAt: null,
@@ -140,12 +146,13 @@ export const clientLicenseApiPlugin: FastifyPluginAsync = async (app) => {
       // The plan, service availability and enterprise access derived from the license, on every replica.
       await invalidateTenantLicenseState(auth.tenantId);
 
-      await db.switchToTenant(updatedTenant.dbName);
-      const projects = await db.listProjects(auth.tenantId);
+      return await runWithTenantScope(updatedTenant.dbName, async (db) => {
+        const projects = await db.listProjects(auth.tenantId);
 
-      return reply.code(200).send({
-        license: sanitizeLicense(freeLicense),
-        projectCount: projects.length,
+        return reply.code(200).send({
+          license: sanitizeLicense(freeLicense),
+          projectCount: projects.length,
+        });
       });
     } catch (error) {
       logger.error('Client reset license error', { error });

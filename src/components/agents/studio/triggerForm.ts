@@ -9,7 +9,6 @@ import type { AgentTriggerWebhookFilterRule, IAgentVariable } from '@/lib/databa
 import type { serializeAgentTrigger } from '@/lib/services/agents/agentTriggers';
 import type { ConnectorSubscriptionWire, ConnectorTriggerCatalogConnector, ConnectorTriggerFormValue } from '@/lib/shared/connectorTriggers';
 import { DEFAULT_TRIGGER_TIMEZONE, isValidTriggerTimezone, validateTriggerCron } from '@/lib/services/agents/agentTriggerSchedule';
-import { filterRuleMatches } from '@/lib/services/agents/agentTriggerWebhookView';
 
 /** A trigger as the API returns it. */
 export type TriggerRow = ReturnType<typeof serializeAgentTrigger>;
@@ -262,7 +261,7 @@ function filterRows(rules: StoredFilterRule[] | undefined): WebhookFilterRow[] {
     }));
 }
 
-/** The webhook part of the form from a stored `webhook`. A retired vendor preset opens as the generic one. */
+/** The webhook part of the form from a stored `webhook`. */
 function webhookFormFields(webhook: StoredWebhook, base: TriggerForm): Partial<TriggerForm> {
     const preset = (WEBHOOK_PRESETS as readonly string[]).includes(webhook.preset ?? '') ? webhook.preset as WebhookPreset : 'generic';
     const auth = WEBHOOK_PRESET_AUTH[preset].includes(webhook.auth as WebhookAuth) ? webhook.auth as WebhookAuth : WEBHOOK_PRESET_AUTH[preset][0];
@@ -355,40 +354,6 @@ export function formFromTrigger(trigger: TriggerRow, fallbackTimezone = browserT
         callbackSigned: Boolean(trigger.callback?.signed),
         responseFormatText: trigger.response_format ? JSON.stringify(trigger.response_format, null, 2) : '',
     };
-}
-
-/** A webhook trigger that used a retired vendor preset: it receives nothing any more (the server answers 410). */
-export function isRetiredWebhook(trigger: TriggerRow): boolean {
-    return trigger.type === 'webhook' && (trigger.webhook as { retired?: boolean }).retired === true;
-}
-
-/**
- * The form for the connector trigger that replaces a retired vendor webhook trigger: its name, prompt, variables,
- * filter and payload choice carry over; the connector, its trigger and the events are picked again.
- */
-export function connectorFormFromRetired(trigger: TriggerRow, fallbackTimezone = browserTimezone()): TriggerForm {
-    return { ...formFromTrigger(trigger, fallbackTimezone), type: 'connector', connector: null, webhookEvents: [] };
-}
-
-/** What a connector event is to a filter row on the vendor's webhook data: it has no headers and its preset is always `connector`. */
-const CONNECTOR_EVENT_VIEW = { headers: {}, preset: 'connector' };
-
-/**
- * The filter rows that read the vendor's request `headers` or the webhook `preset`, by what each does on a connector event.
- * A connector event has no headers and its preset is always `connector`, so the row is run through the matcher the server
- * filters with, over that much of the event: `never` rows cannot match (`headers.x eq …`, `preset eq github`), `always`
- * rows match every connector event and filter nothing (`headers.x not_exists`, `preset eq connector`, `preset neq github`).
- * A converted retired trigger keeps its rows as they were (dropping one would change the rule set unseen); these are the
- * ones to point out. A row without its value is not judged yet (a save refuses it).
- */
-export function rowsOnWebhookOnlyData(rows: ReadonlyArray<WebhookFilterRow>): { never: number[]; always: number[] } {
-    const found = { never: [] as number[], always: [] as number[] };
-    rows.forEach((row, index) => {
-        if (!/^(headers|preset)(\.|$)/.test(row.path.trim())) return;
-        const rule = ruleFromRow(row);
-        if (rule) found[filterRuleMatches(CONNECTOR_EVENT_VIEW, rule) ? 'always' : 'never'].push(index);
-    });
-    return found;
 }
 
 /**

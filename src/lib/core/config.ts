@@ -141,6 +141,8 @@ export interface AppConfig {
   iam: {
     /** Validate every authorization request against the engine schema (IAM_VALIDATE_REQUESTS=1). Diagnostics only. */
     validateRequests: boolean;
+    /** Refuse to register an /api route that declares no authorization (AUTHZ_STRICT_REGISTRATION=1; always on under NODE_ENV=test). */
+    strictRegistration: boolean;
   };
 
   evaluation: {
@@ -1100,6 +1102,7 @@ function buildConfig(source: ConfigSource): AppConfig {
 
     iam: {
       validateRequests: source.get('IAM_VALIDATE_REQUESTS') === '1',
+      strictRegistration: source.get('AUTHZ_STRICT_REGISTRATION') === '1',
     },
 
     evaluation: {

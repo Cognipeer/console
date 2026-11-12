@@ -262,7 +262,7 @@ describeForEachProvider('IAM center API', (getDb) => {
       expect(mine.find((i: any) => i.action === 'iam.policy.create').summary).toMatch(/Created policy "Freeze agents" \(forbid\)/);
       expect(mine[0].actor).toBe(String(A.users.admin.email));
 
-      const rows = await db.iamListAuditEvents({ tenantId: A.id, resourceTypes: ['iam-policy'], limit: 50 });
+      const rows = await db.runWithTenant!(A.dbName, () => db.iamListAuditEvents({ tenantId: A.id, resourceTypes: ['iam-policy'], limit: 50 }));
       const createRow = rows.items.find((r) => r.event === 'iam.policy.create' && r.resourceId === row.policyId)!;
       expect(createRow).toMatchObject({ service: 'iam', action: 'admin', outcome: 'success', resourceType: 'iam-policy' });
       expect(createRow.metadata).toMatchObject({ policyId: row.policyId, name: 'Freeze agents', enabled: true, effect: 'forbid', statementCount: 1, iamChange: true });
@@ -527,10 +527,10 @@ describeForEachProvider('IAM center API', (getDb) => {
       // The refused calls above are audited asynchronously; let their rows land before counting, or a slow
       // database moves them between the two counts below.
       await new Promise((r) => setTimeout(r, 150));
-      const before =(await db.iamListAuditEvents({ tenantId: A.id, limit: 200 })).items.filter((r) => String(r.path).includes('/compile')).length;
+      const before = (await db.runWithTenant!(A.dbName, () => db.iamListAuditEvents({ tenantId: A.id, limit: 200 }))).items.filter((r) => String(r.path).includes('/compile')).length;
       await call('POST', '/api/iam/policies/compile', A, 'reader', { spec: memberSpec(A) });
       await new Promise((r) => setTimeout(r, 30));
-      const after = (await db.iamListAuditEvents({ tenantId: A.id, limit: 200 })).items.filter((r) => String(r.path).includes('/compile')).length;
+      const after = (await db.runWithTenant!(A.dbName, () => db.iamListAuditEvents({ tenantId: A.id, limit: 200 }))).items.filter((r) => String(r.path).includes('/compile')).length;
       expect(after).toBe(before);
     });
   });

@@ -52,10 +52,8 @@ async function runOnce(): Promise<void> {
             error: err instanceof Error ? err.message : err,
           });
         }
-        // Timer context: bind the tenant for the whole per-tenant run (see
-        // runWithTenantScope — switchToTenant alone races cross-tenant).
-        const { fired, errors } = await runWithTenantScope(tenant.dbName, () =>
-          runScheduledScans(tenant.dbName!, String(tenant._id)));
+        // runScheduledScans binds the tenant for the whole per-tenant run itself.
+        const { fired, errors } = await runScheduledScans(tenant.dbName, String(tenant._id));
         if (fired.length > 0) {
           logger.info(`Tenant ${tenant.slug}: enqueued ${fired.length} scheduled red-team scan(s)`, { campaigns: fired });
         }

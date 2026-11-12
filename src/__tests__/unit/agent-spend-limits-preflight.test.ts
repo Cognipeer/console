@@ -3,7 +3,7 @@
  * and each sub-agent override), and a spend observer sees each priced request.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
   checkBudget: vi.fn(),
@@ -20,10 +20,14 @@ vi.mock('@/lib/database', () => ({ getDatabase: hoisted.getDatabase }));
 import {
   agentSpendSettler,
   assertQueuedTurnSpendAllowed,
+  resetAgentSpendLicenseMemo,
+  resolveAgentSpendScope,
   assertAgentTurnSpendAllowed,
   AgentSpendLimitError,
   type AgentSpendScope,
 } from '@/lib/services/agents/agentSpendLimits';
+
+beforeEach(() => resetAgentSpendLicenseMemo());
 
 const scope: AgentSpendScope = {
   tenantDbName: 't_db', tenantId: 't1', projectId: 'p1', userId: 'u1', licenseType: 'FREE' as never,
@@ -45,6 +49,96 @@ describe('assertAgentTurnSpendAllowed', () => {
       ctx.resourceKey === 'cheap' ? { allowed: false, reason: 'Budget exceeded' } : { allowed: true });
     await expect(assertAgentTurnSpendAllowed(scope, { modelKey: 'main', subagents: [{ modelKey: 'cheap' }] as never }))
       .rejects.toBeInstanceOf(AgentSpendLimitError);
+  });
+});
+
+describe('assertAgentTurnSpendAllowed: the checks run together, the first refusal in key order wins', () => {
+  const subs = [{ modelKey: 'b' }, { modelKey: 'c' }] as never;
+
+  it('starts every key\'s check before waiting for any', async () => {
+    hoisted.checkBudget.mockReset();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    hoisted.checkBudget.mockImplementation(async () => { await gate; return { allowed: true }; });
+    const done = assertAgentTurnSpendAllowed(scope, { modelKey: 'a', subagents: subs });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(hoisted.checkBudget).toHaveBeenCalledTimes(3);
+    release();
+    await done;
+  });
+
+  it('reports the earlier key\'s refusal even when a later key answers first', async () => {
+    hoisted.checkBudget.mockReset();
+    hoisted.checkBudget.mockImplementation(async (ctx: { resourceKey: string }) => {
+      if (ctx.resourceKey === 'b') {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return { allowed: false, reason: 'b is over' };
+      }
+      if (ctx.resourceKey === 'c') return { allowed: false, reason: 'c is over' };
+      return { allowed: true };
+    });
+    await expect(assertAgentTurnSpendAllowed(scope, { modelKey: 'a', subagents: subs }))
+      .rejects.toMatchObject({ message: 'b is over' });
+  });
+
+  it('a check that errors earlier in key order wins over a later refusal', async () => {
+    hoisted.checkBudget.mockReset();
+    hoisted.checkBudget.mockImplementation(async (ctx: { resourceKey: string }) => {
+      if (ctx.resourceKey === 'a') throw new Error('store down');
+      return { allowed: false, reason: 'later refusal' };
+    });
+    await expect(assertAgentTurnSpendAllowed(scope, { modelKey: 'a', subagents: subs }))
+      .rejects.toThrow('store down');
+  });
+});
+
+describe('resolveAgentSpendScope: the licence type is memoised per tenant', () => {
+  const input = { tenantDbName: 't_db', tenantId: 't1', projectId: 'p1', userId: 'u1' };
+  const findTenantById = vi.fn();
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    resetAgentSpendLicenseMemo();
+    findTenantById.mockReset();
+    hoisted.getDatabase.mockResolvedValue({ findTenantById });
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('reads the tenant once for repeated turns', async () => {
+    findTenantById.mockResolvedValue({ licenseType: 'PRO' });
+    expect((await resolveAgentSpendScope(input)).licenseType).toBe('PRO');
+    expect((await resolveAgentSpendScope(input)).licenseType).toBe('PRO');
+    expect(findTenantById).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps tenants apart', async () => {
+    findTenantById.mockImplementation(async (id: string) => ({ licenseType: id === 't1' ? 'PRO' : 'FREE' }));
+    expect((await resolveAgentSpendScope(input)).licenseType).toBe('PRO');
+    expect((await resolveAgentSpendScope({ ...input, tenantId: 't2' })).licenseType).toBe('FREE');
+    expect(findTenantById).toHaveBeenCalledTimes(2);
+  });
+
+  it('sees a licence change after the memo expires', async () => {
+    findTenantById.mockResolvedValueOnce({ licenseType: 'PRO' }).mockResolvedValueOnce({ licenseType: 'ENTERPRISE' });
+    expect((await resolveAgentSpendScope(input)).licenseType).toBe('PRO');
+    vi.advanceTimersByTime(29_000);
+    expect((await resolveAgentSpendScope(input)).licenseType).toBe('PRO');
+    vi.advanceTimersByTime(2_000);
+    expect((await resolveAgentSpendScope(input)).licenseType).toBe('ENTERPRISE');
+    expect(findTenantById).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers FREE for a tenant that cannot be read, without remembering it', async () => {
+    findTenantById.mockRejectedValueOnce(new Error('db down')).mockResolvedValueOnce({ licenseType: 'PRO' });
+    expect((await resolveAgentSpendScope(input)).licenseType).toBe('FREE');
+    expect((await resolveAgentSpendScope(input)).licenseType).toBe('PRO');
+  });
+
+  it('leaves out the user for a synthetic actor', async () => {
+    findTenantById.mockResolvedValue({ licenseType: 'PRO' });
+    const scoped = await resolveAgentSpendScope({ ...input, userId: 'system:schedule' });
+    expect(scoped.userId).toBeUndefined();
   });
 });
 

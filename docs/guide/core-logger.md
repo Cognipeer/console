@@ -92,7 +92,7 @@ When a request runs inside `runWithRequestContext()`, the logger automatically a
 This happens transparently — no manual passing required:
 
 ```typescript
-// In route handler wrapped with withRequestContext:
+// In route handler wrapped with withApiRequestContext:
 const logger = createLogger('my-service');
 logger.info('Processing request'); 
 // Output includes requestId, tenantId automatically

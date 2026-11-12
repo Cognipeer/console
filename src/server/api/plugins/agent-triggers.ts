@@ -74,7 +74,6 @@ import {
 } from '@/lib/services/agents/agentTriggerConnectorHost';
 import { dryRunAnswer, manualConnectorTurn } from '@/lib/services/agents/agentTriggerEventDispatch';
 import { manualWebhookTurn, serializeDelivery } from '@/lib/services/agents/agentTriggerWebhookDelivery';
-import { isRetiredWebhook } from '@/lib/services/agents/agentTriggerWebhookAuth';
 import {
   MAX_ROTATION_GRACE_SECONDS,
   openWebhookSecrets,
@@ -99,7 +98,6 @@ import { parsePreferHeader, parseTimestamp, parseWaitSeconds } from './client-ag
 const logger = createLogger('api:agent-triggers');
 
 const INTERNAL_ERROR_BODY = apiErrorBody('api_error', 'Internal error', 'internal_error');
-const RETIRED_WEBHOOK_MESSAGE = 'This webhook trigger used a retired vendor preset. Recreate it as a connector trigger.';
 const EVENT_TYPE_RE = /^[A-Za-z0-9._:-]{1,64}$/;
 
 export const TRIGGER_NAME_MAX_LENGTH = 200;
@@ -565,9 +563,6 @@ async function runTriggerNow(request: FastifyRequest, reply: FastifyReply, calle
   if (body.event !== undefined && (typeof body.event !== 'string' || !EVENT_TYPE_RE.test(body.event))) {
     return bad('event must be an event type like "pull_request.opened" (letters, digits and . _ : -, at most 64 characters)', 'invalid_request');
   }
-  if (trigger.type === 'webhook' && isRetiredWebhook(trigger.webhook)) {
-    return reply.code(410).send(apiErrorBody('gone', RETIRED_WEBHOOK_MESSAGE, 'webhook_preset_retired'));
-  }
   if (body.dry_run !== undefined && typeof body.dry_run !== 'boolean') return bad('dry_run must be a boolean', 'invalid_request');
   if (body.payload !== undefined && (body.payload === null || typeof body.payload !== 'object')) {
     return bad('payload must be a JSON object or array, like a delivery body', 'invalid_payload');
@@ -697,9 +692,6 @@ async function rotateTriggerWebhookSecret(request: FastifyRequest, reply: Fastif
     return reply.code(400).send(invalidTriggerBody([{ field: 'grace_seconds', message: `grace_seconds must be a whole number from 0 to ${MAX_ROTATION_GRACE_SECONDS}` }]));
   }
   if (trigger.type === 'connector') return rotateConnectorSecret(reply, caller, trigger, grace);
-  if (isRetiredWebhook(trigger.webhook)) {
-    return reply.code(410).send(apiErrorBody('gone', RETIRED_WEBHOOK_MESSAGE, 'webhook_preset_retired'));
-  }
   const rotated = rotateWebhookSecret(trigger.webhook, { graceSeconds: grace, secret: body.secret });
   if (!rotated.ok) return reply.code(400).send(invalidTriggerBody([{ field: rotated.field, message: rotated.message }]));
   const updated = await updateAgentTrigger(caller.scope, trigger, { type: 'webhook', webhook: rotated.webhook }, caller.userId);

@@ -33,7 +33,11 @@ vi.mock('@/lib/core/queue', () => ({
 
 vi.mock('@/lib/database', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/database')>();
-  return { ...actual, getDatabase: hoisted.getDatabase };
+  return {
+    ...actual,
+    getDatabase: hoisted.getDatabase,
+    runWithTenantScope: vi.fn(async (_tenant: string, fn: (db: unknown) => unknown) => fn(await hoisted.getDatabase())),
+  };
 });
 
 import { getDatabase } from '@/lib/database';

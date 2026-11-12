@@ -2,9 +2,8 @@
 /**
  * The agent triggers panel with connector triggers, driven the way a person drives it (jsdom). The enterprise parts
  * (catalog hook, picker, status) are replaced by small fakes through the seam file, so what is checked here is the
- * community side: when the Connector choice shows, what a save sends for the picker's value, the Retired badge and the
- * conversion of a retired vendor trigger, the Settings / Test / Deliveries tabs of a saved connector trigger and the
- * hint about unattended runs.
+ * community side: when the Connector choice shows, what a save sends for the picker's value, the Settings / Test /
+ * Deliveries tabs of a saved connector trigger and the hint about unattended runs.
  * (createElement, not JSX: the suite only collects `.test.ts`.)
  */
 
@@ -180,13 +179,6 @@ const connectorRow = (overrides: Record<string, unknown> = {}, connector: Record
   },
   ...overrides,
 });
-const retiredRow = () => ({
-  ...common, id: 'r1', name: 'Old GitHub hook', type: 'webhook', variables: { region: 'eu' },
-  webhook: {
-    url: 'https://console.example.com/api/public/hooks/t/wh_x', preset: 'github', auth: 'github_signature', retired: true, events: ['pull_request'],
-    filter: [{ path: 'payload.sender.type', op: 'eq', value: 'User' }], include_payload: false,
-  },
-});
 const listOf = (...rows: unknown[]) => routes.push((url, method) => (method === 'GET' && /\/triggers(?:\?|$)/.test(url) ? json({ data: rows }) : null));
 /** A subscription as the trigger routes answer it. */
 const subscriptionWire = (id: string, status = 'active', over: Record<string, unknown> = {}) => ({ subscription_id: id, status, kind: 'webhook', bindings: 1, ...over });
@@ -209,8 +201,7 @@ const settle = async (step: () => void) => { await act(async () => { step(); for
 
 /** The sentences of the editor, as the reader's language has them. */
 const words = (locale: 'en' | 'tr' = 'en') => messages[locale].agents.triggers;
-const occurrences = (haystack: string, needle: string) => haystack.split(needle).length - 1;
-/** The line under a filter row's path field: where the conversion marks a rule that matches nothing or everything. */
+/** The line under a form field: its error text. */
 const hintUnder = (input: HTMLInputElement) => input.closest('[class*="InputWrapper-root"]')?.querySelector('[class*="InputWrapper-error"]')?.textContent ?? null;
 
 const panel = () => h(AgentTriggersPanel, {
@@ -496,167 +487,8 @@ describe('the list', () => {
   });
 });
 
-describe('a retired vendor webhook trigger', () => {
-  it('shows the Retired badge, cannot be run, and offers the conversion', async () => {
-    listOf(retiredRow());
-    mount(panel());
-    await flush();
-    expect(text()).toContain('Retired');
-    expect(text()).toContain('GitHub · pull_request');
-    expect(button('Run now')).toBeUndefined();
-    expect(button('Convert to connector trigger')).toBeDefined();
-  });
-
-  it('is only marked, not convertible, when the module is missing', async () => {
-    catalog.available = false;
-    listOf(retiredRow());
-    mount(panel());
-    await flush();
-    expect(text()).toContain('Retired');
-    expect(button('Convert to connector trigger')).toBeUndefined();
-    expect(button('Edit')).toBeDefined();
-  });
-
-  it('converts into the editor as a connector trigger carrying prompt, variables, filter and payload choice, and saves over the same row', async () => {
-    listOf(retiredRow());
-    routes.push((url, method) => (method === 'PATCH' && /\/triggers\/r1(?:\?|$)/.test(url) ? json(connectorRow({ id: 'r1', connector_subscription: null })) : null));
-    mount(panel());
-    await flush();
-    await click(button('Convert to connector trigger'));
-    expect(text()).toContain('nothing picked');
-    expect(document.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('Review {{payload.number}}');
-    expect(document.querySelector<HTMLInputElement>('input[placeholder="Nightly digest"]')!.value).toBe('Old GitHub hook');
-    expect(document.querySelector<HTMLInputElement>('input[aria-label="Path"]')!.value).toBe('payload.sender.type');
-    expect(document.querySelector<HTMLInputElement>('input[aria-label="Value"]')!.value).toBe('User');
-    // The retired-webhook warning belongs to the plain Edit, not to the conversion.
-    expect(text()).not.toContain('re-creates it as a generic webhook');
-    // Nothing to save until a connector is picked.
-    await click(button('Save trigger'));
-    expect(calls.some((call) => call.method === 'PATCH')).toBe(false);
-    await click(button('Pick GitHub pull requests'));
-    await click(button('Save trigger'));
-
-    const patch = calls.find((call) => call.method === 'PATCH')!;
-    expect(patch.url).toBe('/api/agents/a1/triggers/r1?locale=en');
-    expect(patch.body).toMatchObject({
-      type: 'connector', prompt: 'Review {{payload.number}}', variables: { region: 'eu' },
-      connector: { connector_id: 'c1', filter: [{ path: 'payload.sender.type', op: 'eq', value: 'User' }], include_payload: false },
-    });
-    expect(patch.body).not.toHaveProperty('webhook');
-  });
-
-  it('tells the converting user that the carried-over rules and tags were written for the vendor, and to check them with Preview', async () => {
-    listOf(retiredRow());
-    mount(panel());
-    await flush();
-    await click(button('Convert to connector trigger'));
-    expect(text()).toContain('written for the vendor\'s own webhook and are kept as they were');
-    expect(text()).toContain('payload.draft, payload.number, payload.repository');
-    expect(text()).toContain('use Preview on the Test tab');
-    // A rule on the carried-over payload path is shown as it is, not marked: only headers / preset can never match.
-    expect(text()).not.toContain(words().convertRowHint);
-    expect(text()).not.toContain(words().convertRowAlwaysHint);
-  });
-
-  it('marks the carried-over rules on headers or preset, keeps them, and sends them unchanged when saved', async () => {
-    const row = retiredRow();
-    row.webhook.filter = [
-      { path: 'headers.x-github-event', op: 'eq', value: 'pull_request' },
-      { path: 'payload.sender.type', op: 'eq', value: 'User' },
-    ];
-    listOf(row);
-    routes.push((url, method) => (method === 'PATCH' && /\/triggers\/r1(?:\?|$)/.test(url) ? json(connectorRow({ id: 'r1', connector_subscription: null })) : null));
-    mount(panel());
-    await flush();
-    await click(button('Convert to connector trigger'));
-    const paths = [...document.querySelectorAll<HTMLInputElement>('input[aria-label="Path"]')];
-    expect(paths.map((input) => input.value)).toEqual(['headers.x-github-event', 'payload.sender.type']);
-    expect(occurrences(text(), words().convertRowHint)).toBe(1);
-    await click(button('Pick GitHub pull requests'));
-    await click(button('Save trigger'));
-    const patch = calls.find((call) => call.method === 'PATCH')!;
-    expect((patch.body as { connector: { filter: unknown } }).connector.filter).toEqual([
-      { path: 'headers.x-github-event', op: 'eq', value: 'pull_request' },
-      { path: 'payload.sender.type', op: 'eq', value: 'User' },
-    ]);
-  });
-
-  it('tells a carried-over rule that matches every connector event from one that matches none, under its own row', async () => {
-    const row = retiredRow();
-    const filter = [
-      { path: 'headers.x-github-event', op: 'eq', value: 'pull_request' },
-      { path: 'headers.x-github-event', op: 'neq', value: 'pull_request' },
-      { path: 'headers.x-github-event', op: 'exists' },
-      { path: 'headers.x-github-event', op: 'not_exists' },
-      { path: 'headers.x-github-event', op: 'contains', value: 'pull' },
-      { path: 'preset', op: 'eq', value: 'connector' },
-      { path: 'preset', op: 'eq', value: 'github' },
-      { path: 'preset', op: 'neq', value: 'github' },
-      { path: 'payload.sender.type', op: 'eq', value: 'User' },
-    ];
-    listOf({ ...row, webhook: { ...row.webhook, filter } });
-    routes.push((url, method) => (method === 'PATCH' && /\/triggers\/r1(?:\?|$)/.test(url) ? json(connectorRow({ id: 'r1', connector_subscription: null })) : null));
-    mount(panel());
-    await flush();
-    await click(button('Convert to connector trigger'));
-    const never = words().convertRowHint;
-    const always = words().convertRowAlwaysHint;
-    expect(never).not.toBe(always);
-    const paths = [...document.querySelectorAll<HTMLInputElement>('input[aria-label="Path"]')];
-    expect(paths.map(hintUnder)).toEqual([never, never, never, always, never, always, never, always, null]);
-    // Nothing is dropped behind the user's back: all nine rows are sent as they were.
-    await click(button('Pick GitHub pull requests'));
-    await click(button('Save trigger'));
-    const patch = calls.find((call) => call.method === 'PATCH')!;
-    expect((patch.body as { connector: { filter: unknown } }).connector.filter).toEqual(filter);
-  });
-
-  it('follows the rule as it is edited: a preset rule that matched nothing matches every event once it names the connector preset', async () => {
-    const row = retiredRow();
-    row.webhook.filter = [{ path: 'preset', op: 'eq', value: 'github' }];
-    listOf(row);
-    mount(panel());
-    await flush();
-    await click(button('Convert to connector trigger'));
-    expect(text()).toContain('this rule never matches.');
-    expect(text()).not.toContain('so it filters nothing');
-    typeInto(document.querySelector<HTMLInputElement>('input[aria-label="Value"]')!, 'connector');
-    expect(text()).toContain('this rule matches every connector event, so it filters nothing.');
-    expect(text()).not.toContain('this rule never matches.');
-  });
-
-  it('says of a rule on the preset what a connector event does have: no headers, and the preset “connector”, so the rule never matches', async () => {
-    const row = retiredRow();
-    row.webhook.filter = [
-      { path: 'preset', op: 'eq', value: 'github' },
-      { path: 'headers.x-github-event', op: 'eq', value: 'pull_request' },
-    ];
-    listOf(row);
-    mount(panel());
-    await flush();
-    await click(button('Convert to connector trigger'));
-    const hints = [...document.querySelectorAll<HTMLInputElement>('input[aria-label="Path"]')].map(hintUnder);
-    // One sentence for both: the event has no headers and its preset is “connector”. It does not claim there is no preset.
-    const never = 'A connector event has no headers and its preset is always “connector”: this rule never matches.';
-    expect(hints).toEqual([never, never]);
-    expect(hints[0]).not.toMatch(/no headers or preset/);
-    expect(words().convertRowHint).toBe(never);
-  });
-
-  it('says it in Turkish too: the preset is “connector”, it is not missing', async () => {
-    const row = retiredRow();
-    row.webhook.filter = [{ path: 'preset', op: 'eq', value: 'github' }];
-    listOf(row);
-    mount(panel(), 'tr');
-    await flush();
-    await click(button('Bağlayıcı tetikleyiciye dönüştür'));
-    const never = 'Bağlayıcı olayında başlık (header) yoktur ve hazır ayarı (preset) her zaman “connector”dır: bu kural hiçbir zaman eşleşmez.';
-    expect([...document.querySelectorAll<HTMLInputElement>(`input[aria-label="${words('tr').webhookFilterPath}"]`)].map(hintUnder)).toEqual([never]);
-    expect(words('tr').convertRowHint).toBe(never);
-    expect(never).not.toContain('hazır ayar yoktur');
-  });
-
-  it('shows neither the conversion notice nor a mark in a plain edit of a connector trigger or a new one', async () => {
+describe('a connector trigger edited in place', () => {
+  it('a plain edit of a connector trigger shows neither a conversion notice nor a mark on its rules', async () => {
     catalog.connectors = [{
       id: 'c1', key: 'github', name: 'GitHub (acme)', packageId: 'cognipeer.github', packageName: 'GitHub', status: 'active', accountStatus: 'active',
       triggers: [{ name: 'pull_request', title: 'Pull request', description: '', kind: 'webhook', events: [], params: {}, autoSubscribe: true, sample: { type: 'pull_request.opened', data: {} } }],
@@ -668,16 +500,6 @@ describe('a retired vendor webhook trigger', () => {
     await click(button('Edit'));
     expect(text()).not.toContain('written for the vendor\'s own webhook');
     expect(text()).not.toContain('this rule never matches');
-  });
-
-  it('warns that a plain edit re-creates it as a generic webhook, and has no Connect card or Test tab', async () => {
-    listOf(retiredRow());
-    mount(panel());
-    await flush();
-    await click(button('Edit'));
-    expect(text()).toContain('re-creates it as a generic webhook');
-    expect(tab('Test')).toBeUndefined();
-    expect(text()).not.toContain('Connect the sender');
   });
 });
 

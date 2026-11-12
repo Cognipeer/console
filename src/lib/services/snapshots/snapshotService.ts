@@ -45,7 +45,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type { IAgentTracingEvent, IAgentTracingSession, IModelUsageLog, IUsageDaily } from '@/lib/database';
 import { createDataset } from '@/lib/services/evaluation/service';
 import { toUtcDay } from '@/lib/services/usage/usageBreakdown';
@@ -837,7 +837,7 @@ export function mapTracingSession(
 
 // ── Row enumeration ────────────────────────────────────────────────────────
 
-type Db = Awaited<ReturnType<typeof getDatabase>>;
+type Db = DatabaseProvider;
 
 function matchesGatewayStatus(row: IModelUsageLog, status: SnapshotFilters['status']): boolean {
   return !status || row.status === status;
@@ -976,17 +976,17 @@ export async function listSnapshotFilterOptions(
   ctx: SnapshotContext,
   window: { from?: Date; to?: Date } = {},
 ): Promise<SnapshotFilterOptions> {
-  const db = await getDatabase();
-  await db.switchToTenant(ctx.tenantDbName);
-  const from = window.from ?? new Date(Date.now() - FILTER_OPTIONS_WINDOW_DAYS * 86_400_000);
-  const rows = await db.listUsageDaily({
-    projectId: ctx.projectId,
-    service: 'models',
-    fromDay: toUtcDay(from),
-    ...(window.to ? { toDay: toUtcDay(window.to) } : {}),
-    limit: FILTER_OPTIONS_ROW_LIMIT,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const from = window.from ?? new Date(Date.now() - FILTER_OPTIONS_WINDOW_DAYS * 86_400_000);
+    const rows = await db.listUsageDaily({
+      projectId: ctx.projectId,
+      service: 'models',
+      fromDay: toUtcDay(from),
+      ...(window.to ? { toDay: toUtcDay(window.to) } : {}),
+      limit: FILTER_OPTIONS_ROW_LIMIT,
+    });
+    return deriveSnapshotFilterOptions(rows);
   });
-  return deriveSnapshotFilterOptions(rows);
 }
 
 // ── Preview ────────────────────────────────────────────────────────────────
@@ -1001,60 +1001,59 @@ export async function listSnapshotFilterOptions(
  * this estimate (still bounded by `limit`). See SnapshotPreview.wouldCreate.
  */
 export async function previewSnapshot(ctx: SnapshotContext, params: SnapshotParams): Promise<SnapshotPreview> {
-  const db = await getDatabase();
-  await db.switchToTenant(ctx.tenantDbName);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const filters = params.filters ?? {};
+    const samplePct = normalizeSamplePct(filters.samplePct);
+    const limit = normalizeLimit(filters.limit);
 
-  const filters = params.filters ?? {};
-  const samplePct = normalizeSamplePct(filters.samplePct);
-  const limit = normalizeLimit(filters.limit);
+    let matching = 0;
+    let sampled = 0;
+    const breakdown = new Map<string, SnapshotBreakdownEntry>();
 
-  let matching = 0;
-  let sampled = 0;
-  const breakdown = new Map<string, SnapshotBreakdownEntry>();
+    const record = (key: string, stableId: string) => {
+      matching += 1;
+      let entry = breakdown.get(key);
+      if (!entry) {
+        entry = { key, matching: 0, sampled: 0 };
+        breakdown.set(key, entry);
+      }
+      entry.matching += 1;
+      if (isSampled(stableId, samplePct)) {
+        sampled += 1;
+        entry.sampled += 1;
+      }
+    };
 
-  const record = (key: string, stableId: string) => {
-    matching += 1;
-    let entry = breakdown.get(key);
-    if (!entry) {
-      entry = { key, matching: 0, sampled: 0 };
-      breakdown.set(key, entry);
+    // Left out exactly as the create call leaves them out, so `wouldCreate` stays honest.
+    let restricted = 0;
+    let scan: { scanned: number; scanCapped: boolean };
+    if (params.source === 'gateway') {
+      scan = await scanGatewayRows(db, ctx, filters, (row) => {
+        if (!matchesGatewayStatus(row, filters.status)) return;
+        if (isRestrictedRow(row)) restricted += 1;
+        else record(row.modelKey, row.requestId);
+      });
+    } else {
+      scan = await scanTracingSessions(db, ctx, filters, (session, isRestricted) => {
+        if (!matchesTracingStatus(session, filters.status)) return;
+        if (isRestricted) restricted += 1;
+        else record(session.agentName ?? '', session.sessionId);
+      });
     }
-    entry.matching += 1;
-    if (isSampled(stableId, samplePct)) {
-      sampled += 1;
-      entry.sampled += 1;
-    }
-  };
 
-  // Left out exactly as the create call leaves them out, so `wouldCreate` stays honest.
-  let restricted = 0;
-  let scan: { scanned: number; scanCapped: boolean };
-  if (params.source === 'gateway') {
-    scan = await scanGatewayRows(db, ctx, filters, (row) => {
-      if (!matchesGatewayStatus(row, filters.status)) return;
-      if (isRestrictedRow(row)) restricted += 1;
-      else record(row.modelKey, row.requestId);
-    });
-  } else {
-    scan = await scanTracingSessions(db, ctx, filters, (session, isRestricted) => {
-      if (!matchesTracingStatus(session, filters.status)) return;
-      if (isRestricted) restricted += 1;
-      else record(session.agentName ?? '', session.sessionId);
-    });
-  }
-
-  return {
-    source: params.source,
-    matching,
-    sampled,
-    wouldCreate: Math.min(sampled, limit),
-    scanned: scan.scanned,
-    scanCapped: scan.scanCapped,
-    samplePct,
-    limit,
-    breakdown: [...breakdown.values()].sort((a, b) => b.matching - a.matching),
-    ...(restricted > 0 ? { restricted } : {}),
-  };
+    return {
+      source: params.source,
+      matching,
+      sampled,
+      wouldCreate: Math.min(sampled, limit),
+      scanned: scan.scanned,
+      scanCapped: scan.scanCapped,
+      samplePct,
+      limit,
+      breakdown: [...breakdown.values()].sort((a, b) => b.matching - a.matching),
+      ...(restricted > 0 ? { restricted } : {}),
+    };
+  });
 }
 
 // ── Create ─────────────────────────────────────────────────────────────────
@@ -1104,149 +1103,148 @@ export async function buildSnapshotDataset(
     throw new Error('`name` is required');
   }
 
-  const db = await getDatabase();
-  await db.switchToTenant(ctx.tenantDbName);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const filters = params.filters ?? {};
+    const samplePct = normalizeSamplePct(filters.samplePct);
+    const limit = normalizeLimit(filters.limit);
 
-  const filters = params.filters ?? {};
-  const samplePct = normalizeSamplePct(filters.samplePct);
-  const limit = normalizeLimit(filters.limit);
+    const items: SnapshotDatasetItem[] = [];
+    const skipped: SnapshotSkipCounts = { truncatedPayload: 0, missingMessages: 0, unmappable: 0, sizeCapped: 0, restricted: 0 };
+    let matching = 0;
+    let sampled = 0;
+    let piiFindings = 0;
+    let messageSectionSessions = 0;
+    let noContentSessions = 0;
+    // Datasets persist as ONE document — stay far below Mongo's 16MB cap.
+    let payloadBytes = 0;
+    const pushWithinBudget = (rawItem: SnapshotDatasetItem): boolean => {
+      const item = withLanguageTag(rawItem);
+      const itemBytes = Buffer.byteLength(JSON.stringify(item), 'utf8');
+      if (payloadBytes + itemBytes > SNAPSHOT_PAYLOAD_BUDGET_BYTES) {
+        skipped.sizeCapped += 1;
+        return false;
+      }
+      payloadBytes += itemBytes;
+      items.push(item);
+      return true;
+    };
 
-  const items: SnapshotDatasetItem[] = [];
-  const skipped: SnapshotSkipCounts = { truncatedPayload: 0, missingMessages: 0, unmappable: 0, sizeCapped: 0, restricted: 0 };
-  let matching = 0;
-  let sampled = 0;
-  let piiFindings = 0;
-  let messageSectionSessions = 0;
-  let noContentSessions = 0;
-  // Datasets persist as ONE document — stay far below Mongo's 16MB cap.
-  let payloadBytes = 0;
-  const pushWithinBudget = (rawItem: SnapshotDatasetItem): boolean => {
-    const item = withLanguageTag(rawItem);
-    const itemBytes = Buffer.byteLength(JSON.stringify(item), 'utf8');
-    if (payloadBytes + itemBytes > SNAPSHOT_PAYLOAD_BUDGET_BYTES) {
-      skipped.sizeCapped += 1;
-      return false;
-    }
-    payloadBytes += itemBytes;
-    items.push(item);
-    return true;
-  };
-
-  if (params.source === 'gateway') {
-    await scanGatewayRows(db, ctx, filters, (row) => {
-      if (!matchesGatewayStatus(row, filters.status)) return;
-      if (isRestrictedRow(row)) {
-        skipped.restricted! += 1;
-        return;
-      }
-      matching += 1;
-      if (!isSampled(row.requestId, samplePct)) return;
-      sampled += 1;
-      const outcome = mapGatewayRow(row, params.anonymize);
-      if (outcome.kind === 'skip') {
-        skipped[outcome.reason] += 1;
-        return;
-      }
-      piiFindings += outcome.findings;
-      if (!pushWithinBudget(outcome.item)) return false; // budget hit — stop
-      if (items.length >= limit) return false; // stop scanning
-    });
-  } else {
-    await scanTracingSessions(db, ctx, filters, async (session, restricted) => {
-      if (!matchesTracingStatus(session, filters.status)) return;
-      if (restricted) {
-        skipped.restricted! += 1;
-        return;
-      }
-      matching += 1;
-      if (!isSampled(session.sessionId, samplePct)) return;
-      sampled += 1;
-      const events = await db.listAgentTracingEvents(session.sessionId, ctx.projectId);
-      const outcome = mapTracingSession(session, events, params.anonymize);
-      if (outcome.kind === 'skip') {
-        skipped.unmappable += 1;
-        noContentSessions += 1;
-        return;
-      }
-      messageSectionSessions += 1;
-      piiFindings += outcome.findings;
-      // A session maps to MULTIPLE items (tool actions + final answer). On a
-      // budget hit the session's remaining items are counted into sizeCapped
-      // (pushWithinBudget already counted the failing one); on the item limit
-      // the scan just stops, as for gateway rows.
-      for (let i = 0; i < outcome.items.length; i++) {
-        if (!pushWithinBudget(outcome.items[i])) {
-          skipped.sizeCapped += outcome.items.length - i - 1;
-          return false;
+    if (params.source === 'gateway') {
+      await scanGatewayRows(db, ctx, filters, (row) => {
+        if (!matchesGatewayStatus(row, filters.status)) return;
+        if (isRestrictedRow(row)) {
+          skipped.restricted! += 1;
+          return;
         }
-        if (items.length >= limit) return false;
-      }
-    });
-  }
+        matching += 1;
+        if (!isSampled(row.requestId, samplePct)) return;
+        sampled += 1;
+        const outcome = mapGatewayRow(row, params.anonymize);
+        if (outcome.kind === 'skip') {
+          skipped[outcome.reason] += 1;
+          return;
+        }
+        piiFindings += outcome.findings;
+        if (!pushWithinBudget(outcome.item)) return false; // budget hit — stop
+        if (items.length >= limit) return false; // stop scanning
+      });
+    } else {
+      await scanTracingSessions(db, ctx, filters, async (session, restricted) => {
+        if (!matchesTracingStatus(session, filters.status)) return;
+        if (restricted) {
+          skipped.restricted! += 1;
+          return;
+        }
+        matching += 1;
+        if (!isSampled(session.sessionId, samplePct)) return;
+        sampled += 1;
+        const events = await db.listAgentTracingEvents(session.sessionId, ctx.projectId);
+        const outcome = mapTracingSession(session, events, params.anonymize);
+        if (outcome.kind === 'skip') {
+          skipped.unmappable += 1;
+          noContentSessions += 1;
+          return;
+        }
+        messageSectionSessions += 1;
+        piiFindings += outcome.findings;
+        // A session maps to MULTIPLE items (tool actions + final answer). On a
+        // budget hit the session's remaining items are counted into sizeCapped
+        // (pushWithinBudget already counted the failing one); on the item limit
+        // the scan just stops, as for gateway rows.
+        for (let i = 0; i < outcome.items.length; i++) {
+          if (!pushWithinBudget(outcome.items[i])) {
+            skipped.sizeCapped += outcome.items.length - i - 1;
+            return false;
+          }
+          if (items.length >= limit) return false;
+        }
+      });
+    }
 
-  // Provenance — everything needed to understand/reproduce the snapshot,
-  // except the salt (deliberately unrecoverable).
-  const metadata = {
-    snapshot: {
-      source: params.source,
-      filters: {
-        from: filters.from?.toISOString(),
-        to: filters.to?.toISOString(),
-        modelKey: filters.modelKey,
-        agentName: filters.agentName,
-        status: filters.status,
+    // Provenance — everything needed to understand/reproduce the snapshot,
+    // except the salt (deliberately unrecoverable).
+    const metadata = {
+      snapshot: {
+        source: params.source,
+        filters: {
+          from: filters.from?.toISOString(),
+          to: filters.to?.toISOString(),
+          modelKey: filters.modelKey,
+          agentName: filters.agentName,
+          status: filters.status,
+        },
+        samplePct,
+        limit,
+        counts: {
+          matching,
+          sampled,
+          created: items.length,
+          skipped,
+          // Tracing sessions emit multiple items (`sampled` counts SESSIONS,
+          // `created` counts ITEMS) — record the ratio so the discrepancy with
+          // the preview's per-session `wouldCreate` estimate is explicit.
+          ...(params.source === 'tracing'
+            ? {
+                itemsPerSession:
+                  messageSectionSessions > 0
+                    ? Math.round((items.length / messageSectionSessions) * 100) / 100
+                    : 0,
+              }
+            : {}),
+        },
+        anonymization: {
+          strategy: params.anonymize.strategy,
+          categories: params.anonymize.categories,
+          customPatternCount: params.anonymize.customPatterns?.length ?? 0,
+        },
+        piiFindings,
+        createdAt: new Date().toISOString(),
       },
-      samplePct,
-      limit,
-      counts: {
+    };
+
+    const mappableDenominator = messageSectionSessions + noContentSessions;
+    return {
+      items,
+      snapshotMeta: metadata.snapshot,
+      summary: {
+        source: params.source,
         matching,
         sampled,
         created: items.length,
         skipped,
-        // Tracing sessions emit multiple items (`sampled` counts SESSIONS,
-        // `created` counts ITEMS) — record the ratio so the discrepancy with
-        // the preview's per-session `wouldCreate` estimate is explicit.
+        piiFindings,
         ...(params.source === 'tracing'
           ? {
-              itemsPerSession:
-                messageSectionSessions > 0
-                  ? Math.round((items.length / messageSectionSessions) * 100) / 100
-                  : 0,
+              tracingShapes: {
+                messageSections: messageSectionSessions,
+                noContent: noContentSessions,
+                mappableFraction: mappableDenominator > 0 ? messageSectionSessions / mappableDenominator : 0,
+              },
             }
           : {}),
       },
-      anonymization: {
-        strategy: params.anonymize.strategy,
-        categories: params.anonymize.categories,
-        customPatternCount: params.anonymize.customPatterns?.length ?? 0,
-      },
-      piiFindings,
-      createdAt: new Date().toISOString(),
-    },
-  };
-
-  const mappableDenominator = messageSectionSessions + noContentSessions;
-  return {
-    items,
-    snapshotMeta: metadata.snapshot,
-    summary: {
-      source: params.source,
-      matching,
-      sampled,
-      created: items.length,
-      skipped,
-      piiFindings,
-      ...(params.source === 'tracing'
-        ? {
-            tracingShapes: {
-              messageSections: messageSectionSessions,
-              noContent: noContentSessions,
-              mappableFraction: mappableDenominator > 0 ? messageSectionSessions / mappableDenominator : 0,
-            },
-          }
-        : {}),
-    },
-  };
+    };
+  });
 }
 
 /**

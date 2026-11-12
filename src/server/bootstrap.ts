@@ -59,7 +59,6 @@ import { ensureBootstrapOrganization } from '@/lib/services/auth/bootstrapOrgani
 import { markBootstrapStarted } from './bootstrapMarker';
 import { ensureServerEnvLoaded } from './env';
 import { resumeDeletingFileBuckets } from './resumeDeletingFileBuckets';
-import { migrateWebSearchProvidersToInstances } from '@/lib/services/webSearch/webSearchInstanceMigration';
 
 const logger = createLogger('startup');
 
@@ -321,9 +320,6 @@ async function runBootstrap(): Promise<void> {
     // reconciler above, for the identical reason: a run created after this
     // point must never be observable as orphaned here.
     await bestEffort(reconcileOrphanedAgentRuns, 'Agent run reconciliation failed during startup');
-
-    // Existing web search providers become instances (idempotent, per tenant, both backends).
-    await bestEffort(migrateWebSearchProvidersToInstances, 'Web search instance migration failed during startup');
   })();
 
   await Promise.all([coreInfraInit, tenantReconciliation]);

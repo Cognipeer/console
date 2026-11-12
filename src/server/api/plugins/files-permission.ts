@@ -26,7 +26,7 @@ import {
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import type { FastifyRequest } from 'fastify';
 import type { AttachmentBucketOption } from '@/lib/services/agents/sessionFilesBucket';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import {
   authorizeResourceForRequest,
   resolveSessionRbacContext,
@@ -135,9 +135,10 @@ export async function requestCanNameBucket(
   scope: { tenantDbName: string; tenantId: string; projectId: string },
   bucketKey: string,
 ): Promise<{ allowed: boolean; decisionId?: string }> {
-  const db = await getDatabase();
-  await db.switchToTenant(scope.tenantDbName);
-  const record = await db.findFileBucketByKey(scope.tenantId, bucketKey, scope.projectId);
+  const record = await runWithTenantScope(
+    scope.tenantDbName,
+    (db) => db.findFileBucketByKey(scope.tenantId, bucketKey, scope.projectId),
+  );
   if (!record) return { allowed: true };
   return askAboutBucket(request, 'file-bucket.update', { id: String(record._id), key: record.key }, scope.projectId, false);
 }

@@ -6,6 +6,10 @@ import { planLimitsActive } from '@/lib/limits/mode';
 import type { PlanLimitKind } from '@/lib/limits/types';
 import { buildUsageSummary } from '@/lib/limits/usageSummary';
 import { requireSessionContext, withApiRequestContext } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "license" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('license') } as const;
 
 const logger = createLogger('api:usage');
 
@@ -29,7 +33,7 @@ function canViewUsage(role: string): boolean {
  * off (always on an onprem deployment), so the surface does not exist there.
  */
 export const usageApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get('/usage/summary', withApiRequestContext(async (request, reply) => {
+  app.get('/usage/summary', GATE, withApiRequestContext(async (request, reply) => {
     if (!planLimitsActive()) return reply.code(404).send({ error: 'Not Found' });
     try {
       const session = requireSessionContext(request);
@@ -43,7 +47,7 @@ export const usageApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/usage/events', withApiRequestContext(async (request, reply) => {
+  app.get('/usage/events', GATE, withApiRequestContext(async (request, reply) => {
     if (!planLimitsActive()) return reply.code(404).send({ error: 'Not Found' });
     try {
       const session = requireSessionContext(request);

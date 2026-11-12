@@ -72,7 +72,7 @@ export { describeRequestContract, resolveModelInvocationConfig } from './gateway
 export type { LoggedRequestContract } from './gatewayRequest';
 export { executeModelCall } from './gatewayCore';
 
-import type { NativeEmbedOptions, NativeEmbedder } from '@/lib/providers/domains/model';
+import type { ModelProviderRuntime, NativeEmbedOptions, NativeEmbedder } from '@/lib/providers/domains/model';
 
 const encoder = new TextEncoder();
 
@@ -355,17 +355,67 @@ function sseStream(outcome: ModelCallOutcome, hangUp: AbortController): Readable
 }
 
 
+function modelNotFound(modelKey: string): Error {
+  return new Error(`Model with key ${modelKey} not found`);
+}
+
+interface ModelCallTarget {
+  tenantDbName: string;
+  modelKey: string;
+  projectId: string;
+}
+
 /**
  * Non-chat paths do not balance across replicas, but they must still skip a
  * replica the operator switched off, so they serve from the first enabled one.
+ * Throws when the model does not exist; `ensureCategory` (when given) rejects a
+ * model of the wrong category before anything else is done for it.
  */
-async function getServingModel(
+async function loadServingModel(
+  { tenantDbName, modelKey, projectId }: ModelCallTarget,
+  ensureCategory?: (model: IModel) => void,
+): Promise<IModel> {
+  const loaded = await getModelByKey(tenantDbName, modelKey, projectId);
+  if (!loaded) throw modelNotFound(modelKey);
+  const model = primaryReplicaModel(loaded);
+  ensureCategory?.(model);
+  return model;
+}
+
+/** The provider runtime that serves `model` (a replica copy of a model when one serves it). */
+async function openModelRuntime(
   tenantDbName: string,
-  modelKey: string,
   projectId: string,
-): Promise<IModel | null> {
-  const model = await getModelByKey(tenantDbName, modelKey, projectId);
-  return model ? primaryReplicaModel(model) : null;
+  model: Pick<IModel, 'tenantId' | 'providerKey'>,
+  options?: Parameters<typeof buildModelRuntime>[4],
+): Promise<ModelProviderRuntime> {
+  const { runtime } = options
+    ? await buildModelRuntime(tenantDbName, model.tenantId, model.providerKey, projectId, options)
+    : await buildModelRuntime(tenantDbName, model.tenantId, model.providerKey, projectId);
+  return runtime;
+}
+
+/**
+ * The opening every non-chat entry point shares: the serving model, its category
+ * check and the provider runtime that serves it. What the call does with the
+ * runtime (which factory, which route, what is billed) stays with the caller.
+ */
+async function prepareModelCall(
+  target: ModelCallTarget,
+  ensureCategory: (model: IModel) => void,
+): Promise<{ model: IModel; runtime: ModelProviderRuntime }> {
+  const model = await loadServingModel(target, ensureCategory);
+  const runtime = await openModelRuntime(target.tenantDbName, target.projectId, model);
+  return { model, runtime };
+}
+
+/** What every provider domain factory (STT, TTS, image, moderation, OCR, embedding) is told about its model. */
+function domainRuntimeConfig(model: IModel) {
+  return {
+    modelId: model.modelId,
+    category: model.category,
+    modelSettings: model.settings,
+  };
 }
 
 const MANAGED_MODEL_UNAVAILABLE = 'This model is not available right now.';
@@ -401,9 +451,7 @@ export async function handleEmbeddingRequest(params: {
   const start = Date.now();
 
   const loaded = await getModelByKey(tenantDbName, modelKey, projectId);
-  if (!loaded) {
-    throw new Error(`Model with key ${modelKey} not found`);
-  }
+  if (!loaded) throw modelNotFound(modelKey);
 
   ensureEmbeddingModel(loaded);
 
@@ -419,20 +467,17 @@ export async function handleEmbeddingRequest(params: {
 
   // One upstream attempt: the runtime and embedder of `served`, built from a managed route's connection when given.
   const prepareEmbedder = async (served: IModel, managedConnectionId?: string) => {
-    const { runtime } = await buildModelRuntime(
+    const runtime = await openModelRuntime(
       tenantDbName,
-      model.tenantId,
-      served.providerKey,
       projectId,
+      { tenantId: model.tenantId, providerKey: served.providerKey },
       managed ? { allowManaged: true, managedConnectionId } : { allowManaged: true },
     );
     if (!runtime.createNativeEmbedder) {
       throw new Error('Model provider does not support embeddings');
     }
     const created = await runtime.createNativeEmbedder({
-      modelId: served.modelId,
-      category: served.category,
-      modelSettings: served.settings,
+      ...domainRuntimeConfig(served),
       // `withResilience` owns retry and circuit-breaking here.
       options: { maxRetries: 0 },
     });
@@ -699,29 +744,14 @@ export async function handleTranscriptionRequest(params: {
   };
   throwIfCallerAborted();
 
-  const model = await getServingModel(tenantDbName, modelKey, projectId);
-  if (!model) {
-    throw new Error(`Model with key ${modelKey} not found`);
-  }
-  ensureSttModel(model);
-
-  const { runtime } = await buildModelRuntime(
-    tenantDbName,
-    model.tenantId,
-    model.providerKey,
-    projectId,
-  );
+  const { model, runtime } = await prepareModelCall({ tenantDbName, modelKey, projectId }, ensureSttModel);
 
   if (!runtime.createSttRuntime) {
     throw new Error('Model provider does not support speech-to-text');
   }
 
   const sttRuntime = ensureSttRuntime(
-    await runtime.createSttRuntime({
-      modelId: model.modelId,
-      category: model.category,
-      modelSettings: model.settings,
-    }),
+    await runtime.createSttRuntime(domainRuntimeConfig(model)),
   );
 
   const operation = translate ? sttRuntime.translate : sttRuntime.transcribe;
@@ -815,29 +845,14 @@ export async function handleSpeechRequest(params: {
   const requestId = params.requestId || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getServingModel(tenantDbName, modelKey, projectId);
-  if (!model) {
-    throw new Error(`Model with key ${modelKey} not found`);
-  }
-  ensureTtsModel(model);
-
-  const { runtime } = await buildModelRuntime(
-    tenantDbName,
-    model.tenantId,
-    model.providerKey,
-    projectId,
-  );
+  const { model, runtime } = await prepareModelCall({ tenantDbName, modelKey, projectId }, ensureTtsModel);
 
   if (!runtime.createTtsRuntime) {
     throw new Error('Model provider does not support text-to-speech');
   }
 
   const ttsRuntime = ensureTtsRuntime(
-    await runtime.createTtsRuntime({
-      modelId: model.modelId,
-      category: model.category,
-      modelSettings: model.settings,
-    }),
+    await runtime.createTtsRuntime(domainRuntimeConfig(model)),
   );
 
   const result = await withResilience(
@@ -955,29 +970,14 @@ export async function handleSpeechStreamRequest(params: {
   const requestId = params.requestId || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getServingModel(tenantDbName, modelKey, projectId);
-  if (!model) {
-    throw new Error(`Model with key ${modelKey} not found`);
-  }
-  ensureTtsModel(model);
-
-  const { runtime } = await buildModelRuntime(
-    tenantDbName,
-    model.tenantId,
-    model.providerKey,
-    projectId,
-  );
+  const { model, runtime } = await prepareModelCall({ tenantDbName, modelKey, projectId }, ensureTtsModel);
 
   if (!runtime.createTtsRuntime) {
     throw new Error('Model provider does not support text-to-speech');
   }
 
   const ttsRuntime = ensureTtsRuntime(
-    await runtime.createTtsRuntime({
-      modelId: model.modelId,
-      category: model.category,
-      modelSettings: model.settings,
-    }),
+    await runtime.createTtsRuntime(domainRuntimeConfig(model)),
   );
 
   const synthesizeStream = ttsRuntime.synthesizeStream?.bind(ttsRuntime);
@@ -1235,29 +1235,14 @@ export async function handleTranscriptionStreamRequest(params: {
   const requestId = params.requestId || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getServingModel(tenantDbName, modelKey, projectId);
-  if (!model) {
-    throw new Error(`Model with key ${modelKey} not found`);
-  }
-  ensureSttModel(model);
-
-  const { runtime } = await buildModelRuntime(
-    tenantDbName,
-    model.tenantId,
-    model.providerKey,
-    projectId,
-  );
+  const { model, runtime } = await prepareModelCall({ tenantDbName, modelKey, projectId }, ensureSttModel);
 
   if (!runtime.createSttRuntime) {
     throw new Error('Model provider does not support speech-to-text');
   }
 
   const sttRuntime = ensureSttRuntime(
-    await runtime.createSttRuntime({
-      modelId: model.modelId,
-      category: model.category,
-      modelSettings: model.settings,
-    }),
+    await runtime.createSttRuntime(domainRuntimeConfig(model)),
   );
 
   if (typeof sttRuntime.createStream !== 'function') {
@@ -1402,28 +1387,13 @@ export async function handleImageRequest(params: {
   const requestId = params.requestId || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getServingModel(tenantDbName, modelKey, projectId);
-  if (!model) {
-    throw new Error(`Model with key ${modelKey} not found`);
-  }
-  ensureImageModel(model);
-
-  const { runtime } = await buildModelRuntime(
-    tenantDbName,
-    model.tenantId,
-    model.providerKey,
-    projectId,
-  );
+  const { model, runtime } = await prepareModelCall({ tenantDbName, modelKey, projectId }, ensureImageModel);
 
   if (!runtime.createImageRuntime) {
     throw new Error('Model provider does not support image generation');
   }
 
-  const imageRuntime = await runtime.createImageRuntime({
-    modelId: model.modelId,
-    category: model.category,
-    modelSettings: model.settings,
-  });
+  const imageRuntime = await runtime.createImageRuntime(domainRuntimeConfig(model));
 
   const result = await withResilience(
     () => imageRuntime.generate(input),
@@ -1495,28 +1465,13 @@ export async function handleModerationRequest(params: {
   const requestId = params.requestId || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getServingModel(tenantDbName, modelKey, projectId);
-  if (!model) {
-    throw new Error(`Model with key ${modelKey} not found`);
-  }
-  ensureModerationModel(model);
-
-  const { runtime } = await buildModelRuntime(
-    tenantDbName,
-    model.tenantId,
-    model.providerKey,
-    projectId,
-  );
+  const { model, runtime } = await prepareModelCall({ tenantDbName, modelKey, projectId }, ensureModerationModel);
 
   if (!runtime.createModerationRuntime) {
     throw new Error('Model provider does not support moderation');
   }
 
-  const moderationRuntime = await runtime.createModerationRuntime({
-    modelId: model.modelId,
-    category: model.category,
-    modelSettings: model.settings,
-  });
+  const moderationRuntime = await runtime.createModerationRuntime(domainRuntimeConfig(model));
 
   const result = await withResilience(
     () => moderationRuntime.classify(texts),
@@ -1580,10 +1535,7 @@ export async function handleOcrRequest(params: {
   const requestId = params.requestId || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getServingModel(tenantDbName, modelKey, projectId);
-  if (!model) {
-    throw new Error(`Model with key ${modelKey} not found`);
-  }
+  const model = await loadServingModel({ tenantDbName, modelKey, projectId });
   const visionLlm =
     params.allowVisionLlm === true && model.category === 'llm' && model.isMultimodal === true;
   if (!visionLlm) ensureOcrModel(model);
@@ -1592,12 +1544,7 @@ export async function handleOcrRequest(params: {
 
   let result: OcrResult;
   try {
-    const { runtime } = await buildModelRuntime(
-      tenantDbName,
-      model.tenantId,
-      model.providerKey,
-      projectId,
-    );
+    const runtime = await openModelRuntime(tenantDbName, projectId, model);
 
     if (!visionLlm && !runtime.createOcrRuntime) {
       throw new Error('Model provider does not support OCR');
@@ -1620,11 +1567,7 @@ export async function handleOcrRequest(params: {
       },
     };
 
-    const ocrConfig = {
-      modelId: model.modelId,
-      category: model.category,
-      modelSettings: ocrSettings,
-    };
+    const ocrConfig = { ...domainRuntimeConfig(model), modelSettings: ocrSettings };
     let ocrRuntime: OcrRuntime;
     if (visionLlm) {
       const { createVlmOcrRuntime } = await import('@/lib/providers/contracts/vlmOcrHelpers');

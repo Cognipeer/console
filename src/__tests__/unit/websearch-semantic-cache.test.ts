@@ -15,13 +15,17 @@ vi.mock('@/lib/quota/serviceQuota', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/quota/serviceQuota')>()),
   enforceServiceQuota: vi.fn(async () => null),
 }));
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn().mockResolvedValue({
+vi.mock('@/lib/database', () => {
+  const db = {
     switchToTenant: vi.fn().mockResolvedValue(undefined),
     createWebSearchRunLog,
     listWebSearchRunLogs: vi.fn(),
-  }),
-}));
+  };
+  return {
+    getDatabase: vi.fn().mockResolvedValue(db),
+    runWithTenantScope: async (_name: string, fn: (db: unknown) => unknown) => fn(db),
+  };
+});
 
 vi.mock('@/lib/core/asyncTask', () => ({
   fireAndForget: vi.fn((_name: string, fn: () => Promise<void>) => fn()),

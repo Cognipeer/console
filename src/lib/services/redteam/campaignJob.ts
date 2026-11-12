@@ -12,7 +12,7 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase, runWithTenantScope } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { createAsyncRun, executeRun, type RunOptions, type WithId } from './service';
 import { isDue, latestSlot } from './schedulePlanner';
@@ -75,13 +75,12 @@ export async function enqueueCampaignRun(input: EnqueueCampaignRunInput): Promis
     // A run no worker will ever take is ended here, so it does not hold the campaign as busy.
     logger.error('Red-team scan could not be queued', { runId: run.id, campaignKey: campaign.key, error });
     try {
-      const db = await getDatabase();
-      await db.switchToTenant(input.tenantDbName);
-      await db.updateRedTeamRunIf(run.id, { status: 'pending' }, {
-        status: 'failed',
-        error: 'The scan could not be queued; try again.',
-        finishedAt: new Date(),
-      });
+      await runWithTenantScope(input.tenantDbName, (db) =>
+        db.updateRedTeamRunIf(run.id, { status: 'pending' }, {
+          status: 'failed',
+          error: 'The scan could not be queued; try again.',
+          finishedAt: new Date(),
+        }));
     } catch (endError) {
       logger.error('Red-team run left pending after a queue failure', { runId: run.id, error: endError });
     }
@@ -147,47 +146,47 @@ export async function runScheduledScans(
   tenantId: string,
   now: Date = new Date(),
 ): Promise<{ fired: string[]; errors: string[]; claimedElsewhere: string[] }> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const campaigns = await db.listRedTeamCampaigns();
-  const fired: string[] = [];
-  const errors: string[] = [];
-  const claimedElsewhere: string[] = [];
-  for (const campaign of campaigns) {
-    if (!campaign.schedule?.enabled) continue;
-    // Saving refuses this combination; guard again so a campaign that got there
-    // some other way never runs unattended against an unpublished draft.
-    if (campaign.targetKind === 'agent' && storedAgentRevision(campaign.agentVersion) === 'draft') {
-      errors.push(`${campaign.key}: scheduled scans cannot run against the draft; pick Published or a version`);
-      continue;
-    }
-    // Keys are unique per project, so the last run is looked up in the campaign's own project.
-    const recent = await db.listRedTeamRuns({ projectId: campaign.projectId, campaignKey: campaign.key, limit: 1, omitAttempts: true });
-    const last = recent[0]?.startedAt ?? recent[0]?.createdAt ?? null;
-    if (!isDue(campaign.schedule, last ? new Date(last) : null, now)) continue;
-    const slot = latestSlot(campaign.schedule, now);
-    if (!slot) continue;
-    try {
-      const won = await db.claimSchedulerSlot(
-        scheduledSlotKey(tenantDbName, String(campaign._id), slot),
-        new Date(now.getTime() + SLOT_CLAIM_TTL_MS),
-      );
-      if (!won) {
-        claimedElsewhere.push(campaign.key);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const campaigns = await db.listRedTeamCampaigns();
+    const fired: string[] = [];
+    const errors: string[] = [];
+    const claimedElsewhere: string[] = [];
+    for (const campaign of campaigns) {
+      if (!campaign.schedule?.enabled) continue;
+      // Saving refuses this combination; guard again so a campaign that got there
+      // some other way never runs unattended against an unpublished draft.
+      if (campaign.targetKind === 'agent' && storedAgentRevision(campaign.agentVersion) === 'draft') {
+        errors.push(`${campaign.key}: scheduled scans cannot run against the draft; pick Published or a version`);
         continue;
       }
-      await enqueueCampaignRun({
-        tenantDbName,
-        tenantId,
-        projectId: campaign.projectId,
-        createdBy: 'system',
-        campaignKey: campaign.key,
-      });
-      fired.push(campaign.key);
-    } catch (err) {
-      // "already in progress" is expected when the previous scan still runs.
-      errors.push(`${campaign.key}: ${(err as Error).message}`);
+      // Keys are unique per project, so the last run is looked up in the campaign's own project.
+      const recent = await db.listRedTeamRuns({ projectId: campaign.projectId, campaignKey: campaign.key, limit: 1, omitAttempts: true });
+      const last = recent[0]?.startedAt ?? recent[0]?.createdAt ?? null;
+      if (!isDue(campaign.schedule, last ? new Date(last) : null, now)) continue;
+      const slot = latestSlot(campaign.schedule, now);
+      if (!slot) continue;
+      try {
+        const won = await db.claimSchedulerSlot(
+          scheduledSlotKey(tenantDbName, String(campaign._id), slot),
+          new Date(now.getTime() + SLOT_CLAIM_TTL_MS),
+        );
+        if (!won) {
+          claimedElsewhere.push(campaign.key);
+          continue;
+        }
+        await enqueueCampaignRun({
+          tenantDbName,
+          tenantId,
+          projectId: campaign.projectId,
+          createdBy: 'system',
+          campaignKey: campaign.key,
+        });
+        fired.push(campaign.key);
+      } catch (err) {
+        // "already in progress" is expected when the previous scan still runs.
+        errors.push(`${campaign.key}: ${(err as Error).message}`);
+      }
     }
-  }
-  return { fired, errors, claimedElsewhere };
+    return { fired, errors, claimedElsewhere };
+  });
 }

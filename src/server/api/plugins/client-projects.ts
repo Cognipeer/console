@@ -31,6 +31,10 @@ import { seedDefaultAlertRules } from '@/lib/services/alerts/alertTemplates';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { clampRequestedPermissions } from '../clientGrantPolicy';
 import { readJsonBody, readJsonObjectBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "projects" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('projects') } as const;
 
 const logger = createLogger('api:client-projects');
 
@@ -40,7 +44,7 @@ function isTenantAdmin(auth: ApiTokenContext): boolean {
 }
 
 export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get('/client/v1/projects', withClientApiRequestContext(async (_request, reply, auth) => {
+  app.get('/client/v1/projects', GATE, withClientApiRequestContext(async (_request, reply, auth) => {
     try {
       const db = await getDatabase();
       const all = await db.listProjects(auth.tenantId);
@@ -59,7 +63,7 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/client/v1/projects', withClientApiRequestContext(async (request, reply, auth) => {
+  app.post('/client/v1/projects', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -93,7 +97,7 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.patch('/client/v1/projects/:projectId', withClientApiRequestContext(async (request, reply, auth) => {
+  app.patch('/client/v1/projects/:projectId', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { projectId } = request.params as { projectId: string };
@@ -121,7 +125,7 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/client/v1/projects/:projectId', withClientApiRequestContext(async (request, reply, auth) => {
+  app.delete('/client/v1/projects/:projectId', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { projectId } = request.params as { projectId: string };
@@ -154,7 +158,7 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
     return { db, project };
   }
 
-  app.get('/client/v1/projects/:projectId/members', withClientApiRequestContext(async (request, reply, auth) => {
+  app.get('/client/v1/projects/:projectId/members', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { projectId } = request.params as { projectId: string };
@@ -182,7 +186,7 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/client/v1/projects/:projectId/members', withClientApiRequestContext(async (request, reply, auth) => {
+  app.post('/client/v1/projects/:projectId/members', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { projectId } = request.params as { projectId: string };
@@ -217,7 +221,7 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/client/v1/projects/:projectId/members', withClientApiRequestContext(async (request, reply, auth) => {
+  app.delete('/client/v1/projects/:projectId/members', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { projectId } = request.params as { projectId: string };
@@ -244,7 +248,7 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.patch('/client/v1/projects/:projectId/members', withClientApiRequestContext(async (request, reply, auth) => {
+  app.patch('/client/v1/projects/:projectId/members', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { projectId } = request.params as { projectId: string };
@@ -274,7 +278,7 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.patch('/client/v1/projects/:projectId/members/permissions', withClientApiRequestContext(async (request, reply, auth) => {
+  app.patch('/client/v1/projects/:projectId/members/permissions', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { projectId } = request.params as { projectId: string };

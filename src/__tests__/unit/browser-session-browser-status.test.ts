@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(async () => mocks.db),
-  runWithTenantScope: vi.fn(),
+  runWithTenantScope: async (_db: string, fn: (db: unknown) => unknown) => fn(mocks.db),
 }));
 vi.mock('../../lib/services/browser/browserManager', () => ({ browserManager: mocks.manager }));
 vi.mock('@/lib/core/cluster', () => ({

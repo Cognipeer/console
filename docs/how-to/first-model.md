@@ -356,8 +356,7 @@ logs; they are configuration errors.
 
 ## Also worth knowing
 
-- `/dashboard/models/new` is a redirect to `/dashboard/models`. The create form
-  is an overlay, not a page of its own.
+- The create form is an overlay on `/dashboard/models`, not a page of its own.
 - `GET /api/client/v1/models` returns **every** category. An OpenAI-compatible
   client pointed at Console lists your embedding and speech models next to the
   chat ones; hide them in the client. See

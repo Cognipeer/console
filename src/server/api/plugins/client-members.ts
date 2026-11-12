@@ -38,6 +38,10 @@ import { canGrantAdminRole, clampRequestedPermissions, exceedsCallerPermissions,
 import { getClientIp, readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 import { sendPlanLimitRefusal } from '../planLimitReply';
 import { assertSeatForReEnable, assertSeats, planLimitsActive } from '@/lib/limits';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "members" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('members') } as const;
 
 const logger = createLogger('api:client-members');
 
@@ -95,12 +99,12 @@ function parseTenantRole(value: unknown): { ok: true; role: UserRole | undefined
 
 export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Users ────────────────────────────────────────────────────────────────
-  app.get('/client/v1/members/permissions/services', withClientApiRequestContext(async (_request, reply, auth) => {
+  app.get('/client/v1/members/permissions/services', GATE, withClientApiRequestContext(async (_request, reply, auth) => {
     if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
     return reply.code(200).send({ levels: SERVICE_PERMISSION_LEVELS, services: RBAC_SERVICE_DEFINITIONS });
   }));
 
-  app.get('/client/v1/members', withClientApiRequestContext(async (_request, reply, auth) => {
+  app.get('/client/v1/members', GATE, withClientApiRequestContext(async (_request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const db = await getDatabase();
@@ -112,7 +116,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.patch('/client/v1/members/:id/permissions', withClientApiRequestContext(async (request, reply, auth) => {
+  app.patch('/client/v1/members/:id/permissions', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { id } = request.params as { id: string };
@@ -162,7 +166,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/client/v1/members/:id', withClientApiRequestContext(async (request, reply, auth) => {
+  app.delete('/client/v1/members/:id', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { id } = request.params as { id: string };
@@ -253,10 +257,10 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
     });
   };
   // Literal paths (not a template) so the endpoint auth-coverage gate can see them.
-  app.post('/client/v1/members/:id/disable', statusRouteHandler('disable'));
-  app.post('/client/v1/members/:id/enable', statusRouteHandler('enable'));
+  app.post('/client/v1/members/:id/disable', GATE, statusRouteHandler('disable'));
+  app.post('/client/v1/members/:id/enable', GATE, statusRouteHandler('enable'));
 
-  app.post('/client/v1/members/invite', withClientApiRequestContext(async (request, reply, auth) => {
+  app.post('/client/v1/members/invite', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const body = readJsonBody<{ email?: string; name?: string; projectId?: string; role?: string; servicePermissions?: unknown }>(request);
@@ -370,7 +374,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ── Groups ─────────────────────────────────────────────────────────────────
-  app.get('/client/v1/members/groups', withClientApiRequestContext(async (_request, reply, auth) => {
+  app.get('/client/v1/members/groups', GATE, withClientApiRequestContext(async (_request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const db = await getDatabase();
@@ -389,7 +393,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/client/v1/members/groups', withClientApiRequestContext(async (request, reply, auth) => {
+  app.post('/client/v1/members/groups', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -424,7 +428,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
     return { db, group };
   }
 
-  app.get('/client/v1/members/groups/:id', withClientApiRequestContext(async (request, reply, auth) => {
+  app.get('/client/v1/members/groups/:id', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { id } = request.params as { id: string };
@@ -438,7 +442,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.patch('/client/v1/members/groups/:id', withClientApiRequestContext(async (request, reply, auth) => {
+  app.patch('/client/v1/members/groups/:id', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { id } = request.params as { id: string };
@@ -469,7 +473,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/client/v1/members/groups/:id', withClientApiRequestContext(async (request, reply, auth) => {
+  app.delete('/client/v1/members/groups/:id', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { id } = request.params as { id: string };
@@ -486,7 +490,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/client/v1/members/groups/:id/members', withClientApiRequestContext(async (request, reply, auth) => {
+  app.post('/client/v1/members/groups/:id/members', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { id } = request.params as { id: string };
@@ -517,7 +521,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/client/v1/members/groups/:id/members/:userId', withClientApiRequestContext(async (request, reply, auth) => {
+  app.delete('/client/v1/members/groups/:id/members/:userId', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { id, userId } = request.params as { id: string; userId: string };
@@ -534,7 +538,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/client/v1/members/groups/:id/projects', withClientApiRequestContext(async (request, reply, auth) => {
+  app.post('/client/v1/members/groups/:id/projects', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { id } = request.params as { id: string };
@@ -558,7 +562,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/client/v1/members/groups/:id/projects/:projectId', withClientApiRequestContext(async (request, reply, auth) => {
+  app.delete('/client/v1/members/groups/:id/projects/:projectId', GATE, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
       const { id, projectId } = request.params as { id: string; projectId: string };

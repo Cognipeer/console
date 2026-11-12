@@ -12,7 +12,7 @@
  */
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import type { IGroup, IUser } from '@/lib/database';
 import { isGroupDirectoryManaged } from '@/lib/iam/identity';
 import {
@@ -26,6 +26,10 @@ import {
   requireSessionContext,
   withApiRequestContext,
 } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "members" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('members') } as const;
 
 const logger = createLogger('api:groups');
 
@@ -64,35 +68,34 @@ function parseTenantRole(value: unknown): { ok: true; role: UserRole | undefined
 
 export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
   // ── List ──────────────────────────────────────────────────────────────────
-  app.get('/groups', withApiRequestContext(async (request, reply) => {
+  app.get('/groups', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
         return reply.code(403).send({ error: 'Forbidden' });
       }
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const groups = await db.listGroups(session.tenantId);
+        const enriched = await Promise.all(
+          groups.map(async (group) => {
+            const [members, projects] = await Promise.all([
+              db.listGroupMembers(String(group._id)),
+              db.listGroupProjectsByGroup(String(group._id)),
+            ]);
+            return serializeGroup(group, { members: members.length, projects: projects.length });
+          }),
+        );
 
-      const groups = await db.listGroups(session.tenantId);
-      const enriched = await Promise.all(
-        groups.map(async (group) => {
-          const [members, projects] = await Promise.all([
-            db.listGroupMembers(String(group._id)),
-            db.listGroupProjectsByGroup(String(group._id)),
-          ]);
-          return serializeGroup(group, { members: members.length, projects: projects.length });
-        }),
-      );
-
-      return reply.code(200).send({ groups: enriched });
+        return reply.code(200).send({ groups: enriched });
+      });
     } catch (error) {
       return handleError(error, reply, 'List groups');
     }
   }));
 
   // ── Create ──────────────────────────────────────────────────────────────────
-  app.post('/groups', withApiRequestContext(async (request, reply) => {
+  app.post('/groups', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -116,27 +119,26 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Invalid tenantRole. Must be admin, project_admin, user, or empty', code: 'invalid_role' });
       }
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const group = await db.createGroup({
+          tenantId: session.tenantId,
+          name,
+          description: body.description ? String(body.description) : undefined,
+          tenantRole: tenantRole.role,
+          servicePermissions: normalizeServicePermissions(body.servicePermissions),
+          source: 'local',
+          createdBy: session.userId,
+        });
 
-      const group = await db.createGroup({
-        tenantId: session.tenantId,
-        name,
-        description: body.description ? String(body.description) : undefined,
-        tenantRole: tenantRole.role,
-        servicePermissions: normalizeServicePermissions(body.servicePermissions),
-        source: 'local',
-        createdBy: session.userId,
+        return reply.code(201).send({ group: serializeGroup(group) });
       });
-
-      return reply.code(201).send({ group: serializeGroup(group) });
     } catch (error) {
       return handleError(error, reply, 'Create group');
     }
   }));
 
   // ── Detail (group + members + project assignments) ──────────────────────────
-  app.get('/groups/:id', withApiRequestContext(async (request, reply) => {
+  app.get('/groups/:id', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -144,55 +146,54 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const { id } = request.params as { id: string };
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const group = await db.findGroupById(id);
+        if (!group || String(group.tenantId) !== String(session.tenantId)) {
+          return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
+        }
 
-      const group = await db.findGroupById(id);
-      if (!group || String(group.tenantId) !== String(session.tenantId)) {
-        return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
-      }
+        const [memberRows, projectRows] = await Promise.all([
+          db.listGroupMembers(id),
+          db.listGroupProjectsByGroup(id),
+        ]);
+        // Only the people in this group are read - not the whole table - a chunk of ids at a time.
+        const memberIds = [...new Set(memberRows.map((m) => String(m.userId)))];
+        const userById = new Map<string, IUser>();
+        for (let i = 0; i < memberIds.length; i += MEMBER_LOOKUP_CHUNK) {
+          const page = await db.iamListUsers({
+            tenantId: session.tenantId,
+            ids: memberIds.slice(i, i + MEMBER_LOOKUP_CHUNK),
+            limit: MEMBER_LOOKUP_CHUNK,
+          });
+          for (const user of page.items) userById.set(String(user._id), user);
+        }
 
-      const [memberRows, projectRows] = await Promise.all([
-        db.listGroupMembers(id),
-        db.listGroupProjectsByGroup(id),
-      ]);
-      // Only the people in this group are read - not the whole table - a chunk of ids at a time.
-      const memberIds = [...new Set(memberRows.map((m) => String(m.userId)))];
-      const userById = new Map<string, IUser>();
-      for (let i = 0; i < memberIds.length; i += MEMBER_LOOKUP_CHUNK) {
-        const page = await db.iamListUsers({
-          tenantId: session.tenantId,
-          ids: memberIds.slice(i, i + MEMBER_LOOKUP_CHUNK),
-          limit: MEMBER_LOOKUP_CHUNK,
+        const members = memberRows.map((m) => {
+          const user = userById.get(String(m.userId));
+          return {
+            userId: String(m.userId),
+            name: user?.name ?? null,
+            email: user?.email ?? null,
+            role: m.role,
+            source: m.source ?? 'local',
+          };
         });
-        for (const user of page.items) userById.set(String(user._id), user);
-      }
 
-      const members = memberRows.map((m) => {
-        const user = userById.get(String(m.userId));
-        return {
-          userId: String(m.userId),
-          name: user?.name ?? null,
-          email: user?.email ?? null,
-          role: m.role,
-          source: m.source ?? 'local',
-        };
+        const projects = projectRows.map((p) => ({
+          projectId: String(p.projectId),
+          role: p.role,
+          servicePermissions: normalizeServicePermissions(p.servicePermissions),
+        }));
+
+        return reply.code(200).send({ group: serializeGroup(group), members, projects });
       });
-
-      const projects = projectRows.map((p) => ({
-        projectId: String(p.projectId),
-        role: p.role,
-        servicePermissions: normalizeServicePermissions(p.servicePermissions),
-      }));
-
-      return reply.code(200).send({ group: serializeGroup(group), members, projects });
     } catch (error) {
       return handleError(error, reply, 'Get group');
     }
   }));
 
   // ── Update grants/metadata ──────────────────────────────────────────────────
-  app.patch('/groups/:id', withApiRequestContext(async (request, reply) => {
+  app.patch('/groups/:id', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -206,49 +207,48 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
         servicePermissions?: unknown;
       }>(request);
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
-
-      const group = await db.findGroupById(id);
-      if (!group || String(group.tenantId) !== String(session.tenantId)) {
-        return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
-      }
-
-      const patch: Parameters<typeof db.updateGroup>[1] = { updatedBy: session.userId };
-
-      // Name is directory-managed for LDAP groups; grants stay editable.
-      if (body.name !== undefined) {
-        if (isGroupDirectoryManaged(group)) {
-          return reply.code(409).send({ error: 'Cannot rename a directory-synced group', code: 'group_directory_managed' });
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const group = await db.findGroupById(id);
+        if (!group || String(group.tenantId) !== String(session.tenantId)) {
+          return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
         }
-        const name = String(body.name).trim();
-        if (!name) return reply.code(400).send({ error: 'Group name cannot be empty' });
-        patch.name = name;
-      }
-      if (body.description !== undefined) patch.description = body.description ? String(body.description) : undefined;
-      if (body.tenantRole !== undefined) {
-        const tenantRole = parseTenantRole(body.tenantRole);
-        if (!tenantRole.ok) {
-          return reply.code(400).send({ error: 'Invalid tenantRole. Must be admin, project_admin, user, or empty', code: 'invalid_role' });
+
+        const patch: Parameters<typeof db.updateGroup>[1] = { updatedBy: session.userId };
+
+        // Name is directory-managed for LDAP groups; grants stay editable.
+        if (body.name !== undefined) {
+          if (isGroupDirectoryManaged(group)) {
+            return reply.code(409).send({ error: 'Cannot rename a directory-synced group', code: 'group_directory_managed' });
+          }
+          const name = String(body.name).trim();
+          if (!name) return reply.code(400).send({ error: 'Group name cannot be empty' });
+          patch.name = name;
         }
-        // Clearing the role is writing null: the SQLite provider leaves an undefined field alone.
-        patch.tenantRole = (tenantRole.role ?? null) as unknown as UserRole | undefined;
-      }
-      if (body.servicePermissions !== undefined) {
-        patch.servicePermissions = normalizeServicePermissions(body.servicePermissions);
-      }
+        if (body.description !== undefined) patch.description = body.description ? String(body.description) : undefined;
+        if (body.tenantRole !== undefined) {
+          const tenantRole = parseTenantRole(body.tenantRole);
+          if (!tenantRole.ok) {
+            return reply.code(400).send({ error: 'Invalid tenantRole. Must be admin, project_admin, user, or empty', code: 'invalid_role' });
+          }
+          // Clearing the role is writing null: the SQLite provider leaves an undefined field alone.
+          patch.tenantRole = (tenantRole.role ?? null) as unknown as UserRole | undefined;
+        }
+        if (body.servicePermissions !== undefined) {
+          patch.servicePermissions = normalizeServicePermissions(body.servicePermissions);
+        }
 
-      const updated = await db.updateGroup(id, patch);
-      if (!updated) return reply.code(500).send({ error: 'Failed to update group' });
+        const updated = await db.updateGroup(id, patch);
+        if (!updated) return reply.code(500).send({ error: 'Failed to update group' });
 
-      return reply.code(200).send({ group: serializeGroup(updated) });
+        return reply.code(200).send({ group: serializeGroup(updated) });
+      });
     } catch (error) {
       return handleError(error, reply, 'Update group');
     }
   }));
 
   // ── Delete ──────────────────────────────────────────────────────────────────
-  app.delete('/groups/:id', withApiRequestContext(async (request, reply) => {
+  app.delete('/groups/:id', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -256,29 +256,28 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const { id } = request.params as { id: string };
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const group = await db.findGroupById(id);
+        if (!group || String(group.tenantId) !== String(session.tenantId)) {
+          return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
+        }
+        if (isGroupDirectoryManaged(group)) {
+          return reply.code(409).send({ error: 'Directory-synced groups are managed by the directory and cannot be deleted here', code: 'group_directory_managed' });
+        }
 
-      const group = await db.findGroupById(id);
-      if (!group || String(group.tenantId) !== String(session.tenantId)) {
-        return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
-      }
-      if (isGroupDirectoryManaged(group)) {
-        return reply.code(409).send({ error: 'Directory-synced groups are managed by the directory and cannot be deleted here', code: 'group_directory_managed' });
-      }
+        await db.deleteGroupMembersByGroup(id);
+        await db.deleteGroupProjectsByGroup(id);
+        await db.deleteGroup(id);
 
-      await db.deleteGroupMembersByGroup(id);
-      await db.deleteGroupProjectsByGroup(id);
-      await db.deleteGroup(id);
-
-      return reply.code(200).send({ message: 'Group deleted successfully' });
+        return reply.code(200).send({ message: 'Group deleted successfully' });
+      });
     } catch (error) {
       return handleError(error, reply, 'Delete group');
     }
   }));
 
   // ── Membership ──────────────────────────────────────────────────────────────
-  app.post('/groups/:id/members', withApiRequestContext(async (request, reply) => {
+  app.post('/groups/:id/members', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -291,44 +290,43 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!userId) return reply.code(400).send({ error: 'userId is required' });
       const role: 'admin' | 'member' = body.role === 'admin' ? 'admin' : 'member';
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const group = await db.findGroupById(id);
+        if (!group || String(group.tenantId) !== String(session.tenantId)) {
+          return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
+        }
+        if (isGroupDirectoryManaged(group)) {
+          return reply.code(409).send({ error: 'Membership of directory-synced groups is managed by the directory', code: 'group_directory_managed' });
+        }
 
-      const group = await db.findGroupById(id);
-      if (!group || String(group.tenantId) !== String(session.tenantId)) {
-        return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
-      }
-      if (isGroupDirectoryManaged(group)) {
-        return reply.code(409).send({ error: 'Membership of directory-synced groups is managed by the directory', code: 'group_directory_managed' });
-      }
+        const target = await findUserByIdSafe(db, userId, session.tenantId);
+        if (!target) {
+          return reply.code(404).send({ error: 'User not found', code: 'user_not_found' });
+        }
+        // The same rules the bulk endpoint applies: nobody adds the owner but the owner, and a group that
+        // grants access is filled by owners and admins only.
+        const verdict = checkGroupMembership({ id: session.userId, role: session.userRole }, targetOf(target), group);
+        if (!verdict.ok) {
+          return reply.code(verdict.status).send({ error: verdict.message, code: verdict.code });
+        }
 
-      const target = await findUserByIdSafe(db, userId, session.tenantId);
-      if (!target) {
-        return reply.code(404).send({ error: 'User not found', code: 'user_not_found' });
-      }
-      // The same rules the bulk endpoint applies: nobody adds the owner but the owner, and a group that
-      // grants access is filled by owners and admins only.
-      const verdict = checkGroupMembership({ id: session.userId, role: session.userRole }, targetOf(target), group);
-      if (!verdict.ok) {
-        return reply.code(verdict.status).send({ error: verdict.message, code: verdict.code });
-      }
+        await db.addGroupMember({
+          tenantId: session.tenantId,
+          groupId: id,
+          userId,
+          role,
+          source: 'local',
+          addedBy: session.userId,
+        });
 
-      await db.addGroupMember({
-        tenantId: session.tenantId,
-        groupId: id,
-        userId,
-        role,
-        source: 'local',
-        addedBy: session.userId,
+        return reply.code(201).send({ message: 'Member added', member: { userId, role, source: 'local' } });
       });
-
-      return reply.code(201).send({ message: 'Member added', member: { userId, role, source: 'local' } });
     } catch (error) {
       return handleError(error, reply, 'Add group member');
     }
   }));
 
-  app.delete('/groups/:id/members/:userId', withApiRequestContext(async (request, reply) => {
+  app.delete('/groups/:id/members/:userId', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -336,28 +334,27 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const { id, userId } = request.params as { id: string; userId: string };
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const group = await db.findGroupById(id);
+        if (!group || String(group.tenantId) !== String(session.tenantId)) {
+          return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
+        }
+        if (isGroupDirectoryManaged(group)) {
+          return reply.code(409).send({ error: 'Membership of directory-synced groups is managed by the directory', code: 'group_directory_managed' });
+        }
 
-      const group = await db.findGroupById(id);
-      if (!group || String(group.tenantId) !== String(session.tenantId)) {
-        return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
-      }
-      if (isGroupDirectoryManaged(group)) {
-        return reply.code(409).send({ error: 'Membership of directory-synced groups is managed by the directory', code: 'group_directory_managed' });
-      }
+        const removed = await db.removeGroupMember(id, userId);
+        if (!removed) return reply.code(404).send({ error: 'Membership not found' });
 
-      const removed = await db.removeGroupMember(id, userId);
-      if (!removed) return reply.code(404).send({ error: 'Membership not found' });
-
-      return reply.code(200).send({ message: 'Member removed' });
+        return reply.code(200).send({ message: 'Member removed' });
+      });
     } catch (error) {
       return handleError(error, reply, 'Remove group member');
     }
   }));
 
   // ── Project assignments ─────────────────────────────────────────────────────
-  app.post('/groups/:id/projects', withApiRequestContext(async (request, reply) => {
+  app.post('/groups/:id/projects', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -373,40 +370,39 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const role: 'member' | 'project_admin' = body.role === 'project_admin' ? 'project_admin' : 'member';
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const group = await db.findGroupById(id);
+        if (!group || String(group.tenantId) !== String(session.tenantId)) {
+          return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
+        }
 
-      const group = await db.findGroupById(id);
-      if (!group || String(group.tenantId) !== String(session.tenantId)) {
-        return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
-      }
+        const project = await db.findProjectById(projectId);
+        if (!project || String(project.tenantId) !== String(session.tenantId)) {
+          return reply.code(404).send({ error: 'Project not found' });
+        }
 
-      const project = await db.findProjectById(projectId);
-      if (!project || String(project.tenantId) !== String(session.tenantId)) {
-        return reply.code(404).send({ error: 'Project not found' });
-      }
+        const assignment = await db.upsertGroupProject({
+          tenantId: session.tenantId,
+          groupId: id,
+          projectId,
+          role,
+          servicePermissions: normalizeServicePermissions(body.servicePermissions),
+        });
 
-      const assignment = await db.upsertGroupProject({
-        tenantId: session.tenantId,
-        groupId: id,
-        projectId,
-        role,
-        servicePermissions: normalizeServicePermissions(body.servicePermissions),
-      });
-
-      return reply.code(201).send({
-        assignment: {
-          projectId: String(assignment.projectId),
-          role: assignment.role,
-          servicePermissions: normalizeServicePermissions(assignment.servicePermissions),
-        },
+        return reply.code(201).send({
+          assignment: {
+            projectId: String(assignment.projectId),
+            role: assignment.role,
+            servicePermissions: normalizeServicePermissions(assignment.servicePermissions),
+          },
+        });
       });
     } catch (error) {
       return handleError(error, reply, 'Assign group project');
     }
   }));
 
-  app.delete('/groups/:id/projects/:projectId', withApiRequestContext(async (request, reply) => {
+  app.delete('/groups/:id/projects/:projectId', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
       if (!canAdministerPeople(session.userRole)) {
@@ -414,18 +410,17 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const { id, projectId } = request.params as { id: string; projectId: string };
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const group = await db.findGroupById(id);
+        if (!group || String(group.tenantId) !== String(session.tenantId)) {
+          return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
+        }
 
-      const group = await db.findGroupById(id);
-      if (!group || String(group.tenantId) !== String(session.tenantId)) {
-        return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
-      }
+        const removed = await db.removeGroupProject(id, projectId);
+        if (!removed) return reply.code(404).send({ error: 'Assignment not found' });
 
-      const removed = await db.removeGroupProject(id, projectId);
-      if (!removed) return reply.code(404).send({ error: 'Assignment not found' });
-
-      return reply.code(200).send({ message: 'Assignment removed' });
+        return reply.code(200).send({ message: 'Assignment removed' });
+      });
     } catch (error) {
       return handleError(error, reply, 'Remove group project');
     }

@@ -9,7 +9,7 @@
  * "Test connection" said, so a list of fifty buckets costs one grouped query for the numbers, not fifty calls.
  */
 
-import { getDatabase, type DatabaseProvider } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { providerRegistry } from '@/lib/providers';
 import { findAgentsUsingBucket } from '@/lib/services/agents/sessionFilesBucket';
@@ -37,12 +37,6 @@ import type {
 const logger = createLogger('files:reads');
 
 type ProviderFilters = NonNullable<Parameters<typeof listFileProviders>[3]>;
-
-async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db;
-}
 
 const NO_FILES: BucketStats = { fileCount: 0, totalBytes: 0 };
 
@@ -169,24 +163,25 @@ export async function listFileBucketItems(
     tenantId: string,
     projectId: string,
 ): Promise<BucketListItem[]> {
-    const db = await withTenantDb(tenantDbName);
-    const buckets = await db.listFileBuckets(tenantId, projectId);
-    const [providers, statRows] = await Promise.all([
-        listProviderConfigs(tenantDbName, tenantId, { type: 'file', projectId }),
-        db.listFileBucketStats({
-            projectId,
-            buckets: buckets.map((bucket) => ({ providerKey: bucket.providerKey, bucketKey: bucket.key })),
-        }),
-    ]);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const buckets = await db.listFileBuckets(tenantId, projectId);
+        const [providers, statRows] = await Promise.all([
+            listProviderConfigs(tenantDbName, tenantId, { type: 'file', projectId }),
+            db.listFileBucketStats({
+                projectId,
+                buckets: buckets.map((bucket) => ({ providerKey: bucket.providerKey, bucketKey: bucket.key })),
+            }),
+        ]);
 
-    const providerByKey = new Map<string, FileProviderView>(
-        providers.map((provider) => [provider.key, attachDriverCapabilities(provider)]),
-    );
-    const statsByBucket = new Map<string, BucketStats>(
-        statRows.map((row) => [statsKey(row.providerKey, row.bucketKey), { fileCount: row.fileCount, totalBytes: row.totalBytes }]),
-    );
+        const providerByKey = new Map<string, FileProviderView>(
+            providers.map((provider) => [provider.key, attachDriverCapabilities(provider)]),
+        );
+        const statsByBucket = new Map<string, BucketStats>(
+            statRows.map((row) => [statsKey(row.providerKey, row.bucketKey), { fileCount: row.fileCount, totalBytes: row.totalBytes }]),
+        );
 
-    return buckets.map((bucket) => bucketListItem(bucket, providerByKey.get(bucket.providerKey), statsByBucket.get(statsKey(bucket.providerKey, bucket.key))));
+        return buckets.map((bucket) => bucketListItem(bucket, providerByKey.get(bucket.providerKey), statsByBucket.get(statsKey(bucket.providerKey, bucket.key))));
+    });
 }
 
 function bucketListItem(
@@ -240,19 +235,20 @@ export async function getFileBucketDetail(
     bucketKey: string,
 ): Promise<BucketDetail> {
     const record = await requireBucketRecord(tenantDbName, tenantId, projectId, bucketKey);
-    const db = await withTenantDb(tenantDbName);
-    const [provider, statRows, usedBy] = await Promise.all([
-        getProviderConfigByKey(tenantDbName, tenantId, record.providerKey, projectId),
-        db.listFileBucketStats({ projectId, buckets: [{ providerKey: record.providerKey, bucketKey: record.key }] }),
-        listBucketUsers(db, tenantDbName, projectId, record.key),
-    ]);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const [provider, statRows, usedBy] = await Promise.all([
+            getProviderConfigByKey(tenantDbName, tenantId, record.providerKey, projectId),
+            db.listFileBucketStats({ projectId, buckets: [{ providerKey: record.providerKey, bucketKey: record.key }] }),
+            listBucketUsers(db, tenantDbName, projectId, record.key),
+        ]);
 
-    const providerView = provider ? attachDriverCapabilities(provider) : undefined;
-    const row = statRows[0];
-    return {
-        ...bucketListItem(record, providerView, row ? { fileCount: row.fileCount, totalBytes: row.totalBytes } : undefined),
-        usedBy,
-        usedByCount: usedBy.length,
-        storageLocation: bucketStorageLocation(providerView, tenantId, record),
-    };
+        const providerView = provider ? attachDriverCapabilities(provider) : undefined;
+        const row = statRows[0];
+        return {
+            ...bucketListItem(record, providerView, row ? { fileCount: row.fileCount, totalBytes: row.totalBytes } : undefined),
+            usedBy,
+            usedByCount: usedBy.length,
+            storageLocation: bucketStorageLocation(providerView, tenantId, record),
+        };
+    });
 }

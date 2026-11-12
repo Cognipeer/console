@@ -34,7 +34,10 @@ vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: h.getModel
 vi.mock('@/lib/services/files/fileService', () => ({ uploadFile: vi.fn() }));
 vi.mock('@/lib/services/usage/usageEvents', () => ({ recordUsageEvent: vi.fn() }));
 vi.mock('@/lib/quota/quotaGuard', () => ({ checkBudget: h.checkBudget }));
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn(async () => h.db) }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: vi.fn(async () => h.db),
+  runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(h.db)),
+}));
 
 import { processBatchItem } from '@/lib/services/batch/batchRunner';
 import { OutputTokenLimitError, UpstreamFinishError } from '@/lib/services/models/openaiErrors';

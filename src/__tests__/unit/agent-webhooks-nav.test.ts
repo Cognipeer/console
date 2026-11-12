@@ -1,8 +1,7 @@
 /**
  * Webhooks live in the Agents menu, not under Settings: the sub-nav entry and
  * the matchers around it, the registry no longer listing Webhooks as a Settings
- * page, the command palette finding it at its new address, the old
- * /dashboard/webhooks address redirecting, and the page itself.
+ * page, the command palette finding it at its new address, and the page itself.
  * (createElement, not JSX: the suite only collects `.test.ts`.)
  */
 
@@ -18,8 +17,6 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => '/dashboard/agents/webhooks',
   useRouter: () => ({ push: () => undefined, prefetch: () => undefined, replace: () => undefined }),
-  // Next's redirect() ends the render by throwing.
-  redirect: vi.fn((path: string) => { throw new Error(`NEXT_REDIRECT:${path}`); }),
 }));
 
 vi.mock('@/components/common/navigation/useNavigationFeedback', () => ({
@@ -28,7 +25,6 @@ vi.mock('@/components/common/navigation/useNavigationFeedback', () => ({
   useIntentPrefetch: () => ({ getIntentProps: () => ({}) }),
 }));
 
-import { redirect } from 'next/navigation';
 import { I18nProvider } from '@/lib/i18n';
 import ServiceSubNav, {
   SUBNAV_CONFIG,
@@ -41,7 +37,6 @@ import {
   findDashboardService,
   getDashboardServices,
 } from '@/lib/utils/dashboardServices';
-import WebhooksRedirectPage from '@/app/dashboard/webhooks/page';
 import AgentWebhooksPage from '@/app/dashboard/agents/webhooks/page';
 import { en } from '@/lib/i18n/messages/en';
 import { tr } from '@/lib/i18n/messages/tr';
@@ -162,15 +157,6 @@ describe('finding it from the command palette', () => {
     const palette = readFileSync(join(__dirname, '../../components/layout/CommandPalette.tsx'), 'utf8');
     expect(palette).toContain('DASHBOARD_SUBPAGES');
     expect(palette).toMatch(/\.\.\.DASHBOARD_SUBPAGES/);
-  });
-});
-
-describe('the old address', () => {
-  it('redirects /dashboard/webhooks to /dashboard/agents/webhooks', () => {
-    vi.mocked(redirect).mockClear();
-    expect(() => WebhooksRedirectPage()).toThrow('NEXT_REDIRECT:/dashboard/agents/webhooks');
-    expect(redirect).toHaveBeenCalledTimes(1);
-    expect(redirect).toHaveBeenCalledWith('/dashboard/agents/webhooks');
   });
 });
 

@@ -108,18 +108,18 @@ If timeout expires → log error → process.exit(1)
 | `unhandledRejection` | Unhandled promise rejection (logged, not fatal) |
 | `uncaughtException` | Uncaught sync exception (logged, exit after 1s) |
 
-## Integration with withRequestContext
+## Integration with withApiRequestContext
 
-The `withRequestContext` wrapper checks `isShuttingDown()` before processing requests:
+The `withApiRequestContext` wrapper (`src/server/api/fastify-utils.ts`) checks `isShuttingDown()` before processing requests:
 
 ```typescript
-export function withRequestContext(handler) {
-  return async (request, context) => {
+export function withApiRequestContext(handler) {
+  return async (request, reply) => {
     if (isShuttingDown()) {
-      return NextResponse.json(
-        { error: 'Server is shutting down' },
-        { status: 503 }
-      );
+      return reply
+        .code(503)
+        .header('Retry-After', '5')
+        .send({ error: 'Service is shutting down' });
     }
     // ... process request
   };

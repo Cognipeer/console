@@ -21,6 +21,7 @@ const queue = vi.hoisted(() => ({ publish: vi.fn(async () => undefined) }));
 vi.mock('@/lib/database', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/database')>()),
   getDatabase: vi.fn(async () => db),
+  runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(db)),
 }));
 vi.mock('@/lib/services/redteam/service', () => service);
 vi.mock('@/lib/core/queue', () => ({ getQueue: async () => queue }));
