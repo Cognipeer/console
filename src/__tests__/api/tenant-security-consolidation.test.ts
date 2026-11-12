@@ -16,9 +16,27 @@ import path from 'node:path';
 const PLUGINS_DIR = path.join(process.cwd(), 'src/server/api/plugins');
 
 function pluginFiles(): string[] {
-  return readdirSync(PLUGINS_DIR)
-    .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
-    .map((f) => path.join(PLUGINS_DIR, f));
+  const entries = readdirSync(PLUGINS_DIR, { withFileTypes: true });
+  const files = entries
+    .filter((e) => e.isFile() && e.name.endsWith('.ts') && !e.name.endsWith('.test.ts'))
+    .map((e) => path.join(PLUGINS_DIR, e.name));
+  // A plugin split into helper modules keeps them in a sibling directory named like the plugin file.
+  const nested = entries
+    .filter((e) => e.isDirectory())
+    .flatMap((e) => readdirSync(path.join(PLUGINS_DIR, e.name))
+      .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
+      .map((f) => path.join(PLUGINS_DIR, e.name, f)));
+  return [...files, ...nested];
+}
+
+/** A plugin's own source plus the modules of its sibling directory (`client-x.ts` + `client-x/`). */
+function pluginSource(file: string): string {
+  const dir = file.replace(/\.ts$/, '');
+  let nested = '';
+  try {
+    nested = readdirSync(dir).filter((f) => f.endsWith('.ts')).map((f) => readFileSync(path.join(dir, f), 'utf8')).join('\n');
+  } catch { /* no sibling directory */ }
+  return read(file) + nested;
 }
 
 function read(file: string): string {
@@ -93,7 +111,7 @@ const SANCTIONED_LOCAL_WRAPPERS = new Set(['appgw-data-plane.ts']);
     for (const file of pluginFiles()) {
       const base = path.basename(file);
       if (!base.startsWith('client-')) continue;
-      const src = read(file);
+      const src = pluginSource(file);
       const usesCanonical =
         src.includes('withClientApiRequestContext') || src.includes('withOpenAiApiRequestContext');
       if (!usesCanonical) missing.push(base);
