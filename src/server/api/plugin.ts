@@ -6,6 +6,7 @@ import type {
 } from 'fastify';
 import { isApplicationReady } from '@/server/bootstrap';
 import { getConfig } from '@/lib/core/config';
+import { createLogger } from '@/lib/core/logger';
 import { LicenseManager } from '@/lib/license/license-manager';
 import { resolveLiveLicenseForTenant } from '@/lib/license/tenantLicense';
 import { checkEnterpriseApiAccess, getEnterpriseModuleForPath } from '@/lib/license/enterprise-access';
@@ -13,7 +14,8 @@ import { TokenManager, type JWTPayload } from '@/lib/license/token-manager';
 import { criticalFireAndForget } from '@/lib/core/asyncTask';
 import { getRequiredPermissionLevel } from '@/lib/security/rbac';
 import { serviceForRequest } from '@/lib/iam/routeAuthz';
-import { recordRegisteredRoute } from '@/lib/iam/routeRegistry';
+import { assertRouteDeclared, recordRegisteredRoute } from '@/lib/iam/routeRegistry';
+import { isStrictRouteRegistration } from '@/lib/iam/routeDeclarationRules';
 import { CombinedCredentialError, splitCombinedAuthorization } from '@/lib/iam/combinedCredential';
 import { USER_TOKEN_HEADER } from '@/lib/iam/delegationGate';
 import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
@@ -121,6 +123,8 @@ import {
   enterprisePublicApiPaths,
   enterprisePublicApiPrefixes,
 } from '@/enterprise/registry';
+
+const routeDeclarationLogger = createLogger('api:routes');
 
 const PUBLIC_API_PATHS = [
   '/api/auth/login',
@@ -377,8 +381,21 @@ export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): v
 export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   // Remember how every route is authorized (diagnostics for the authorization
   // settings: "does any route lack a declaration?").
+  const reportedUndeclared = new Set<string>();
   app.addHook('onRoute', (route) => {
     recordRegisteredRoute(route.method, route.url, route.config);
+    // Fail closed while registering: under test (and AUTHZ_STRICT_REGISTRATION=1) a route nothing declares
+    // stops the app from building; in production it is logged once and the request-time gate keeps refusing it.
+    assertRouteDeclared(route, {
+      strict: isStrictRouteRegistration(),
+      // Fastify adds a HEAD twin of every GET: one log line per route pattern, not per method.
+      report: (message, { url }) => {
+        if (reportedUndeclared.has(url)) return;
+        reportedUndeclared.add(url);
+        routeDeclarationLogger.error(message);
+      },
+      isExempt: (path) => isPublicApiPath(path) || isSelfAuthApiPath(path),
+    });
   });
 
   app.addHook('onRequest', async (request, reply) => {

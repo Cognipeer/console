@@ -14,7 +14,7 @@ import crypto from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { routeInstanceCall, queueNameFor } from '@/lib/core/cluster';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
-import { getDatabase, type DatabaseProvider } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type {
   CrawlResultFilters,
   ICrawler,
@@ -69,12 +69,6 @@ const DEFAULT_HTTP: ICrawlerHttpConfig = {
   maxConcurrency: 5,
   retries: 2,
 };
-
-export async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
-}
 
 function serializeCrawler(record: ICrawler): CrawlerView {
   const { _id, ...rest } = record;
@@ -136,47 +130,48 @@ export async function createCrawler(
   ctx: CrawlerContext,
   input: CreateCrawlerInput,
 ): Promise<CrawlerView> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const key = input.key?.trim() || generateKey(input.name);
-  const existing = await db.findCrawlerByKey(ctx.tenantId, key, ctx.projectId);
-  if (existing) throw new Error(`Crawler key "${key}" already exists`);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const key = input.key?.trim() || generateKey(input.name);
+    const existing = await db.findCrawlerByKey(ctx.tenantId, key, ctx.projectId);
+    if (existing) throw new Error(`Crawler key "${key}" already exists`);
 
-  const ocrProblem = await crawlerOcrProblem(ctx, input.markdownOptions);
-  if (ocrProblem) throw invalidInput(ocrProblem);
+    const ocrProblem = await crawlerOcrProblem(ctx, input.markdownOptions);
+    if (ocrProblem) throw invalidInput(ocrProblem);
 
-  if (input.schedule) {
-    const scheduleError = validateSchedule(input.schedule);
-    if (scheduleError) throw new Error(`Invalid schedule: ${scheduleError}`);
-  }
+    if (input.schedule) {
+      const scheduleError = validateSchedule(input.schedule);
+      if (scheduleError) throw new Error(`Invalid schedule: ${scheduleError}`);
+    }
 
-  const schedule = input.schedule
-    ? { ...input.schedule, nextRunAt: computeNextRun(input.schedule) ?? undefined }
-    : undefined;
+    const schedule = input.schedule
+      ? { ...input.schedule, nextRunAt: computeNextRun(input.schedule) ?? undefined }
+      : undefined;
 
-  const record = await db.createCrawler({
-    tenantId: ctx.tenantId,
-    projectId: ctx.projectId,
-    key,
-    name: input.name,
-    description: input.description,
-    status: 'active',
-    seeds: input.seeds ?? [],
-    engine: input.engine ?? 'auto',
-    maxDepth: Math.min(Math.max(0, input.maxDepth ?? 0), 3),
-    maxPages: Math.max(0, input.maxPages ?? 50),
-    autoCrawl: input.autoCrawl ?? false,
-    scope: { ...DEFAULT_SCOPE, ...(input.scope ?? {}) },
-    downloadableMimes: input.downloadableMimes,
-    http: sealHttpConfig({ ...DEFAULT_HTTP, ...(input.http ?? {}) }),
-    markdownOptions: input.markdownOptions,
-    rag: input.rag,
-    webhook: input.webhook,
-    schedule,
-    metadata: input.metadata,
-    createdBy: input.createdBy,
+    const record = await db.createCrawler({
+      tenantId: ctx.tenantId,
+      projectId: ctx.projectId,
+      key,
+      name: input.name,
+      description: input.description,
+      status: 'active',
+      seeds: input.seeds ?? [],
+      engine: input.engine ?? 'auto',
+      maxDepth: Math.min(Math.max(0, input.maxDepth ?? 0), 3),
+      maxPages: Math.max(0, input.maxPages ?? 50),
+      autoCrawl: input.autoCrawl ?? false,
+      scope: { ...DEFAULT_SCOPE, ...(input.scope ?? {}) },
+      downloadableMimes: input.downloadableMimes,
+      http: sealHttpConfig({ ...DEFAULT_HTTP, ...(input.http ?? {}) }),
+      markdownOptions: input.markdownOptions,
+      rag: input.rag,
+      webhook: input.webhook,
+      schedule,
+      metadata: input.metadata,
+      createdBy: input.createdBy,
+    });
+    logger.info('Crawler created', { tenantId: ctx.tenantId, key });
+    return serializeCrawler(record);
   });
-  logger.info('Crawler created', { tenantId: ctx.tenantId, key });
-  return serializeCrawler(record);
 }
 
 export async function updateCrawler(
@@ -184,89 +179,93 @@ export async function updateCrawler(
   idOrKey: string,
   input: UpdateCrawlerInput,
 ): Promise<CrawlerView | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const existing = await loadCrawler(db, ctx, idOrKey);
-  if (!existing) return null;
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const existing = await loadCrawler(db, ctx, idOrKey);
+    if (!existing) return null;
 
-  if (input.markdownOptions !== undefined) {
-    const ocrProblem = await crawlerOcrProblem(ctx, input.markdownOptions);
-    if (ocrProblem) throw invalidInput(ocrProblem);
-  }
-
-  const patch: Partial<ICrawler> = {
-    updatedBy: input.updatedBy,
-  };
-  if (input.name !== undefined) patch.name = input.name;
-  if (input.description !== undefined) patch.description = input.description;
-  if (input.status !== undefined) patch.status = input.status;
-  if (input.seeds !== undefined) patch.seeds = input.seeds;
-  if (input.engine !== undefined) patch.engine = input.engine;
-  if (input.maxDepth !== undefined) patch.maxDepth = Math.min(Math.max(0, input.maxDepth), 3);
-  if (input.maxPages !== undefined) patch.maxPages = Math.max(0, input.maxPages);
-  if (input.autoCrawl !== undefined) patch.autoCrawl = input.autoCrawl;
-  if (input.scope !== undefined) patch.scope = { ...existing.scope, ...input.scope };
-  if (input.http !== undefined) patch.http = mergeHttpConfigUpdate(existing.http, input.http);
-  if (input.downloadableMimes !== undefined) patch.downloadableMimes = input.downloadableMimes;
-  if (input.markdownOptions !== undefined) patch.markdownOptions = input.markdownOptions;
-  if (input.rag !== undefined) patch.rag = input.rag ?? undefined;
-  if (input.webhook !== undefined) {
-    patch.webhook = input.webhook
-      ? mergeWebhookConfigUpdate(existing.webhook, input.webhook)
-      : undefined;
-  }
-  if (input.schedule !== undefined) {
-    if (input.schedule === null) {
-      patch.schedule = undefined;
-    } else {
-      const scheduleError = validateSchedule(input.schedule);
-      if (scheduleError) throw new Error(`Invalid schedule: ${scheduleError}`);
-      patch.schedule = {
-        ...input.schedule,
-        // Preserve lastRunAt from existing record
-        lastRunAt: existing.schedule?.lastRunAt ?? input.schedule.lastRunAt,
-        nextRunAt: computeNextRun({
-          ...input.schedule,
-          lastRunAt: existing.schedule?.lastRunAt ?? input.schedule.lastRunAt,
-        }) ?? undefined,
-      };
+    if (input.markdownOptions !== undefined) {
+      const ocrProblem = await crawlerOcrProblem(ctx, input.markdownOptions);
+      if (ocrProblem) throw invalidInput(ocrProblem);
     }
-  }
-  if (input.metadata !== undefined) patch.metadata = input.metadata;
 
-  const updated = await db.updateCrawler(String(existing._id), patch);
-  return updated ? serializeCrawler(updated) : null;
+    const patch: Partial<ICrawler> = {
+      updatedBy: input.updatedBy,
+    };
+    if (input.name !== undefined) patch.name = input.name;
+    if (input.description !== undefined) patch.description = input.description;
+    if (input.status !== undefined) patch.status = input.status;
+    if (input.seeds !== undefined) patch.seeds = input.seeds;
+    if (input.engine !== undefined) patch.engine = input.engine;
+    if (input.maxDepth !== undefined) patch.maxDepth = Math.min(Math.max(0, input.maxDepth), 3);
+    if (input.maxPages !== undefined) patch.maxPages = Math.max(0, input.maxPages);
+    if (input.autoCrawl !== undefined) patch.autoCrawl = input.autoCrawl;
+    if (input.scope !== undefined) patch.scope = { ...existing.scope, ...input.scope };
+    if (input.http !== undefined) patch.http = mergeHttpConfigUpdate(existing.http, input.http);
+    if (input.downloadableMimes !== undefined) patch.downloadableMimes = input.downloadableMimes;
+    if (input.markdownOptions !== undefined) patch.markdownOptions = input.markdownOptions;
+    if (input.rag !== undefined) patch.rag = input.rag ?? undefined;
+    if (input.webhook !== undefined) {
+      patch.webhook = input.webhook
+        ? mergeWebhookConfigUpdate(existing.webhook, input.webhook)
+        : undefined;
+    }
+    if (input.schedule !== undefined) {
+      if (input.schedule === null) {
+        patch.schedule = undefined;
+      } else {
+        const scheduleError = validateSchedule(input.schedule);
+        if (scheduleError) throw new Error(`Invalid schedule: ${scheduleError}`);
+        patch.schedule = {
+          ...input.schedule,
+          // Preserve lastRunAt from existing record
+          lastRunAt: existing.schedule?.lastRunAt ?? input.schedule.lastRunAt,
+          nextRunAt: computeNextRun({
+            ...input.schedule,
+            lastRunAt: existing.schedule?.lastRunAt ?? input.schedule.lastRunAt,
+          }) ?? undefined,
+        };
+      }
+    }
+    if (input.metadata !== undefined) patch.metadata = input.metadata;
+
+    const updated = await db.updateCrawler(String(existing._id), patch);
+    return updated ? serializeCrawler(updated) : null;
+  });
 }
 
 export async function deleteCrawler(
   ctx: CrawlerContext,
   idOrKey: string,
 ): Promise<boolean> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const existing = await loadCrawler(db, ctx, idOrKey);
-  if (!existing) return false;
-  return db.deleteCrawler(String(existing._id));
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const existing = await loadCrawler(db, ctx, idOrKey);
+    if (!existing) return false;
+    return db.deleteCrawler(String(existing._id));
+  });
 }
 
 export async function getCrawler(
   ctx: CrawlerContext,
   idOrKey: string,
 ): Promise<CrawlerView | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const record = await loadCrawler(db, ctx, idOrKey);
-  return record ? serializeCrawler(record) : null;
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const record = await loadCrawler(db, ctx, idOrKey);
+    return record ? serializeCrawler(record) : null;
+  });
 }
 
 export async function listCrawlers(
   ctx: CrawlerContext,
   filters?: { status?: string; search?: string },
 ): Promise<CrawlerView[]> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const records = await db.listCrawlers(ctx.tenantId, {
-    projectId: ctx.projectId,
-    status: filters?.status,
-    search: filters?.search,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const records = await db.listCrawlers(ctx.tenantId, {
+      projectId: ctx.projectId,
+      status: filters?.status,
+      search: filters?.search,
+    });
+    return records.map((r) => serializeCrawler(r));
   });
-  return records.map((r) => serializeCrawler(r));
 }
 
 export async function loadCrawler(
@@ -307,15 +306,16 @@ export async function addCrawlerUrls(
   urls: string[],
   actor: string,
 ): Promise<string[]> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const crawler = await loadCrawler(db, ctx, idOrKey);
-  if (!crawler) throw new Error(`Crawler "${idOrKey}" not found`);
-  const combined = dedupeUrls([...(crawler.seeds ?? []), ...urls]);
-  await db.updateCrawler(String(crawler._id), {
-    seeds: combined,
-    updatedBy: actor,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const crawler = await loadCrawler(db, ctx, idOrKey);
+    if (!crawler) throw new Error(`Crawler "${idOrKey}" not found`);
+    const combined = dedupeUrls([...(crawler.seeds ?? []), ...urls]);
+    await db.updateCrawler(String(crawler._id), {
+      seeds: combined,
+      updatedBy: actor,
+    });
+    return combined;
   });
-  return combined;
 }
 
 /**
@@ -327,16 +327,17 @@ export async function removeCrawlerUrls(
   urls: string[],
   actor: string,
 ): Promise<string[]> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const crawler = await loadCrawler(db, ctx, idOrKey);
-  if (!crawler) throw new Error(`Crawler "${idOrKey}" not found`);
-  const toRemove = new Set(urls.map((u) => u.trim()).filter(Boolean));
-  const remaining = (crawler.seeds ?? []).filter((u) => !toRemove.has(u));
-  await db.updateCrawler(String(crawler._id), {
-    seeds: remaining,
-    updatedBy: actor,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const crawler = await loadCrawler(db, ctx, idOrKey);
+    if (!crawler) throw new Error(`Crawler "${idOrKey}" not found`);
+    const toRemove = new Set(urls.map((u) => u.trim()).filter(Boolean));
+    const remaining = (crawler.seeds ?? []).filter((u) => !toRemove.has(u));
+    await db.updateCrawler(String(crawler._id), {
+      seeds: remaining,
+      updatedBy: actor,
+    });
+    return remaining;
   });
-  return remaining;
 }
 
 /**
@@ -346,10 +347,11 @@ export async function listCrawlerUrls(
   ctx: CrawlerContext,
   idOrKey: string,
 ): Promise<string[]> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const crawler = await loadCrawler(db, ctx, idOrKey);
-  if (!crawler) throw new Error(`Crawler "${idOrKey}" not found`);
-  return crawler.seeds ?? [];
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const crawler = await loadCrawler(db, ctx, idOrKey);
+    if (!crawler) throw new Error(`Crawler "${idOrKey}" not found`);
+    return crawler.seeds ?? [];
+  });
 }
 
 // ── Run dispatch ───────────────────────────────────────────────────────
@@ -407,48 +409,49 @@ export async function runCrawler(
   options: RunCrawlerOptions,
 ): Promise<CrawlRunSummary> {
   await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'crawler');
-  const db = await withTenantDb(ctx.tenantDbName);
-  const crawler = await loadCrawler(db, ctx, idOrKey);
-  if (!crawler) throw new Error(`Crawler "${idOrKey}" not found`);
-  if (crawler.status !== 'active') {
-    throw new Error(`Crawler "${crawler.key}" is not active`);
-  }
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const crawler = await loadCrawler(db, ctx, idOrKey);
+    if (!crawler) throw new Error(`Crawler "${idOrKey}" not found`);
+    if (crawler.status !== 'active') {
+      throw new Error(`Crawler "${crawler.key}" is not active`);
+    }
 
-  const urls = options.urls ?? options.seeds ?? crawler.seeds ?? [];
-  if (urls.length === 0) {
-    throw new Error(
-      `Crawler "${crawler.key}" has no URLs to crawl. Add URLs via the container or pass them in the run body.`,
-    );
-  }
+    const urls = options.urls ?? options.seeds ?? crawler.seeds ?? [];
+    if (urls.length === 0) {
+      throw new Error(
+        `Crawler "${crawler.key}" has no URLs to crawl. Add URLs via the container or pass them in the run body.`,
+      );
+    }
 
-  const plan = snapshotCrawlerPlan(crawler, { seeds: urls });
-  await checkCrawlRunQuota(ctx, crawler.key, options.trigger);
-  // Attribution is stamped at creation (request ALS in scope); the rollup
-  // event is emitted at job completion by the runner.
-  const attribution = resolveUsageAttribution();
-  const job = await db.createCrawlJob({
-    userId: attribution.userId,
-    apiTokenId: attribution.apiTokenId,
-    actorType: attribution.actorType,
-    tenantId: ctx.tenantId,
-    projectId: ctx.projectId,
-    crawlerKey: crawler.key,
-    trigger: options.trigger ?? 'manual',
-    triggerActor: options.triggerActor,
-    planSnapshot: plan,
-    status: 'queued',
-    pagesDiscovered: 0,
-    pagesProcessed: 0,
-    filesProcessed: 0,
-    errorsCount: 0,
-    callbackUrl: options.callbackUrl,
-    metadata: options.metadata,
-    createdBy: options.triggerActor,
+    const plan = snapshotCrawlerPlan(crawler, { seeds: urls });
+    await checkCrawlRunQuota(ctx, crawler.key, options.trigger);
+    // Attribution is stamped at creation (request ALS in scope); the rollup
+    // event is emitted at job completion by the runner.
+    const attribution = resolveUsageAttribution();
+    const job = await db.createCrawlJob({
+      userId: attribution.userId,
+      apiTokenId: attribution.apiTokenId,
+      actorType: attribution.actorType,
+      tenantId: ctx.tenantId,
+      projectId: ctx.projectId,
+      crawlerKey: crawler.key,
+      trigger: options.trigger ?? 'manual',
+      triggerActor: options.triggerActor,
+      planSnapshot: plan,
+      status: 'queued',
+      pagesDiscovered: 0,
+      pagesProcessed: 0,
+      filesProcessed: 0,
+      errorsCount: 0,
+      callbackUrl: options.callbackUrl,
+      metadata: options.metadata,
+      createdBy: options.triggerActor,
+    });
+
+    const jobId = String(job._id);
+    await dispatchRun(ctx, crawler.key, jobId, options.mode ?? 'sync');
+    return { jobId, status: 'queued' };
   });
-
-  const jobId = String(job._id);
-  await dispatchRun(ctx, crawler.key, jobId, options.mode ?? 'sync');
-  return { jobId, status: 'queued' };
 }
 
 /**
@@ -462,48 +465,49 @@ export async function runAdhocCrawl(
   await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'crawler');
   const ocrProblem = await crawlerOcrProblem(ctx, input.markdownOptions);
   if (ocrProblem) throw invalidInput(ocrProblem);
-  const db = await withTenantDb(ctx.tenantDbName);
-  const plan: ICrawlPlanSnapshot = {
-    seeds: input.seeds,
-    engine: input.engine ?? 'auto',
-    maxDepth: Math.min(Math.max(0, input.maxDepth ?? 0), 3),
-    maxPages: Math.max(0, input.maxPages ?? 20),
-    autoCrawl: input.autoCrawl ?? false,
-    scope: { ...DEFAULT_SCOPE, ...(input.scope ?? {}) },
-    http: sealHttpConfig({ ...DEFAULT_HTTP, ...(input.http ?? {}) }),
-    downloadableMimes: input.downloadableMimes,
-    markdownOptions: input.markdownOptions,
-    rag: input.rag,
-    webhook: input.webhook,
-  };
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const plan: ICrawlPlanSnapshot = {
+      seeds: input.seeds,
+      engine: input.engine ?? 'auto',
+      maxDepth: Math.min(Math.max(0, input.maxDepth ?? 0), 3),
+      maxPages: Math.max(0, input.maxPages ?? 20),
+      autoCrawl: input.autoCrawl ?? false,
+      scope: { ...DEFAULT_SCOPE, ...(input.scope ?? {}) },
+      http: sealHttpConfig({ ...DEFAULT_HTTP, ...(input.http ?? {}) }),
+      downloadableMimes: input.downloadableMimes,
+      markdownOptions: input.markdownOptions,
+      rag: input.rag,
+      webhook: input.webhook,
+    };
 
-  await checkCrawlRunQuota(ctx, undefined, 'adhoc');
-  // Attribution is stamped at creation (request ALS in scope); the rollup
-  // event is emitted at job completion by the runner.
-  const attribution = resolveUsageAttribution();
-  const job = await db.createCrawlJob({
-    userId: attribution.userId,
-    apiTokenId: attribution.apiTokenId,
-    actorType: attribution.actorType,
-    tenantId: ctx.tenantId,
-    projectId: ctx.projectId,
-    trigger: 'adhoc',
-    triggerActor: input.triggerActor,
-    planSnapshot: plan,
-    status: 'queued',
-    pagesDiscovered: 0,
-    pagesProcessed: 0,
-    filesProcessed: 0,
-    errorsCount: 0,
-    callbackUrl: input.callbackUrl,
-    metadata: input.metadata,
-    createdBy: input.triggerActor,
+    await checkCrawlRunQuota(ctx, undefined, 'adhoc');
+    // Attribution is stamped at creation (request ALS in scope); the rollup
+    // event is emitted at job completion by the runner.
+    const attribution = resolveUsageAttribution();
+    const job = await db.createCrawlJob({
+      userId: attribution.userId,
+      apiTokenId: attribution.apiTokenId,
+      actorType: attribution.actorType,
+      tenantId: ctx.tenantId,
+      projectId: ctx.projectId,
+      trigger: 'adhoc',
+      triggerActor: input.triggerActor,
+      planSnapshot: plan,
+      status: 'queued',
+      pagesDiscovered: 0,
+      pagesProcessed: 0,
+      filesProcessed: 0,
+      errorsCount: 0,
+      callbackUrl: input.callbackUrl,
+      metadata: input.metadata,
+      createdBy: input.triggerActor,
+    });
+
+    const jobId = String(job._id);
+    // Ad-hoc has no crawlerKey – route via auto channel
+    await dispatchRun(ctx, undefined, jobId, input.mode ?? 'sync');
+    return { jobId, status: 'queued' };
   });
-
-  const jobId = String(job._id);
-  // Ad-hoc has no crawlerKey – route via auto channel
-  await dispatchRun(ctx, undefined, jobId, input.mode ?? 'sync');
-  return { jobId, status: 'queued' };
 }
 
 /**
@@ -566,8 +570,8 @@ async function runSyncCrawlLocal(ctx: CrawlerContext, jobId: string): Promise<vo
   });
   if (attempt.refused) {
     const refusal = concurrencyRefusal('crawler', attempt.decision, 'crawler jobs');
-    const db = await withTenantDb(ctx.tenantDbName);
-    await db.updateCrawlJob(jobId, { status: 'failed', endedAt: new Date(), errorMessage: refusal.message }).catch(() => undefined);
+    await runWithTenantScope(ctx.tenantDbName, (db) =>
+      db.updateCrawlJob(jobId, { status: 'failed', endedAt: new Date(), errorMessage: refusal.message }).catch(() => undefined));
     throw refusal;
   }
   try {
@@ -586,26 +590,28 @@ export async function listCrawlJobs(
   ctx: CrawlerContext,
   filters?: { crawlerKey?: string; status?: ICrawlJob['status']; limit?: number },
 ): Promise<CrawlJobView[]> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const records = await db.listCrawlJobs(ctx.tenantId, {
-    projectId: ctx.projectId,
-    crawlerKey: filters?.crawlerKey,
-    status: filters?.status,
-    limit: filters?.limit,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const records = await db.listCrawlJobs(ctx.tenantId, {
+      projectId: ctx.projectId,
+      crawlerKey: filters?.crawlerKey,
+      status: filters?.status,
+      limit: filters?.limit,
+    });
+    return records.map((r) => serializeJob(r));
   });
-  return records.map((r) => serializeJob(r));
 }
 
 export async function getCrawlJob(
   ctx: CrawlerContext,
   jobId: string,
 ): Promise<CrawlJobView | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const record = await db.findCrawlJobById(jobId);
-  if (!record) return null;
-  if (record.tenantId !== ctx.tenantId) return null;
-  if (!matchesProjectScope(record.projectId, ctx.projectId)) return null;
-  return serializeJob(record);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const record = await db.findCrawlJobById(jobId);
+    if (!record) return null;
+    if (record.tenantId !== ctx.tenantId) return null;
+    if (!matchesProjectScope(record.projectId, ctx.projectId)) return null;
+    return serializeJob(record);
+  });
 }
 
 export async function listCrawlJobResults(
@@ -615,9 +621,10 @@ export async function listCrawlJobResults(
 ): Promise<CrawlResultView[]> {
   const job = await getCrawlJob(ctx, jobId);
   if (!job) throw new Error(`Crawl job ${jobId} not found`);
-  const db = await withTenantDb(ctx.tenantDbName);
-  const records = await db.listCrawlResults(jobId, options);
-  return records.map((r) => serializeResult(r));
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const records = await db.listCrawlResults(jobId, options);
+    return records.map((r) => serializeResult(r));
+  });
 }
 
 /**
@@ -631,22 +638,23 @@ export async function listCrawlJobResultsPage(
 ): Promise<CrawlResultPageView> {
   const job = await getCrawlJob(ctx, jobId);
   if (!job) throw new Error(`Crawl job ${jobId} not found`);
-  const db = await withTenantDb(ctx.tenantDbName);
-  const filters: CrawlResultFilters = {
-    type: options.type,
-    ragStatus: options.ragStatus,
-    search: options.search,
-  };
-  const [records, total, byType] = await Promise.all([
-    db.listCrawlResults(jobId, { ...filters, limit: options.limit, skip: options.skip, omitBody: true }),
-    db.countCrawlResults(jobId, filters),
-    db.countCrawlResultsByType(jobId),
-  ]);
-  return {
-    results: records.map((r) => serializeResult(r)),
-    total,
-    counts: { html: byType.html ?? 0, file: byType.file ?? 0, error: byType.error ?? 0 },
-  };
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const filters: CrawlResultFilters = {
+      type: options.type,
+      ragStatus: options.ragStatus,
+      search: options.search,
+    };
+    const [records, total, byType] = await Promise.all([
+      db.listCrawlResults(jobId, { ...filters, limit: options.limit, skip: options.skip, omitBody: true }),
+      db.countCrawlResults(jobId, filters),
+      db.countCrawlResultsByType(jobId),
+    ]);
+    return {
+      results: records.map((r) => serializeResult(r)),
+      total,
+      counts: { html: byType.html ?? 0, file: byType.file ?? 0, error: byType.error ?? 0 },
+    };
+  });
 }
 
 export async function getCrawlResult(
@@ -656,11 +664,12 @@ export async function getCrawlResult(
 ): Promise<CrawlResultView | null> {
   const job = await getCrawlJob(ctx, jobId);
   if (!job) return null;
-  const db = await withTenantDb(ctx.tenantDbName);
-  const record = await db.findCrawlResultById(resultId);
-  if (!record) return null;
-  if (record.jobId !== jobId) return null;
-  return serializeResult(record);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const record = await db.findCrawlResultById(resultId);
+    if (!record) return null;
+    if (record.jobId !== jobId) return null;
+    return serializeResult(record);
+  });
 }
 
 /**
@@ -683,46 +692,47 @@ export async function syncCrawlJobToRag(
     throw new Error('Invalid request: no Knowledge Engine module selected for this crawler or run');
   }
 
-  const db = await withTenantDb(ctx.tenantDbName);
-  const results = await db.listCrawlResults(jobId);
-  const eligible = results.filter(
-    (r) => (r.type === 'html' || r.type === 'file') && r.bodyMarkdown && r.bodyMarkdown.trim().length > 0,
-  );
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const results = await db.listCrawlResults(jobId);
+    const eligible = results.filter(
+      (r) => (r.type === 'html' || r.type === 'file') && r.bodyMarkdown && r.bodyMarkdown.trim().length > 0,
+    );
 
-  let indexed = 0;
-  let skipped = 0;
-  let failed = 0;
+    let indexed = 0;
+    let skipped = 0;
+    let failed = 0;
 
-  for (const result of eligible) {
-    const outcome = await ingestCrawlPage({
-      tenantDbName: ctx.tenantDbName,
-      tenantId: job.tenantId,
-      projectId: job.projectId,
-      rag: { enabled: true, ragModuleKey },
-      crawlerKey: job.crawlerKey,
-      jobId,
-      url: result.url,
-      title: result.title,
-      bodyMarkdown: result.bodyMarkdown ?? '',
-      depth: result.depth,
-      createdBy: actor,
+    for (const result of eligible) {
+      const outcome = await ingestCrawlPage({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: job.tenantId,
+        projectId: job.projectId,
+        rag: { enabled: true, ragModuleKey },
+        crawlerKey: job.crawlerKey,
+        jobId,
+        url: result.url,
+        title: result.title,
+        bodyMarkdown: result.bodyMarkdown ?? '',
+        depth: result.depth,
+        createdBy: actor,
+      });
+      if (outcome.ragStatus === 'indexed') indexed += 1;
+      else if (outcome.ragStatus === 'skipped') skipped += 1;
+      else failed += 1;
+
+      await db.updateCrawlResult(String(result._id), {
+        ragDocumentId: outcome.ragDocumentId,
+        ragStatus: outcome.ragStatus,
+        errorMessage: outcome.errorMessage,
+      });
+    }
+
+    logger.info('Manual Knowledge Engine sync completed', {
+      jobId, ragModuleKey, total: eligible.length, indexed, skipped, failed,
     });
-    if (outcome.ragStatus === 'indexed') indexed += 1;
-    else if (outcome.ragStatus === 'skipped') skipped += 1;
-    else failed += 1;
 
-    await db.updateCrawlResult(String(result._id), {
-      ragDocumentId: outcome.ragDocumentId,
-      ragStatus: outcome.ragStatus,
-      errorMessage: outcome.errorMessage,
-    });
-  }
-
-  logger.info('Manual Knowledge Engine sync completed', {
-    jobId, ragModuleKey, total: eligible.length, indexed, skipped, failed,
+    return { jobId, ragModuleKey, total: eligible.length, indexed, skipped, failed };
   });
-
-  return { jobId, ragModuleKey, total: eligible.length, indexed, skipped, failed };
 }
 
 export async function cancelCrawlJob(
@@ -732,21 +742,22 @@ export async function cancelCrawlJob(
   const job = await getCrawlJob(ctx, jobId);
   if (!job) return false;
   if (job.status !== 'queued' && job.status !== 'running') return false;
-  const db = await withTenantDb(ctx.tenantDbName);
-  // Atomic: a `queued` job is canceled outright; a `running` job only has
-  // `cancelRequestedAt` stamped. The runner that actually claimed the job
-  // (which may be on a different node than the one handling this request)
-  // observes the flag on its own DB round trips and performs the terminal
-  // `running -> canceled` transition itself — this request never overwrites
-  // a `running` job's status directly, so a late-finishing runner can never
-  // have its own legitimate `succeeded`/`partial`/`failed` write clobbered
-  // by, or clobber, this cancellation.
-  const result = await db.requestCrawlJobCancel(jobId, ctx.tenantId);
-  if (!result) return false;
-  // Same-node fast path: skip the DB round trip if the runner is local.
-  const { markJobCancelRequested } = await import('./crawlerJobService');
-  markJobCancelRequested(jobId);
-  return true;
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    // Atomic: a `queued` job is canceled outright; a `running` job only has
+    // `cancelRequestedAt` stamped. The runner that actually claimed the job
+    // (which may be on a different node than the one handling this request)
+    // observes the flag on its own DB round trips and performs the terminal
+    // `running -> canceled` transition itself — this request never overwrites
+    // a `running` job's status directly, so a late-finishing runner can never
+    // have its own legitimate `succeeded`/`partial`/`failed` write clobbered
+    // by, or clobber, this cancellation.
+    const result = await db.requestCrawlJobCancel(jobId, ctx.tenantId);
+    if (!result) return false;
+    // Same-node fast path: skip the DB round trip if the runner is local.
+    const { markJobCancelRequested } = await import('./crawlerJobService');
+    markJobCancelRequested(jobId);
+    return true;
+  });
 }
 
 export { queueNameFor };

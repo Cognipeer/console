@@ -8,7 +8,7 @@
  */
 
 import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
-import { getDatabase, runWithTenantScope } from '@/lib/database';
+import { getDatabase } from '@/lib/database';
 import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
 import { runScheduledAnalyses } from './service';
@@ -39,11 +39,8 @@ async function runOnce(): Promise<void> {
       // anything, so the work runs on a later tick once the service is back on.
       if (!(await isServiceEnabled({ tenantDbName: tenant.dbName, tenantId: String(tenant._id) }, 'analysis'))) continue;
       try {
-        // Timer context: bind the tenant for the whole per-tenant run —
-        // switchToTenant alone would fall back to the process-global handle
-        // that concurrent requests for other tenants overwrite.
-        const { fired, errors } = await runWithTenantScope(tenant.dbName, () =>
-          runScheduledAnalyses(tenant.dbName!, String(tenant._id)));
+        // runScheduledAnalyses binds the tenant for the whole per-tenant run itself.
+        const { fired, errors } = await runScheduledAnalyses(tenant.dbName, String(tenant._id));
         if (fired.length > 0) {
           logger.info(`Tenant ${tenant.slug}: fired ${fired.length} scheduled analysis run(s)`, { definitions: fired });
         }

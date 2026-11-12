@@ -15,8 +15,9 @@ import path from 'node:path';
 const hoisted = vi.hoisted(() => ({ getDatabase: vi.fn() }));
 vi.mock('@/lib/database', () => ({
   getDatabase: hoisted.getDatabase,
-  runWithTenantScope: async (tenantDbName: string, fn: (d: unknown) => unknown) => {
-    const provider = (await hoisted.getDatabase()) as { runWithTenant: (n: string, work: () => unknown) => Promise<unknown> };
+  // The real wrapper's contract: the tenant is bound for the whole of `fn`, whatever else runs at the same time.
+  runWithTenantScope: async (tenantDbName: string, fn: (db: SQLiteProvider) => unknown) => {
+    const provider = (await hoisted.getDatabase()) as SQLiteProvider;
     return provider.runWithTenant(tenantDbName, () => fn(provider));
   },
 }));
@@ -429,6 +430,29 @@ describe('getFileBucketDetail: one bucket for its page', () => {
       await bucket('docs', 'prov');
       const detail = await getFileBucketDetail(DB_NAME, tenantId, PROJECT, 'docs');
       expect(detail.storageLocation).not.toMatch(/AKIA|leak/);
+    });
+  });
+});
+
+// ── Two tenants at the same moment ────────────────────────────────────────
+
+describe('listFileBucketItems: tenants read at the same moment', () => {
+  const OTHER_DB_NAME = 'tenant_bucket_reads_other';
+
+  it('gives each tenant its own buckets while calls for both are in flight', async () => {
+    const other = await db.createTenant({ companyName: 'Globex', slug: 'globex-bucket-reads', dbName: OTHER_DB_NAME, licenseType: 'FREE', ownerId: 'owner-2' });
+    const otherTenantId = String(other._id);
+    await bucket('docs-acme', 'disk');
+    await db.runWithTenant(OTHER_DB_NAME, () => db.createFileBucket({
+      tenantId: otherTenantId, projectId: PROJECT, key: 'docs-globex', name: 'Bucket docs-globex', providerKey: 'disk', status: 'active', createdBy: 'u2',
+    } as never));
+    // The process-wide handle is on the first tenant (beforeEach): a read for the second tenant that left its own scope would see the first's data.
+    const calls = Array.from({ length: 12 }, (_, index) => (index % 2 === 0
+      ? listFileBucketItems(DB_NAME, tenantId, PROJECT)
+      : listFileBucketItems(OTHER_DB_NAME, otherTenantId, PROJECT)));
+    const results = await Promise.all(calls);
+    results.forEach((items, index) => {
+      expect(items.map((item) => item.key), `call ${index}`).toEqual(index % 2 === 0 ? ['docs-acme'] : ['docs-globex']);
     });
   });
 });

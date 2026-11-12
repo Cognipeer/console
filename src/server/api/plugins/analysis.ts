@@ -1,6 +1,6 @@
 import { enforceServiceQuota, isQuotaExceededError, quotaExceededBody } from '@/lib/quota/serviceQuota';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import { getDatabase, runWithTenantScope } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import type {
   IAnalysisDecision,
   IAnalysisFieldDef,
@@ -414,9 +414,10 @@ async function buildRunParams(
     : undefined;
   const requested = sanitizeTarget(body.target);
 
-  const db = await getDatabase();
-  await db.switchToTenant(session.tenantDbName);
-  const definition = await db.findAnalysisDefinitionByKey(definitionKey, projectId);
+  const definition = await runWithTenantScope(
+    session.tenantDbName,
+    (db) => db.findAnalysisDefinitionByKey(definitionKey, projectId),
+  );
   if (!definition) throw new ApiInputError(404, `Analysis definition "${definitionKey}" not found`);
   if (definition.source?.kind === 'agent_sessions') {
     assertCanAnalyze(await callerScope(request, projectId, session.tenantDbName, session.userId), definition.source.agentKeys);

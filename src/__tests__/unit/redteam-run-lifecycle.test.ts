@@ -910,51 +910,20 @@ describe('reviewing a run recorded with embedded attempts', () => {
     storedAttempt('p1', 'a2', 'vulnerable'),
   ];
 
-  it('moves the attempts to rows on the first review and keeps earlier reviews', async () => {
+  // Embedded attempts are still readable, but a review no longer moves them to rows first.
+  it('answers "Attempt not found" for an attempt that exists only embedded, and copies nothing', async () => {
     const run = await seedRun({ attemptStore: undefined, attempts: legacyAttempts(), aggregate: { total: 2, vulnerable: 2 } });
 
-    const result = await reviewAttempt(TENANT, run._id, 'p1::a2', review);
+    await expect(reviewAttempt(TENANT, run._id, 'p1::a2', review)).rejects.toBeInstanceOf(RedTeamNotFoundError);
+    await expect(reviewAttempt(TENANT, run._id, 'a2', review)).rejects.toBeInstanceOf(RedTeamNotFoundError);
 
     const stored = h.db.runs.get(run._id)!;
-    expect(stored.attemptStore).toBe('collection');
-    expect(stored.attempts).toEqual([]);
-    const rows = await h.db.listRedTeamRunAttempts(run._id);
-    expect(rows.map((r: Doc) => [r.attemptKey, r.seq])).toEqual([['p1::a1', 0], ['p1::a2', 1]]);
-    expect(rows[0].review).toMatchObject({ outcome: 'safe', reviewedBy: 'earlier' });
-    expect(rows[1].review).toMatchObject({ outcome: 'safe', reviewedBy: 'ann' });
-    expect(result!.aggregate).toMatchObject({ total: 2, vulnerable: 0, safe: 2 });
-    expect(result!.attempts).toHaveLength(2);
-  });
-
-  it('goes on when the run changed while its attempts were copied', async () => {
-    const run = await seedRun({ attemptStore: undefined, attempts: legacyAttempts() });
-    h.db.state.missNextIf = 1;
-
-    const result = await reviewAttempt(TENANT, run._id, 'p1::a2', review);
-
-    expect(h.db.runs.get(run._id)!.attemptStore).toBe('collection');
-    // The copy was made twice; the rows are not doubled.
-    expect(h.db.upsertRedTeamRunAttempts.mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(h.db.rows.get(run._id)).toHaveLength(2);
-    expect(result!.attempts).toHaveLength(2);
-  });
-
-  it('does not copy again once the run is on rows', async () => {
-    const run = await seedRun({ attemptStore: undefined, attempts: legacyAttempts() });
-    await reviewAttempt(TENANT, run._id, 'p1::a2', review);
-    h.db.upsertRedTeamRunAttempts.mockClear();
-
-    await reviewAttempt(TENANT, run._id, 'p1::a1', { outcome: 'needs_review', reviewedBy: 'ann' });
-
+    expect(stored.attemptStore).toBeUndefined();
+    expect(stored.attempts).toHaveLength(2);
+    expect(stored.attempts[1].review).toBeUndefined();
+    expect(stored.aggregate).toMatchObject({ total: 2, vulnerable: 2 });
     expect(h.db.upsertRedTeamRunAttempts).not.toHaveBeenCalled();
-  });
-
-  it('reviews by a bare id that is unique in the legacy run', async () => {
-    const run = await seedRun({ attemptStore: undefined, attempts: legacyAttempts() });
-
-    const result = await reviewAttempt(TENANT, run._id, 'a2', review);
-
-    expect(result!.attempts.find((a) => a.attemptKey === 'p1::a2')!.review?.outcome).toBe('safe');
+    expect(h.db.rows.get(run._id) ?? []).toHaveLength(0);
   });
 });
 

@@ -24,7 +24,11 @@ const hoisted = vi.hoisted(() => ({
 
 vi.mock('@/lib/database', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/database')>();
-  return { ...actual, getDatabase: hoisted.getDatabase };
+  return {
+    ...actual,
+    getDatabase: hoisted.getDatabase,
+    runWithTenantScope: vi.fn(async (_tenant: string, fn: (db: unknown) => unknown) => fn(await hoisted.getDatabase())),
+  };
 });
 
 // Delivery goes through safeFetch (DNS-pinned, per-hop SSRF checks). The

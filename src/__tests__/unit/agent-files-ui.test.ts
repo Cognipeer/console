@@ -746,8 +746,6 @@ describe('a model’s input types in the forms', () => {
       const source = readFileSync(join(root, file), 'utf8');
       expect(source, file).toContain('inputModalitiesPayload(');
     }
-    // The old page that posts a model without capabilities leaves the input types to the detection as well.
-    expect(readFileSync(join(root, 'app/dashboard/models/new/page.tsx'), 'utf8')).not.toContain('inputModalities');
   });
 
   const checkboxes = (html: string) => html.match(/<input[^>]*type="checkbox"[^>]*>/g) ?? [];

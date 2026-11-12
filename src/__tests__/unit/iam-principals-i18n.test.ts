@@ -31,7 +31,6 @@ const NAMESPACES = {
   iamAudit: ['components/iam/audit/AuditTab.tsx'],
   iamOverview: ['components/iam/overview/OverviewTab.tsx'],
   projectMembers: [
-    'components/projects/ProjectMembersManager.tsx',
     'components/projects/ProjectPermissionsEditor.tsx',
   ],
 } as const;

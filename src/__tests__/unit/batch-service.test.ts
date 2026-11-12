@@ -10,13 +10,12 @@ vi.mock('@/lib/services/files/fileService', () => ({
 
 import type { IBatchJob, IBatchJobItem } from '@/lib/database';
 
-// `getBatch`/`cancelBatch`/`getBatchItems` go through `getDatabase()` — stub
+// `getBatch`/`cancelBatch`/`getBatchItems` go through `runWithTenantScope()` — stub
 // it with an in-memory fake so the project-scoping check can be exercised
 // without a real tenant DB.
 const fakeBatchJobs = new Map<string, IBatchJob>();
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(async () => ({
-    switchToTenant: vi.fn(async () => {}),
+vi.mock('@/lib/database', () => {
+  const db = {
     findBatchJobById: vi.fn(async (id: string) => fakeBatchJobs.get(id) ?? null),
     updateBatchJob: vi.fn(async (id: string, data: Partial<IBatchJob>) => {
       const existing = fakeBatchJobs.get(id);
@@ -26,8 +25,12 @@ vi.mock('@/lib/database', () => ({
       return updated;
     }),
     listBatchJobItems: vi.fn(async () => []),
-  })),
-}));
+  };
+  return {
+    getDatabase: vi.fn(async () => db),
+    runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(db)),
+  };
+});
 
 import {
   BatchValidationError,

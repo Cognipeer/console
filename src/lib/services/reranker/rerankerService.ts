@@ -18,7 +18,7 @@ import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailab
 import crypto from 'crypto';
 import { createLogger } from '@/lib/core/logger';
 import { fireAndForget } from '@/lib/core/asyncTask';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import type {
   IReranker,
   IRerankerRunLog,
@@ -95,26 +95,25 @@ export async function createReranker(
   request: CreateRerankerRequest,
 ): Promise<Reranker> {
   validateStrategyConfig(request.strategy, request.config);
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const key = generateKey(request.name, request.key);
+    const existing = await db.findRerankerByKey(key, projectId);
+    if (existing) {
+      throw new Error(`Reranker with key "${key}" already exists.`);
+    }
 
-  const key = generateKey(request.name, request.key);
-  const existing = await db.findRerankerByKey(key, projectId);
-  if (existing) {
-    throw new Error(`Reranker with key "${key}" already exists.`);
-  }
-
-  return db.createReranker({
-    tenantId,
-    projectId,
-    key,
-    name: request.name,
-    description: request.description,
-    strategy: request.strategy,
-    config: request.config,
-    status: request.status ?? 'active',
-    metadata: request.metadata,
-    createdBy: request.createdBy,
+    return db.createReranker({
+      tenantId,
+      projectId,
+      key,
+      name: request.name,
+      description: request.description,
+      strategy: request.strategy,
+      config: request.config,
+      status: request.status ?? 'active',
+      metadata: request.metadata,
+      createdBy: request.createdBy,
+    });
   });
 }
 
@@ -129,26 +128,26 @@ export async function updateReranker(
     // The strategy is the stored one here, but the limit does not depend on it.
     validateMaxTokens(request.config);
   }
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const updates: Partial<IReranker> = {};
-  if (request.name !== undefined) updates.name = request.name;
-  if (request.description !== undefined) updates.description = request.description;
-  if (request.strategy !== undefined) updates.strategy = request.strategy;
-  if (request.config !== undefined) updates.config = request.config;
-  if (request.status !== undefined) updates.status = request.status;
-  if (request.metadata !== undefined) updates.metadata = request.metadata;
-  if (request.updatedBy !== undefined) updates.updatedBy = request.updatedBy;
-  return db.updateReranker(rerankerId, updates);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const updates: Partial<IReranker> = {};
+    if (request.name !== undefined) updates.name = request.name;
+    if (request.description !== undefined) updates.description = request.description;
+    if (request.strategy !== undefined) updates.strategy = request.strategy;
+    if (request.config !== undefined) updates.config = request.config;
+    if (request.status !== undefined) updates.status = request.status;
+    if (request.metadata !== undefined) updates.metadata = request.metadata;
+    if (request.updatedBy !== undefined) updates.updatedBy = request.updatedBy;
+    return db.updateReranker(rerankerId, updates);
+  });
 }
 
 export async function deleteReranker(
   tenantDbName: string,
   rerankerId: string,
 ): Promise<boolean> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.deleteReranker(rerankerId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.deleteReranker(rerankerId);
+  });
 }
 
 export async function getRerankerByKey(
@@ -156,27 +155,27 @@ export async function getRerankerByKey(
   key: string,
   projectId?: string,
 ): Promise<Reranker | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.findRerankerByKey(key, projectId);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.findRerankerByKey(key, projectId);
+  });
 }
 
 export async function getRerankerById(
   tenantDbName: string,
   id: string,
 ): Promise<Reranker | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.findRerankerById(id);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.findRerankerById(id);
+  });
 }
 
 export async function listRerankers(
   tenantDbName: string,
   filters?: { projectId?: string; status?: 'active' | 'disabled'; search?: string },
 ): Promise<Reranker[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.listRerankers(filters);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.listRerankers(filters);
+  });
 }
 
 /* ── Run logs ────────────────────────────────────────────────────────── */
@@ -186,9 +185,9 @@ export async function listRerankerRunLogs(
   rerankerKey: string,
   options?: { limit?: number; from?: Date; to?: Date; projectId?: string },
 ): Promise<IRerankerRunLog[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.listRerankerRunLogs(rerankerKey, options);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.listRerankerRunLogs(rerankerKey, options);
+  });
 }
 
 /* ── Run (the main entry point) ──────────────────────────────────────── */
@@ -207,65 +206,131 @@ export async function runReranker(
   // reranks): the run log then shows what was asked only to those who may read it.
   const kbRestricted = currentRestrictedKnowledgeTags();
   const logMetadata = kbRestricted.length > 0 ? { metadata: { kbRestricted } } : {};
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-
-  const reranker = await db.findRerankerByKey(rerankerKey, projectId);
-  if (!reranker) {
-    throw new Error(`Reranker "${rerankerKey}" not found.`);
-  }
-  if (reranker.status !== 'active') {
-    throw new Error(`Reranker "${rerankerKey}" is disabled.`);
-  }
-
-  if (!request.query || typeof request.query !== 'string') {
-    throw new Error('Reranker run: `query` is required.');
-  }
-  if (!Array.isArray(request.documents) || request.documents.length === 0) {
-    throw new Error('Reranker run: `documents` must be a non-empty array.');
-  }
-
-  if (options.quota !== false) {
-    await enforceServiceQuota(
-      { tenantDbName, tenantId, projectId },
-      { domain: 'rerank', resourceKey: reranker.key, cost: { requests: 1, units: request.documents.length } },
-    );
-  }
-
-  const cfg = reranker.config ?? {};
-  const effectiveTopN = request.topN ?? cfg.topN ?? request.documents.length;
-
-  // Normalize input documents to strategy shape.
-  const inputDocs = request.documents.map((d, i) => ({
-    index: i,
-    content: d.content,
-    originalScore: d.score,
-  }));
-
-  let scored;
-  try {
-    const strategy = getStrategy(reranker.strategy);
-    let model;
-    if (cfg.modelKey && ['dedicated-model', 'llm-judge', 'llm-listwise'].includes(reranker.strategy)) {
-      model = await getModelByKey(tenantDbName, cfg.modelKey, projectId ?? '');
-      if (!model) {
-        throw new Error(`Reranker model "${cfg.modelKey}" not found.`);
-      }
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const reranker = await db.findRerankerByKey(rerankerKey, projectId);
+    if (!reranker) {
+      throw new Error(`Reranker "${rerankerKey}" not found.`);
     }
-    scored = await strategy.run(
-      {
+    if (reranker.status !== 'active') {
+      throw new Error(`Reranker "${rerankerKey}" is disabled.`);
+    }
+
+    if (!request.query || typeof request.query !== 'string') {
+      throw new Error('Reranker run: `query` is required.');
+    }
+    if (!Array.isArray(request.documents) || request.documents.length === 0) {
+      throw new Error('Reranker run: `documents` must be a non-empty array.');
+    }
+
+    if (options.quota !== false) {
+      await enforceServiceQuota(
+        { tenantDbName, tenantId, projectId },
+        { domain: 'rerank', resourceKey: reranker.key, cost: { requests: 1, units: request.documents.length } },
+      );
+    }
+
+    const cfg = reranker.config ?? {};
+    const effectiveTopN = request.topN ?? cfg.topN ?? request.documents.length;
+
+    // Normalize input documents to strategy shape.
+    const inputDocs = request.documents.map((d, i) => ({
+      index: i,
+      content: d.content,
+      originalScore: d.score,
+    }));
+
+    let scored;
+    try {
+      const strategy = getStrategy(reranker.strategy);
+      let model;
+      if (cfg.modelKey && ['dedicated-model', 'llm-judge', 'llm-listwise'].includes(reranker.strategy)) {
+        model = await getModelByKey(tenantDbName, cfg.modelKey, projectId ?? '');
+        if (!model) {
+          throw new Error(`Reranker model "${cfg.modelKey}" not found.`);
+        }
+      }
+      scored = await strategy.run(
+        {
+          tenantDbName,
+          tenantId,
+          projectId,
+          reranker,
+          model,
+        },
+        request.query,
+        inputDocs,
+        effectiveTopN,
+      );
+    } catch (error) {
+      const latencyMs = Date.now() - start;
+      // No tokens — LLM strategies flow through the models service.
+      const attribution = recordUsageEvent({
         tenantDbName,
         tenantId,
         projectId,
-        reranker,
-        model,
-      },
-      request.query,
-      inputDocs,
-      effectiveTopN,
-    );
-  } catch (error) {
+        service: 'reranker',
+        refKey: reranker.key,
+        status: 'error',
+        latencyMs,
+        units: { inputCount: request.documents.length, outputCount: 0 },
+      });
+      fireAndForget('log-reranker-error', async () => {
+        await db.createRerankerRunLog({
+          userId: attribution.userId,
+          apiTokenId: attribution.apiTokenId,
+          actorType: attribution.actorType,
+          tenantId,
+          projectId,
+          rerankerKey: reranker.key,
+          strategy: reranker.strategy,
+          modelKey: cfg.modelKey,
+          query: request.query.slice(0, 500),
+          inputCount: request.documents.length,
+          outputCount: 0,
+          latencyMs,
+          status: 'error',
+          errorMessage: error instanceof Error ? error.message : String(error),
+          source: request.source,
+          ragModuleKey: request.ragModuleKey,
+          ...logMetadata,
+        });
+      });
+      throw error;
+    }
+
+    // Optional score normalization (minmax to [0,1]).
+    if (cfg.scoreNormalization === 'minmax' && scored.length > 1) {
+      const values = scored.map((s) => s.score);
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const range = max - min;
+      if (range > 0) {
+        scored = scored.map((s) => ({ ...s, score: (s.score - min) / range }));
+      }
+    }
+
+    // Sort descending by reranked score, apply threshold + topN.
+    scored.sort((a, b) => b.score - a.score);
+    if (typeof cfg.scoreThreshold === 'number') {
+      scored = scored.filter((s) => s.score >= cfg.scoreThreshold!);
+    }
+    scored = scored.slice(0, effectiveTopN);
+
+    const results: RerankerRunResultItem[] = scored.map((s) => {
+      const original = request.documents[s.index] as RerankerDocumentInput;
+      return {
+        index: s.index,
+        id: original.id,
+        score: s.score,
+        originalScore: original.score,
+        content: original.content,
+        metadata: original.metadata,
+      };
+    });
+
     const latencyMs = Date.now() - start;
+
+    // Update reranker stats + log run.
     // No tokens — LLM strategies flow through the models service.
     const attribution = recordUsageEvent({
       tenantDbName,
@@ -273,122 +338,55 @@ export async function runReranker(
       projectId,
       service: 'reranker',
       refKey: reranker.key,
-      status: 'error',
+      status: 'success',
       latencyMs,
-      units: { inputCount: request.documents.length, outputCount: 0 },
+      units: { inputCount: request.documents.length, outputCount: results.length },
     });
-    fireAndForget('log-reranker-error', async () => {
-      await db.createRerankerRunLog({
-        userId: attribution.userId,
-        apiTokenId: attribution.apiTokenId,
-        actorType: attribution.actorType,
-        tenantId,
-        projectId,
-        rerankerKey: reranker.key,
-        strategy: reranker.strategy,
-        modelKey: cfg.modelKey,
-        query: request.query.slice(0, 500),
-        inputCount: request.documents.length,
-        outputCount: 0,
-        latencyMs,
-        status: 'error',
-        errorMessage: error instanceof Error ? error.message : String(error),
-        source: request.source,
-        ragModuleKey: request.ragModuleKey,
-        ...logMetadata,
-      });
+    fireAndForget('log-reranker-success', async () => {
+      try {
+        await db.createRerankerRunLog({
+          userId: attribution.userId,
+          apiTokenId: attribution.apiTokenId,
+          actorType: attribution.actorType,
+          tenantId,
+          projectId,
+          rerankerKey: reranker.key,
+          strategy: reranker.strategy,
+          modelKey: cfg.modelKey,
+          query: request.query.slice(0, 500),
+          inputCount: request.documents.length,
+          outputCount: results.length,
+          latencyMs,
+          status: 'success',
+          source: request.source,
+          ragModuleKey: request.ragModuleKey,
+          ...logMetadata,
+        });
+      } catch (err) {
+        logger.warn('Failed to log reranker run', { error: err });
+      }
+      try {
+        const total = (reranker.totalRuns ?? 0) + 1;
+        const prevAvg = reranker.avgLatencyMs ?? latencyMs;
+        const newAvg = prevAvg + (latencyMs - prevAvg) / total;
+        await db.updateReranker(String(reranker._id), {
+          totalRuns: total,
+          avgLatencyMs: newAvg,
+          lastUsedAt: new Date(),
+        });
+      } catch (err) {
+        logger.warn('Failed to update reranker stats', { error: err });
+      }
     });
-    throw error;
-  }
 
-  // Optional score normalization (minmax to [0,1]).
-  if (cfg.scoreNormalization === 'minmax' && scored.length > 1) {
-    const values = scored.map((s) => s.score);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const range = max - min;
-    if (range > 0) {
-      scored = scored.map((s) => ({ ...s, score: (s.score - min) / range }));
-    }
-  }
-
-  // Sort descending by reranked score, apply threshold + topN.
-  scored.sort((a, b) => b.score - a.score);
-  if (typeof cfg.scoreThreshold === 'number') {
-    scored = scored.filter((s) => s.score >= cfg.scoreThreshold!);
-  }
-  scored = scored.slice(0, effectiveTopN);
-
-  const results: RerankerRunResultItem[] = scored.map((s) => {
-    const original = request.documents[s.index] as RerankerDocumentInput;
     return {
-      index: s.index,
-      id: original.id,
-      score: s.score,
-      originalScore: original.score,
-      content: original.content,
-      metadata: original.metadata,
+      rerankerKey: reranker.key,
+      strategy: reranker.strategy,
+      modelKey: cfg.modelKey,
+      results,
+      latencyMs,
+      inputCount: request.documents.length,
+      outputCount: results.length,
     };
   });
-
-  const latencyMs = Date.now() - start;
-
-  // Update reranker stats + log run.
-  // No tokens — LLM strategies flow through the models service.
-  const attribution = recordUsageEvent({
-    tenantDbName,
-    tenantId,
-    projectId,
-    service: 'reranker',
-    refKey: reranker.key,
-    status: 'success',
-    latencyMs,
-    units: { inputCount: request.documents.length, outputCount: results.length },
-  });
-  fireAndForget('log-reranker-success', async () => {
-    try {
-      await db.createRerankerRunLog({
-        userId: attribution.userId,
-        apiTokenId: attribution.apiTokenId,
-        actorType: attribution.actorType,
-        tenantId,
-        projectId,
-        rerankerKey: reranker.key,
-        strategy: reranker.strategy,
-        modelKey: cfg.modelKey,
-        query: request.query.slice(0, 500),
-        inputCount: request.documents.length,
-        outputCount: results.length,
-        latencyMs,
-        status: 'success',
-        source: request.source,
-        ragModuleKey: request.ragModuleKey,
-        ...logMetadata,
-      });
-    } catch (err) {
-      logger.warn('Failed to log reranker run', { error: err });
-    }
-    try {
-      const total = (reranker.totalRuns ?? 0) + 1;
-      const prevAvg = reranker.avgLatencyMs ?? latencyMs;
-      const newAvg = prevAvg + (latencyMs - prevAvg) / total;
-      await db.updateReranker(String(reranker._id), {
-        totalRuns: total,
-        avgLatencyMs: newAvg,
-        lastUsedAt: new Date(),
-      });
-    } catch (err) {
-      logger.warn('Failed to update reranker stats', { error: err });
-    }
-  });
-
-  return {
-    rerankerKey: reranker.key,
-    strategy: reranker.strategy,
-    modelKey: cfg.modelKey,
-    results,
-    latencyMs,
-    inputCount: request.documents.length,
-    outputCount: results.length,
-  };
 }

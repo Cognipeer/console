@@ -21,6 +21,10 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
+
+/** Every route here is gated by the "config" service (the same one its path prefix maps to). */
+const GATE = { config: authz.service('config') } as const;
 
 type ConfigListQuery = {
   groupId?: string;
@@ -30,7 +34,7 @@ type ConfigListQuery = {
 };
 
 export const configApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get('/config/groups', withApiRequestContext(async (request, reply) => {
+  app.get('/config/groups', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const query = (request.query ?? {}) as ConfigListQuery;
@@ -54,7 +58,7 @@ export const configApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/config/groups', withApiRequestContext(async (request, reply) => {
+  app.post('/config/groups', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -86,7 +90,7 @@ export const configApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/config/groups/:groupId', withApiRequestContext(async (request, reply) => {
+  app.get('/config/groups/:groupId', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const { groupId } = request.params as { groupId: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -111,7 +115,7 @@ export const configApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.patch('/config/groups/:groupId', withApiRequestContext(async (request, reply) => {
+  app.patch('/config/groups/:groupId', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const { groupId } = request.params as { groupId: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -140,7 +144,7 @@ export const configApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/config/groups/:groupId', withApiRequestContext(async (request, reply) => {
+  app.delete('/config/groups/:groupId', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const { groupId } = request.params as { groupId: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -162,7 +166,7 @@ export const configApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/config/groups/:groupId/items', withApiRequestContext(async (request, reply) => {
+  app.get('/config/groups/:groupId/items', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const { groupId } = request.params as { groupId: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -189,7 +193,7 @@ export const configApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/config/groups/:groupId/items', withApiRequestContext(async (request, reply) => {
+  app.post('/config/groups/:groupId/items', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const { groupId } = request.params as { groupId: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -229,7 +233,7 @@ export const configApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/config/items', withApiRequestContext(async (request, reply) => {
+  app.get('/config/items', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const query = (request.query ?? {}) as ConfigListQuery;
@@ -255,7 +259,7 @@ export const configApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/config/items/:itemId', withApiRequestContext(async (request, reply) => {
+  app.get('/config/items/:itemId', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const { itemId } = request.params as { itemId: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -287,7 +291,7 @@ export const configApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.patch('/config/items/:itemId', withApiRequestContext(async (request, reply) => {
+  app.patch('/config/items/:itemId', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const { itemId } = request.params as { itemId: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -319,7 +323,7 @@ export const configApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.delete('/config/items/:itemId', withApiRequestContext(async (request, reply) => {
+  app.delete('/config/items/:itemId', GATE, withApiRequestContext(async (request, reply) => {
     try {
       const { itemId } = request.params as { itemId: string };
       const { projectId, session } = await requireProjectContextForRequest(request);

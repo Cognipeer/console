@@ -4,8 +4,7 @@
  * the event name and delivery id (normalized before anything shows or stores
  * them), the headers a filter or template may read (an allow-list) and the
  * material de-duplication keys on. Vendor webhooks (GitHub, GitLab, Azure
- * DevOps) are connector triggers; their old presets only survive as retired,
- * read-only values (`isRetiredWebhook`).
+ * DevOps) are connector triggers.
  *
  * Every secret comparison hashes both sides and compares the digests with
  * `timingSafeEqual`, so neither the length nor the content of a guess shows in
@@ -13,13 +12,7 @@
  */
 
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import type {
-  AgentTriggerWebhook,
-  AgentTriggerWebhookAuth,
-  AgentTriggerWebhookPreset,
-  RetiredAgentTriggerWebhookAuth,
-  RetiredAgentTriggerWebhookPreset,
-} from '@/lib/database';
+import type { AgentTriggerWebhookAuth, AgentTriggerWebhookPreset } from '@/lib/database';
 
 export const WEBHOOK_PRESETS: readonly AgentTriggerWebhookPreset[] = ['generic'];
 
@@ -27,16 +20,6 @@ export const WEBHOOK_PRESETS: readonly AgentTriggerWebhookPreset[] = ['generic']
 export const WEBHOOK_PRESET_AUTH: Record<AgentTriggerWebhookPreset, readonly AgentTriggerWebhookAuth[]> = {
   generic: ['bearer', 'signature', 'header', 'standard_webhooks'],
 };
-
-/** Vendor presets and auth modes older triggers were stored with; they can no longer be written or delivered to. */
-export const RETIRED_WEBHOOK_PRESETS: readonly RetiredAgentTriggerWebhookPreset[] = ['github', 'gitlab', 'azure_devops'];
-export const RETIRED_WEBHOOK_AUTH: readonly RetiredAgentTriggerWebhookAuth[] = ['github_signature', 'gitlab_token', 'basic'];
-
-/** A stored webhook with a retired preset or auth mode: it no longer receives deliveries (convert it to a connector or generic trigger). */
-export function isRetiredWebhook(webhook: Pick<AgentTriggerWebhook, 'preset' | 'auth'>): boolean {
-  return (RETIRED_WEBHOOK_PRESETS as readonly string[]).includes(webhook.preset)
-    || (RETIRED_WEBHOOK_AUTH as readonly string[]).includes(webhook.auth);
-}
 
 const HEADER_AUTH: ReadonlySet<AgentTriggerWebhookAuth> = new Set(['bearer', 'header']);
 

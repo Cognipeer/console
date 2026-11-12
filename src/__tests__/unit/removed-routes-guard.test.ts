@@ -1,8 +1,7 @@
 /**
  * Nothing points at the pages that were removed. People, groups and API tokens
- * of others live in the IAM center; the old URLs exist only as redirects in the
- * Next config. This walks the sources and the docs so a stale link, component or
- * message cannot creep back in.
+ * of others live in the IAM center. This walks the sources and the docs so a
+ * stale link, component or message cannot creep back in.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -10,11 +9,9 @@ import { describe, expect, it } from 'vitest';
 
 const ROOT = path.resolve(__dirname, '../../..');
 
-/** Files allowed to name the old routes: the redirects, this guard, the tests that assert their absence and the change logs. */
+/** Files allowed to name the old routes: this guard, the tests that assert their absence and the change logs. */
 const ALLOWED = new Set([
-  'next.config.mjs',
   'src/__tests__/unit/removed-routes-guard.test.ts',
-  'src/__tests__/unit/next-config-redirects.test.ts',
   'src/__tests__/unit/nav-registry.test.ts',
   'src/__tests__/unit/iam-principals-ui.test.ts',
   'src/__tests__/unit/iam-directory-drawer.test.ts',
@@ -65,7 +62,7 @@ describe('removed routes and components', () => {
     expect(offenders(/(Settings|Configure)\s*(→|->|>|&rarr;)\s*Members|Members\s*(→|->|>|&rarr;)\s*Groups|multi-tenancy\/02-members/)).toEqual([]);
   });
 
-  it('the pages themselves are gone (a redirect lives in the config, not in a stub page)', () => {
+  it('the pages themselves are gone', () => {
     for (const gone of ['src/app/dashboard/members', 'src/app/dashboard/tenant-settings']) {
       expect(() => statSync(path.join(ROOT, gone))).toThrow();
     }

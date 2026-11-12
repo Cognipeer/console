@@ -37,6 +37,7 @@ import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import { classifyRoute, concretePath, type RegisteredRoute } from '@/lib/iam/routeRegistry';
 import { isGatedHandler, resolveRouteAuthz } from '@/lib/iam/routeAuthz';
+import { UNGATED_SERVICE_ROUTES } from '@/lib/iam/routeDeclarationRules';
 import { fastifyApiPlugin, isPublicApiPath, isSelfAuthApiPath } from '@/server/api/plugin';
 
 export interface CollectedRoute extends RegisteredRoute {
@@ -47,21 +48,6 @@ export interface CollectedRoute extends RegisteredRoute {
   /** WebSocket upgrade route (the HTTP handler wrappers do not apply). */
   websocket?: boolean;
 }
-
-/**
- * Service-resolving routes that are intentionally NOT wrapped by the permission
- * gate because they authenticate and authorize the caller themselves (HMAC links,
- * opener-bound cookies, static installers, websockets). Matched against
- * `METHOD /api/pattern`. Adding an entry needs a reason a reviewer can check.
- */
-export const UNGATED_SERVICE_ROUTES: Array<{ match: RegExp; reason: string }> = [
-  { match: /^[A-Z]+ \/api\/sandbox\/preview\//, reason: 'sandbox preview: HMAC-signed link verified by the handler' },
-  { match: /^[A-Z]+ \/api\/gpu-fleet\/installer\.sh$/, reason: 'static agent installer script (no tenant data)' },
-  { match: /^[A-Z]+ \/api\/gpu-fleet\/agent-bundle/, reason: 'static agent bundle download (no tenant data)' },
-  { match: /^[A-Z]+ \/api\/(gpu-fleet|sandbox)\/terminal\/:[A-Za-z]+\/browser$/, reason: 'browser terminal websocket: cookie session + opener-bound token verified by the handler' },
-  { match: /^[A-Z]+ \/api\/client\/v1\/realtime$/, reason: 'realtime websocket: authenticates and authorizes the token / session itself (assertRealtimeRbac, through the policy engine)' },
-  { match: /^[A-Z]+ \/api\/client\/v1\/realtime\/twilio\//, reason: 'telephony webhook/stream: Twilio signature + stream token verified by the handler' },
-];
 
 export async function collectApiRoutes(): Promise<CollectedRoute[]> {
   const app = Fastify({ logger: false });

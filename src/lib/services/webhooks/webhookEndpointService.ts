@@ -26,8 +26,7 @@
  */
 
 import crypto from 'node:crypto';
-import { getDatabase, type DatabaseProvider } from '@/lib/database';
-import { runInTenant } from '@/lib/database/runInTenant';
+import { runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type { IWebhookDelivery, IWebhookEndpoint, WebhookDeliveryStatus } from '@/lib/database';
 import { assertPublicUrl } from '@/lib/security/outboundFetch';
 import { encryptObject } from '@/lib/utils/crypto';
@@ -212,7 +211,7 @@ export function generateWebhookSecret(): string {
 }
 
 async function inTenantDb<T>(scope: WebhookScope, fn: (db: DatabaseProvider) => Promise<T>): Promise<T> {
-  return runInTenant(await getDatabase(), scope.tenantDbName, fn);
+  return runWithTenantScope(scope.tenantDbName, fn);
 }
 
 // ── Operations ───────────────────────────────────────────────────────────

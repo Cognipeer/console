@@ -13,13 +13,16 @@ const { crawlMock, findCrawlerById, findCrawlerByKey } = vi.hoisted(() => ({
   findCrawlerByKey: vi.fn(),
 }));
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn().mockResolvedValue({
-    switchToTenant: vi.fn().mockResolvedValue(undefined),
+vi.mock('@/lib/database', () => {
+  const db = {
     findCrawlerById,
     findCrawlerByKey,
-  }),
-}));
+  };
+  return {
+    getDatabase: vi.fn().mockResolvedValue(db),
+    runWithTenantScope: vi.fn(async (_name: string, fn: (db: unknown) => unknown) => fn(db)),
+  };
+});
 vi.mock('@/lib/services/crawler/engine', () => ({ crawl: crawlMock }));
 vi.mock('@/lib/quota/serviceQuota', () => ({ enforceServiceQuota: vi.fn().mockResolvedValue(null) }));
 vi.mock('@/lib/core/cluster', () => ({ routeInstanceCall: vi.fn(), queueNameFor: vi.fn() }));

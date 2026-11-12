@@ -16,11 +16,7 @@ const getDatabaseMock = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/database', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/database')>()),
   getDatabase: getDatabaseMock,
-  runWithTenantScope: async (name: string, fn: (d: unknown) => unknown) => {
-    const db = (await getDatabaseMock()) as { switchToTenant?: (n: string) => Promise<void> };
-    await db.switchToTenant?.(name);
-    return fn(db);
-  },
+  runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabaseMock()),
 }));
 
 // The tool service asks whether the tools service is on; with no database in a

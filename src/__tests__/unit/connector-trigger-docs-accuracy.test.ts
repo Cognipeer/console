@@ -12,7 +12,7 @@
  *
  * The sentences that say what the API answers (the message of a cron a poll cannot take, a Retry that binds a lost
  * subscription, a parameter the package reads from the service, a schedule object on a PATCH, a webhook trigger saved
- * while its connector is disabled), what a retired preset leaves behind and what a cleared schedule field does are
+ * while its connector is disabled), and what a cleared schedule field does are
  * pinned here too, and no document may present a retired vendor preset as one a person can create. The events the guide lists for GitHub, GitLab and Azure DevOps, and the examples of its cron table, are held
  * to the packages and to the Connectors module in the Enterprise overlay (`connector-trigger-guide-parity.test.ts`).
  */
@@ -162,11 +162,6 @@ describe('the triggers guide, connector section', () => {
     expect(text).toContain('reads `manual` with the reason');
     expect(text).toContain('A poll that fails stays `active` with `last_error`');
     expect(text).toContain('`failed` (a rotation could not register the hook again');
-  });
-
-  it('tells a migrating retired preset that the payload is the package\'s flat data', () => {
-    const text = flat(guide);
-    expect(text).toContain('`payload.draft`, not the vendor\'s `payload.pull_request.draft`');
   });
 });
 

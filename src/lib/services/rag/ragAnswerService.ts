@@ -14,7 +14,7 @@
 
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import { queryRag } from './ragService';
 import { anonymousKbCaller, resolveRagAccess, withKnowledgeExposure, type KbCaller, type RagAccessScope } from './access';
@@ -401,119 +401,119 @@ async function answer(
   const gen = request.generation ?? {};
   const history = request.history ?? [];
 
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
-  if (!ragModule) throw new Error(`RAG module "${request.ragModuleKey}" not found`);
-  if (ragModule.status !== 'active') throw new RagModuleInactiveError();
-  // Resolved once for every query variant below, not once per variant.
-  const access = ragModule.access?.enabled === true
-    ? options.access ?? await resolveRagAccess({
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
+    if (!ragModule) throw new Error(`RAG module "${request.ragModuleKey}" not found`);
+    if (ragModule.status !== 'active') throw new RagModuleInactiveError();
+    // Resolved once for every query variant below, not once per variant.
+    const access = ragModule.access?.enabled === true
+      ? options.access ?? await resolveRagAccess({
+        tenantDbName,
+        tenantId,
+        module: ragModule,
+        caller: options.caller ?? anonymousKbCaller('unknown'),
+      })
+      : undefined;
+
+    const ctx: AnswerContext = {
       tenantDbName,
       tenantId,
-      module: ragModule,
-      caller: options.caller ?? anonymousKbCaller('unknown'),
-    })
-    : undefined;
+      projectId,
+      modelKey: request.answerModelKey,
+      cacheable: ragModule.access?.enabled !== true,
+    };
 
-  const ctx: AnswerContext = {
-    tenantDbName,
-    tenantId,
-    projectId,
-    modelKey: request.answerModelKey,
-    cacheable: ragModule.access?.enabled !== true,
-  };
-
-  // 1. Build the query list (optionally expanded with alternative phrasings).
-  const queries = [request.question];
-  if (retrieval.multiQuery) {
-    const variantCount =
-      typeof retrieval.multiQuery === 'object' ? retrieval.multiQuery.variants ?? 3 : 3;
-    try {
-      const { text } = await invokeChat(
-        ctx,
-        buildMultiQueryMessages(request.question, variantCount),
-        { temperature: 0.3 },
-      );
-      queries.push(...parseQueryVariants(text, variantCount));
-    } catch (err) {
-      logger.warn('Multi-query expansion failed, using original question only', { error: err });
+    // 1. Build the query list (optionally expanded with alternative phrasings).
+    const queries = [request.question];
+    if (retrieval.multiQuery) {
+      const variantCount =
+        typeof retrieval.multiQuery === 'object' ? retrieval.multiQuery.variants ?? 3 : 3;
+      try {
+        const { text } = await invokeChat(
+          ctx,
+          buildMultiQueryMessages(request.question, variantCount),
+          { temperature: 0.3 },
+        );
+        queries.push(...parseQueryVariants(text, variantCount));
+      } catch (err) {
+        logger.warn('Multi-query expansion failed, using original question only', { error: err });
+      }
     }
-  }
 
-  // 2. Retrieve. Oversample when we will post-filter for diversity.
-  const wantsDiversity = Boolean(retrieval.diversity?.mmr || retrieval.diversity?.perDocumentLimit);
-  const fetchTopK = wantsDiversity || queries.length > 1 ? Math.max(topK, topK * 3) : topK;
-  const groups = await Promise.all(
-    queries.map((q) =>
-      queryRag(tenantDbName, tenantId, projectId, {
-        ragModuleKey: request.ragModuleKey,
-        query: q,
-        topK: fetchTopK,
-        filter: retrieval.filter,
-      }, { caller: options.caller, access }).then((r) => r.matches),
-    ),
-  );
-  let candidates = mergeMatches(groups);
-  const candidateCount = candidates.length;
-
-  // 3. Diversify down to topK.
-  if (retrieval.diversity?.perDocumentLimit) {
-    candidates = applyPerDocumentLimit(candidates, retrieval.diversity.perDocumentLimit);
-  }
-  let finalMatches: RagQueryMatch[];
-  if (retrieval.diversity?.mmr) {
-    finalMatches = await applyMmr(
-      ctx,
-      ragModule.embeddingModelKey,
-      request.question,
-      candidates,
-      topK,
-      retrieval.diversity.lambda ?? 0.5,
+    // 2. Retrieve. Oversample when we will post-filter for diversity.
+    const wantsDiversity = Boolean(retrieval.diversity?.mmr || retrieval.diversity?.perDocumentLimit);
+    const fetchTopK = wantsDiversity || queries.length > 1 ? Math.max(topK, topK * 3) : topK;
+    const groups = await Promise.all(
+      queries.map((q) =>
+        queryRag(tenantDbName, tenantId, projectId, {
+          ragModuleKey: request.ragModuleKey,
+          query: q,
+          topK: fetchTopK,
+          filter: retrieval.filter,
+        }, { caller: options.caller, access }).then((r) => r.matches),
+      ),
     );
-  } else {
-    finalMatches = candidates.slice(0, topK);
-  }
+    let candidates = mergeMatches(groups);
+    const candidateCount = candidates.length;
 
-  const passages = numberPassages(finalMatches);
+    // 3. Diversify down to topK.
+    if (retrieval.diversity?.perDocumentLimit) {
+      candidates = applyPerDocumentLimit(candidates, retrieval.diversity.perDocumentLimit);
+    }
+    let finalMatches: RagQueryMatch[];
+    if (retrieval.diversity?.mmr) {
+      finalMatches = await applyMmr(
+        ctx,
+        ragModule.embeddingModelKey,
+        request.question,
+        candidates,
+        topK,
+        retrieval.diversity.lambda ?? 0.5,
+      );
+    } else {
+      finalMatches = candidates.slice(0, topK);
+    }
 
-  // 4. Generate. Auto-escalate "stuff" to map_reduce when context is huge.
-  let strategy: RagGenerationStrategy = gen.strategy ?? 'stuff';
-  const maxContextChars = gen.maxContextChars ?? 16000;
-  if (strategy === 'stuff' && maxContextChars > 0 && totalContextChars(passages) > maxContextChars) {
-    logger.info('Context exceeds maxContextChars, escalating stuff → map_reduce', {
-      chars: totalContextChars(passages),
-      maxContextChars,
-    });
-    strategy = 'map_reduce';
-  }
+    const passages = numberPassages(finalMatches);
 
-  let generated: { text: string; usage?: unknown };
-  if (passages.length === 0) {
-    generated = { text: 'I could not find any relevant information in the available documents.' };
-  } else if (strategy === 'map_reduce') {
-    generated = await generateMapReduce(ctx, request.question, passages, history, gen);
-  } else if (strategy === 'refine') {
-    generated = await generateRefine(ctx, request.question, passages, gen);
-  } else {
-    generated = await generateStuff(ctx, request.question, passages, history, gen);
-  }
+    // 4. Generate. Auto-escalate "stuff" to map_reduce when context is huge.
+    let strategy: RagGenerationStrategy = gen.strategy ?? 'stuff';
+    const maxContextChars = gen.maxContextChars ?? 16000;
+    if (strategy === 'stuff' && maxContextChars > 0 && totalContextChars(passages) > maxContextChars) {
+      logger.info('Context exceeds maxContextChars, escalating stuff → map_reduce', {
+        chars: totalContextChars(passages),
+        maxContextChars,
+      });
+      strategy = 'map_reduce';
+    }
 
-  const citations = buildCitations(passages, generated.text);
+    let generated: { text: string; usage?: unknown };
+    if (passages.length === 0) {
+      generated = { text: 'I could not find any relevant information in the available documents.' };
+    } else if (strategy === 'map_reduce') {
+      generated = await generateMapReduce(ctx, request.question, passages, history, gen);
+    } else if (strategy === 'refine') {
+      generated = await generateRefine(ctx, request.question, passages, gen);
+    } else {
+      generated = await generateStuff(ctx, request.question, passages, history, gen);
+    }
 
-  return {
-    answer: generated.text,
-    citations,
-    usedChunks: finalMatches,
-    strategy,
-    retrieval: {
-      queries,
-      candidateCount,
-      finalCount: finalMatches.length,
-    },
-    latencyMs: Date.now() - startTime,
-    usage: generated.usage,
-  };
+    const citations = buildCitations(passages, generated.text);
+
+    return {
+      answer: generated.text,
+      citations,
+      usedChunks: finalMatches,
+      strategy,
+      retrieval: {
+        queries,
+        candidateCount,
+        finalCount: finalMatches.length,
+      },
+      latencyMs: Date.now() - startTime,
+      usage: generated.usage,
+    };
+  });
 }
 
 export { DEFAULT_RAG_SYSTEM_PROMPT };

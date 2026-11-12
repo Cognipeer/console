@@ -22,7 +22,7 @@
 import { getConfig } from '@/lib/core/config';
 import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import slugify from 'slugify';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope, type getDatabase } from '@/lib/database';
 import type {
   IAnalysisDefinition,
   IAnalysisFieldDef,
@@ -160,44 +160,44 @@ export async function createDefinition(
   createdBy: string,
   input: CreateDefinitionInput,
 ): Promise<WithId<IAnalysisDefinition>> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const key = await generateUniqueKey(input.name, async (k) => !!(await db.findAnalysisDefinitionByKey(k, input.projectId)));
-  const definition = await db.createAnalysisDefinition({
-    tenantId,
-    projectId: input.projectId,
-    key,
-    name: input.name,
-    description: input.description,
-    fieldSet: input.fieldSet,
-    extractionInstructions: input.extractionInstructions,
-    modes: input.modes,
-    extractionModelKey: input.extractionModelKey,
-    judgeModelKey: input.judgeModelKey,
-    ...(input.decisionModelKey ? { decisionModelKey: input.decisionModelKey } : {}),
-    ...(input.source ? { source: input.source } : {}),
-    ...(input.review ? { review: input.review } : {}),
-    runConfig: input.runConfig,
-    schedule: input.schedule,
-    createdBy,
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const key = await generateUniqueKey(input.name, async (k) => !!(await db.findAnalysisDefinitionByKey(k, input.projectId)));
+    const definition = await db.createAnalysisDefinition({
+      tenantId,
+      projectId: input.projectId,
+      key,
+      name: input.name,
+      description: input.description,
+      fieldSet: input.fieldSet,
+      extractionInstructions: input.extractionInstructions,
+      modes: input.modes,
+      extractionModelKey: input.extractionModelKey,
+      judgeModelKey: input.judgeModelKey,
+      ...(input.decisionModelKey ? { decisionModelKey: input.decisionModelKey } : {}),
+      ...(input.source ? { source: input.source } : {}),
+      ...(input.review ? { review: input.review } : {}),
+      runConfig: input.runConfig,
+      schedule: input.schedule,
+      createdBy,
+    });
+    return toView(definition);
   });
-  return toView(definition);
 }
 
 export async function listDefinitions(
   tenantDbName: string,
   filters?: { projectId?: string; search?: string },
 ): Promise<WithId<IAnalysisDefinition>[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return (await db.listAnalysisDefinitions(filters)).map(toView);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return (await db.listAnalysisDefinitions(filters)).map(toView);
+  });
 }
 
 export async function getDefinition(tenantDbName: string, id: string): Promise<WithId<IAnalysisDefinition> | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const record = await db.findAnalysisDefinitionById(id);
-  return record ? toView(record) : null;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const record = await db.findAnalysisDefinitionById(id);
+    return record ? toView(record) : null;
+  });
 }
 
 export async function updateDefinition(
@@ -206,20 +206,20 @@ export async function updateDefinition(
   updatedBy: string,
   data: Partial<Pick<IAnalysisDefinition, 'name' | 'description' | 'fieldSet' | 'extractionInstructions' | 'modes' | 'extractionModelKey' | 'judgeModelKey' | 'decisionModelKey' | 'source' | 'review' | 'runConfig' | 'schedule' | 'projectId'>>,
 ): Promise<WithId<IAnalysisDefinition> | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const updated = await db.updateAnalysisDefinition(id, { ...data, updatedBy });
-  return updated ? toView(updated) : null;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const updated = await db.updateAnalysisDefinition(id, { ...data, updatedBy });
+    return updated ? toView(updated) : null;
+  });
 }
 
 export async function deleteDefinition(tenantDbName: string, id: string): Promise<boolean> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const definition = await db.findAnalysisDefinitionById(id);
-  const deleted = await db.deleteAnalysisDefinition(id);
-  // Results belong to their definition: drop them with it (reviews included).
-  if (deleted && definition) await db.deleteAnalysisResultsForDefinition(definition.projectId ?? '', definition.key);
-  return deleted;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const definition = await db.findAnalysisDefinitionById(id);
+    const deleted = await db.deleteAnalysisDefinition(id);
+    // Results belong to their definition: drop them with it (reviews included).
+    if (deleted && definition) await db.deleteAnalysisResultsForDefinition(definition.projectId ?? '', definition.key);
+    return deleted;
+  });
 }
 
 // ── Conversations ────────────────────────────────────────────────────────────
@@ -269,35 +269,35 @@ export async function ingestConversations(
   inputs: CreateConversationInput[],
   projectId?: string,
 ): Promise<WithId<IAnalysisConversation>[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const created: IAnalysisConversation[] = [];
-  for (const input of inputs) {
-    created.push(await createOneConversation(db, tenantId, createdBy, { ...input, projectId: input.projectId ?? projectId }));
-  }
-  return created.map(toView);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const created: IAnalysisConversation[] = [];
+    for (const input of inputs) {
+      created.push(await createOneConversation(db, tenantId, createdBy, { ...input, projectId: input.projectId ?? projectId }));
+    }
+    return created.map(toView);
+  });
 }
 
 export async function listConversations(
   tenantDbName: string,
   filters?: { projectId?: string; source?: AnalysisConversationSource; tag?: string; search?: string; limit?: number; skip?: number },
 ): Promise<WithId<IAnalysisConversation>[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return (await db.listAnalysisConversations(filters)).map(toView);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return (await db.listAnalysisConversations(filters)).map(toView);
+  });
 }
 
 export async function getConversation(tenantDbName: string, id: string): Promise<WithId<IAnalysisConversation> | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const record = await db.findAnalysisConversationById(id);
-  return record ? toView(record) : null;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const record = await db.findAnalysisConversationById(id);
+    return record ? toView(record) : null;
+  });
 }
 
 export async function deleteConversation(tenantDbName: string, id: string): Promise<boolean> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db.deleteAnalysisConversation(id);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return db.deleteAnalysisConversation(id);
+  });
 }
 
 // ── Runs ───────────────────────────────────────────────────────────────────
@@ -306,16 +306,16 @@ export async function listRuns(
   tenantDbName: string,
   filters?: { projectId?: string; definitionKey?: string; limit?: number; skip?: number },
 ): Promise<WithId<IAnalysisRun>[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return (await db.listAnalysisRuns(filters)).map(toView);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    return (await db.listAnalysisRuns(filters)).map(toView);
+  });
 }
 
 export async function getRun(tenantDbName: string, id: string): Promise<WithId<IAnalysisRun> | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const record = await db.findAnalysisRunById(id);
-  return record ? toView(record) : null;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const record = await db.findAnalysisRunById(id);
+    return record ? toView(record) : null;
+  });
 }
 
 export interface RunDefinitionDeps {
@@ -593,59 +593,58 @@ async function createPendingRun(
 ): Promise<{ run: WithId<IAnalysisRun>; conversationKeys: string[] }> {
   await assertServiceEnabled({ tenantDbName: params.tenantDbName, tenantId: params.tenantId }, 'analysis');
   const { tenantDbName, tenantId, projectId, createdBy, definitionKey } = params;
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const definition = await db.findAnalysisDefinitionByKey(definitionKey, projectId);
+    if (!definition) throw new Error(`Analysis definition "${definitionKey}" not found`);
 
-  const definition = await db.findAnalysisDefinitionByKey(definitionKey, projectId);
-  if (!definition) throw new Error(`Analysis definition "${definitionKey}" not found`);
+    const resolved = await resolveRun(db, definition, params);
+    const target = resolved.target;
+    const conversationKeys = resolved.kind === 'agent_sessions' ? resolved.ids : resolved.items.map((s) => s.key);
+    if (conversationKeys.length === 0) {
+      throw new Error(
+        isDatasetTarget(target)
+          ? 'No dataset items to label with this selection.'
+          : target?.kind === 'agent_sessions'
+            ? (params.selection?.strategy ?? 'changed') === 'changed'
+              ? 'No conversations to analyze: no agent session is new or changed since its last analysis.'
+              : 'No conversations to analyze with this selection.'
+            : 'No conversations to analyze — ingest conversations first (Conversations tab → Ingest).',
+      );
+    }
 
-  const resolved = await resolveRun(db, definition, params);
-  const target = resolved.target;
-  const conversationKeys = resolved.kind === 'agent_sessions' ? resolved.ids : resolved.items.map((s) => s.key);
-  if (conversationKeys.length === 0) {
-    throw new Error(
-      isDatasetTarget(target)
-        ? 'No dataset items to label with this selection.'
-        : target?.kind === 'agent_sessions'
-          ? (params.selection?.strategy ?? 'changed') === 'changed'
-            ? 'No conversations to analyze: no agent session is new or changed since its last analysis.'
-            : 'No conversations to analyze with this selection.'
-          : 'No conversations to analyze — ingest conversations first (Conversations tab → Ingest).',
+    // Guard against duplicate/concurrent runs OF THE SAME TARGET. Both 'pending'
+    // (enqueued, not yet started) and recently-'running' rows count — a pending
+    // run with no startedAt is treated as fresh so two near-simultaneous triggers
+    // can't both pass the guard. Runs of one definition over different datasets
+    // are independent and must not block each other, hence the target check.
+    const [running, pending] = await Promise.all([
+      db.listAnalysisRuns({ projectId, definitionKey: definition.key, status: 'running', limit: 10 }),
+      db.listAnalysisRuns({ projectId, definitionKey: definition.key, status: 'pending', limit: 10 }),
+    ]);
+    const hourAgo = Date.now() - 60 * 60 * 1000;
+    const runningInFlight = running.some(
+      (r) => sameTarget(r.target, target) && new Date(r.startedAt ?? 0).getTime() > hourAgo,
     );
-  }
+    const pendingInFlight = pending.some(
+      (r) => sameTarget(r.target, target) && new Date(r.createdAt ?? Date.now()).getTime() > hourAgo,
+    );
+    if (runningInFlight || pendingInFlight) {
+      throw new Error(`A run for definition "${definition.key}" is already in progress`);
+    }
 
-  // Guard against duplicate/concurrent runs OF THE SAME TARGET. Both 'pending'
-  // (enqueued, not yet started) and recently-'running' rows count — a pending
-  // run with no startedAt is treated as fresh so two near-simultaneous triggers
-  // can't both pass the guard. Runs of one definition over different datasets
-  // are independent and must not block each other, hence the target check.
-  const [running, pending] = await Promise.all([
-    db.listAnalysisRuns({ projectId, definitionKey: definition.key, status: 'running', limit: 10 }),
-    db.listAnalysisRuns({ projectId, definitionKey: definition.key, status: 'pending', limit: 10 }),
-  ]);
-  const hourAgo = Date.now() - 60 * 60 * 1000;
-  const runningInFlight = running.some(
-    (r) => sameTarget(r.target, target) && new Date(r.startedAt ?? 0).getTime() > hourAgo,
-  );
-  const pendingInFlight = pending.some(
-    (r) => sameTarget(r.target, target) && new Date(r.createdAt ?? Date.now()).getTime() > hourAgo,
-  );
-  if (runningInFlight || pendingInFlight) {
-    throw new Error(`A run for definition "${definition.key}" is already in progress`);
-  }
-
-  const run = await db.createAnalysisRun({
-    tenantId,
-    projectId,
-    definitionKey: definition.key,
-    ...(target ? { target } : {}),
-    status: 'pending',
-    mode,
-    progress: { total: conversationKeys.length, completed: 0, failed: 0 },
-    items: [],
-    createdBy,
+    const run = await db.createAnalysisRun({
+      tenantId,
+      projectId,
+      definitionKey: definition.key,
+      ...(target ? { target } : {}),
+      status: 'pending',
+      mode,
+      progress: { total: conversationKeys.length, completed: 0, failed: 0 },
+      items: [],
+      createdBy,
+    });
+    return { run: toView(run), conversationKeys };
   });
-  return { run: toView(run), conversationKeys };
 }
 
 /** The engine spec and live invokers of a definition's run. Invokers are only built where a field needs them. */
@@ -889,125 +888,124 @@ export async function executeRun(
 ): Promise<WithId<IAnalysisRun>> {
   const { tenantDbName, tenantId, projectId, createdBy, definitionKey, runId } = params;
   void createdBy;
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    try {
+      // Inside the try so the run is recorded as failed rather than left pending
+      // when the service has been switched off since it was queued.
+      await assertServiceEnabled({ tenantDbName, tenantId }, 'analysis');
+      const definition = await db.findAnalysisDefinitionByKey(definitionKey, projectId);
+      if (!definition) throw new Error(`Analysis definition "${definitionKey}" not found`);
 
-  try {
-    // Inside the try so the run is recorded as failed rather than left pending
-    // when the service has been switched off since it was queued.
-    await assertServiceEnabled({ tenantDbName, tenantId }, 'analysis');
-    const definition = await db.findAnalysisDefinitionByKey(definitionKey, projectId);
-    if (!definition) throw new Error(`Analysis definition "${definitionKey}" not found`);
+      // The run row holds the resolved target (a queued job may only carry the
+      // caller's request, e.g. "agent sessions, 30 days").
+      const stored = await db.findAnalysisRunById(runId);
+      const target = stored?.target ?? resolveRunTarget(definition, params.target, new Date());
+      if (target?.kind === 'agent_sessions') {
+        return await executeAgentSessionRun(db, params, definition, target, deps);
+      }
 
-    // The run row holds the resolved target (a queued job may only carry the
-    // caller's request, e.g. "agent sessions, 30 days").
-    const stored = await db.findAnalysisRunById(runId);
-    const target = stored?.target ?? resolveRunTarget(definition, params.target, new Date());
-    if (target?.kind === 'agent_sessions') {
-      return await executeAgentSessionRun(db, params, definition, target, deps);
-    }
+      const sources = await selectRunItems(db, projectId, definition.key, { ...params, target });
 
-    const sources = await selectRunItems(db, projectId, definition.key, { ...params, target });
+      await db.updateAnalysisRun(runId, { status: 'running', startedAt: new Date() });
 
-    await db.updateAnalysisRun(runId, { status: 'running', startedAt: new Date() });
+      const ctx: AnalysisModelContext = { tenantDbName, tenantId, projectId: projectId ?? '' };
+      const { spec, invokeExtraction, invokeDecision, invokeJudge } = buildRunEngine(definition, ctx, deps);
+      const isDataset = isDatasetTarget(target);
+      const resultProjectId = projectId ?? '';
 
-    const ctx: AnalysisModelContext = { tenantDbName, tenantId, projectId: projectId ?? '' };
-    const { spec, invokeExtraction, invokeDecision, invokeJudge } = buildRunEngine(definition, ctx, deps);
-    const isDataset = isDatasetTarget(target);
-    const resultProjectId = projectId ?? '';
+      // A human review of an earlier run is the best reference there is: accuracy
+      // mode scores against it. (Datasets keep their own labels and have no results.)
+      const existing = isDataset
+        ? new Map<string, IAnalysisResult>()
+        : await loadResultsBySource(db, resultProjectId, definition.key, 'conversation', sources.map((s) => s.key));
+      const conversations: AnalysisConversation[] = sources.map((s) => {
+        const reviewed = existing.get(s.key)?.review?.values;
+        return reviewed && Object.keys(reviewed).length > 0
+          ? { ...s.conversation, referenceFields: { ...s.conversation.referenceFields, ...reviewed } }
+          : s.conversation;
+      });
 
-    // A human review of an earlier run is the best reference there is: accuracy
-    // mode scores against it. (Datasets keep their own labels and have no results.)
-    const existing = isDataset
-      ? new Map<string, IAnalysisResult>()
-      : await loadResultsBySource(db, resultProjectId, definition.key, 'conversation', sources.map((s) => s.key));
-    const conversations: AnalysisConversation[] = sources.map((s) => {
-      const reviewed = existing.get(s.key)?.review?.values;
-      return reviewed && Object.keys(reviewed).length > 0
-        ? { ...s.conversation, referenceFields: { ...s.conversation.referenceFields, ...reviewed } }
-        : s.conversation;
-    });
+      // Persist incremental progress so the dashboard can show step-by-step
+      // results live (throttled to avoid hammering the DB on large corpora).
+      const flusher = progressFlusher(db, runId, conversations.length);
+      const result = await runAnalysis({
+        conversations,
+        spec,
+        invokeExtraction,
+        invokeDecision,
+        invokeJudge,
+        config: { concurrency: definition.runConfig?.concurrency },
+        onItem: (item) => flusher.onItem(item),
+      });
 
-    // Persist incremental progress so the dashboard can show step-by-step
-    // results live (throttled to avoid hammering the DB on large corpora).
-    const flusher = progressFlusher(db, runId, conversations.length);
-    const result = await runAnalysis({
-      conversations,
-      spec,
-      invokeExtraction,
-      invokeDecision,
-      invokeJudge,
-      config: { concurrency: definition.runConfig?.concurrency },
-      onItem: (item) => flusher.onItem(item),
-    });
+      const sourceByKey = new Map(sources.map((s) => [s.key, s]));
+      const succeeded = result.items.filter((item) => !item.error);
 
-    const sourceByKey = new Map(sources.map((s) => [s.key, s]));
-    const succeeded = result.items.filter((item) => !item.error);
+      // Datasets keep labels, not results. For the corpus, record the latest result of each conversation.
+      const written = isDataset
+        ? new Map<string, string>()
+        : await writeResults(
+            db,
+            { tenantId, projectId: resultProjectId, definitionKey: definition.key, runId },
+            'conversation',
+            result.items.map((item) => ({
+              item,
+              sourceKind: 'conversation' as const,
+              sourceId: item.conversationId,
+              title: sourceByKey.get(item.conversationId)?.title,
+            })),
+          );
+      // Carried reviews cleared some review flags: count what the queue will show.
+      const aggregate = isDataset ? result.aggregate : aggregateItems(result.items, definition.fieldSet, spec);
 
-    // Datasets keep labels, not results. For the corpus, record the latest result of each conversation.
-    const written = isDataset
-      ? new Map<string, string>()
-      : await writeResults(
-          db,
-          { tenantId, projectId: resultProjectId, definitionKey: definition.key, runId },
-          'conversation',
-          result.items.map((item) => ({
-            item,
-            sourceKind: 'conversation' as const,
-            sourceId: item.conversationId,
-            title: sourceByKey.get(item.conversationId)?.title,
-          })),
-        );
-    // Carried reviews cleared some review flags: count what the queue will show.
-    const aggregate = isDataset ? result.aggregate : aggregateItems(result.items, definition.fieldSet, spec);
+      const updated = await db.updateAnalysisRun(runId, {
+        status: 'completed',
+        progress: { total: aggregate.total, completed: aggregate.completed, failed: aggregate.failed },
+        aggregate,
+        items: result.items.map((item) => toRunItem(item, written.get(item.conversationId))),
+        finishedAt: new Date(),
+      });
 
-    const updated = await db.updateAnalysisRun(runId, {
-      status: 'completed',
-      progress: { total: aggregate.total, completed: aggregate.completed, failed: aggregate.failed },
-      aggregate,
-      items: result.items.map((item) => toRunItem(item, written.get(item.conversationId))),
-      finishedAt: new Date(),
-    });
-
-    if (isDatasetTarget(target)) {
-      // Labeling: extracted fields ARE the labels, so they are always written
-      // back (that is the point of the run) — except onto items a human has
-      // labeled, whose corrections outrank the model's.
-      const datasetId = target.datasetId;
-      const labeledAt = new Date().toISOString();
-      const writable = succeeded.filter((item) => !sourceByKey.get(item.conversationId)?.humanLabeled);
-      await mapLimit(writable, WRITE_BACK_CONCURRENCY, async (item) => {
-        await db.updateEvaluationDatasetItem(datasetId, item.conversationId, {
-          labels: item.extractedFields,
-          labelMeta: {
-            source: 'ai',
-            definitionKey: definition.key,
-            runId,
-            modelKey: definition.extractionModelKey,
-            ...(item.judge ? { judge: { score: item.judge.score, passed: item.judge.passed, reasoning: item.judge.reasoning } } : {}),
-            labeledAt,
-          },
+      if (isDatasetTarget(target)) {
+        // Labeling: extracted fields ARE the labels, so they are always written
+        // back (that is the point of the run) — except onto items a human has
+        // labeled, whose corrections outrank the model's.
+        const datasetId = target.datasetId;
+        const labeledAt = new Date().toISOString();
+        const writable = succeeded.filter((item) => !sourceByKey.get(item.conversationId)?.humanLabeled);
+        await mapLimit(writable, WRITE_BACK_CONCURRENCY, async (item) => {
+          await db.updateEvaluationDatasetItem(datasetId, item.conversationId, {
+            labels: item.extractedFields,
+            labelMeta: {
+              source: 'ai',
+              definitionKey: definition.key,
+              runId,
+              modelKey: definition.extractionModelKey,
+              ...(item.judge ? { judge: { score: item.judge.score, passed: item.judge.passed, reasoning: item.judge.reasoning } } : {}),
+              labeledAt,
+            },
+          });
         });
-      });
-    } else if (definition.modes.store) {
-      // Store mode: persist the latest extracted fields back onto conversations.
-      const now = new Date();
-      await mapLimit(succeeded, WRITE_BACK_CONCURRENCY, async (item) => {
-        const id = sourceByKey.get(item.conversationId)?.recordId;
-        if (!id) return;
-        await db.updateAnalysisConversation(id, { extractedFields: item.extractedFields, lastAnalyzedAt: now });
-      });
-    }
+      } else if (definition.modes.store) {
+        // Store mode: persist the latest extracted fields back onto conversations.
+        const now = new Date();
+        await mapLimit(succeeded, WRITE_BACK_CONCURRENCY, async (item) => {
+          const id = sourceByKey.get(item.conversationId)?.recordId;
+          if (!id) return;
+          await db.updateAnalysisConversation(id, { extractedFields: item.extractedFields, lastAnalyzedAt: now });
+        });
+      }
 
-    return toView(updated ?? (await db.findAnalysisRunById(runId))!);
-  } catch (err) {
-    await db.updateAnalysisRun(runId, {
-      status: 'failed',
-      error: (err as Error).message,
-      finishedAt: new Date(),
-    });
-    throw err;
-  }
+      return toView(updated ?? (await db.findAnalysisRunById(runId))!);
+    } catch (err) {
+      await db.updateAnalysisRun(runId, {
+        status: 'failed',
+        error: (err as Error).message,
+        finishedAt: new Date(),
+      });
+      throw err;
+    }
+  });
 }
 
 /** Synchronous run (tests / scheduler / CI): create + execute, blocks to completion. */
@@ -1051,43 +1049,43 @@ export async function runScheduledAnalyses(
   now: Date = new Date(),
   deps: RunDefinitionDeps = {},
 ): Promise<{ fired: string[]; errors: string[] }> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const definitions = await db.listAnalysisDefinitions();
-  const fired: string[] = [];
-  const errors: string[] = [];
-  for (const def of definitions) {
-    if (!def.schedule?.enabled) continue;
-    const agentSource = def.source?.kind === 'agent_sessions' ? def.source : undefined;
-    const slotKey = `${tenantDbName}:${def.projectId ?? ''}:${def.key}`;
-    const recent = await db.listAnalysisRuns({ definitionKey: def.key, limit: 1 });
-    const lastRun = recent[0]?.startedAt ?? recent[0]?.createdAt ?? null;
-    const lastFired = Math.max(lastRun ? new Date(lastRun).getTime() : -Infinity, emptyScheduleSlots.get(slotKey) ?? -Infinity);
-    if (!isDue(def.schedule, Number.isFinite(lastFired) ? new Date(lastFired) : null, now)) continue;
-    try {
-      await runDefinition(
-        {
-          tenantDbName,
-          tenantId,
-          projectId: def.projectId,
-          createdBy: 'system',
-          definitionKey: def.key,
-          ...(agentSource
-            ? { target: buildAgentSessionTarget(agentSource, now), selection: { strategy: 'changed' as const } }
-            : {}),
-        },
-        deps,
-      );
-      emptyScheduleSlots.delete(slotKey);
-      fired.push(def.key);
-    } catch (err) {
-      const message = (err as Error).message;
-      if (agentSource && /no conversations to analyze/i.test(message)) {
-        emptyScheduleSlots.set(slotKey, now.getTime());
-        continue;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const definitions = await db.listAnalysisDefinitions();
+    const fired: string[] = [];
+    const errors: string[] = [];
+    for (const def of definitions) {
+      if (!def.schedule?.enabled) continue;
+      const agentSource = def.source?.kind === 'agent_sessions' ? def.source : undefined;
+      const slotKey = `${tenantDbName}:${def.projectId ?? ''}:${def.key}`;
+      const recent = await db.listAnalysisRuns({ definitionKey: def.key, limit: 1 });
+      const lastRun = recent[0]?.startedAt ?? recent[0]?.createdAt ?? null;
+      const lastFired = Math.max(lastRun ? new Date(lastRun).getTime() : -Infinity, emptyScheduleSlots.get(slotKey) ?? -Infinity);
+      if (!isDue(def.schedule, Number.isFinite(lastFired) ? new Date(lastFired) : null, now)) continue;
+      try {
+        await runDefinition(
+          {
+            tenantDbName,
+            tenantId,
+            projectId: def.projectId,
+            createdBy: 'system',
+            definitionKey: def.key,
+            ...(agentSource
+              ? { target: buildAgentSessionTarget(agentSource, now), selection: { strategy: 'changed' as const } }
+              : {}),
+          },
+          deps,
+        );
+        emptyScheduleSlots.delete(slotKey);
+        fired.push(def.key);
+      } catch (err) {
+        const message = (err as Error).message;
+        if (agentSource && /no conversations to analyze/i.test(message)) {
+          emptyScheduleSlots.set(slotKey, now.getTime());
+          continue;
+        }
+        errors.push(`${def.key}: ${message}`);
       }
-      errors.push(`${def.key}: ${message}`);
     }
-  }
-  return { fired, errors };
+    return { fired, errors };
+  });
 }

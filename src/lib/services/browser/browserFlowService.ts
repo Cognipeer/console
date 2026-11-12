@@ -40,7 +40,7 @@ import { randomUUID } from 'node:crypto';
 import slugify from 'slugify';
 import { createLogger } from '@/lib/core/logger';
 import { captureRequestContext, runWithRequestContext } from '@/lib/core/requestContext';
-import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type {
   IBrowserFlow,
   IBrowserFlowInput,
@@ -92,12 +92,6 @@ interface FlowContext {
   tenantDbName: string;
   tenantId: string;
   projectId?: string;
-}
-
-async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  return db;
 }
 
 function serializeFlow(record: IBrowserFlow): BrowserFlowView {
@@ -174,98 +168,104 @@ export async function updateBrowserFlow(
   idOrKey: string,
   input: UpdateBrowserFlowInput,
 ): Promise<BrowserFlowView | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const existing = await resolveFlowRecord(ctx, idOrKey);
-  if (!existing) return null;
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const existing = await resolveFlowRecord(ctx, idOrKey, db);
+    if (!existing) return null;
 
-  const patch: Partial<IBrowserFlow> = {
-    name: input.name,
-    description: input.description,
-    status: input.status,
-    inputs: input.inputs,
-    outputs: input.outputs,
-    sessionConfig: input.sessionConfig,
-    metadata: input.metadata,
-    updatedBy: input.updatedBy,
-  };
+    const patch: Partial<IBrowserFlow> = {
+      name: input.name,
+      description: input.description,
+      status: input.status,
+      inputs: input.inputs,
+      outputs: input.outputs,
+      sessionConfig: input.sessionConfig,
+      metadata: input.metadata,
+      updatedBy: input.updatedBy,
+    };
 
-  if (input.browserId) {
-    const browser = await resolveBrowser(ctx, input.browserId);
-    if (!browser) throw new Error(`Browser not found: ${input.browserId}`);
-    patch.browserId = String(browser._id ?? '');
-  }
+    if (input.browserId) {
+      const browser = await resolveBrowser(ctx, input.browserId);
+      if (!browser) throw new Error(`Browser not found: ${input.browserId}`);
+      patch.browserId = String(browser._id ?? '');
+    }
 
-  // The version pins what a run executed, so it moves only when what runs
-  // moves — renaming a flow must not invalidate the history of what ran.
-  // Outputs count: they decide the run's return value, so a run recorded
-  // under version 3 has to mean one return shape, not whichever shape was
-  // declared last.
-  if (input.steps) {
-    patch.steps = normalizeSteps(input.steps);
-  }
-  if (input.steps || input.outputs) {
-    patch.version = (existing.version ?? 1) + 1;
-  }
+    // The version pins what a run executed, so it moves only when what runs
+    // moves — renaming a flow must not invalidate the history of what ran.
+    // Outputs count: they decide the run's return value, so a run recorded
+    // under version 3 has to mean one return shape, not whichever shape was
+    // declared last.
+    if (input.steps) {
+      patch.steps = normalizeSteps(input.steps);
+    }
+    if (input.steps || input.outputs) {
+      patch.version = (existing.version ?? 1) + 1;
+    }
 
-  const updated = await db.updateBrowserFlow(String(existing._id ?? ''), patch);
-  return updated ? serializeFlow(updated) : null;
+    const updated = await db.updateBrowserFlow(String(existing._id ?? ''), patch);
+    return updated ? serializeFlow(updated) : null;
+  });
 }
 
 export async function deleteBrowserFlow(ctx: FlowContext, idOrKey: string): Promise<boolean> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const existing = await resolveFlowRecord(ctx, idOrKey);
-  if (!existing) return false;
-  return db.deleteBrowserFlow(String(existing._id ?? ''));
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const existing = await resolveFlowRecord(ctx, idOrKey, db);
+    if (!existing) return false;
+    return db.deleteBrowserFlow(String(existing._id ?? ''));
+  });
 }
 
 export async function getBrowserFlow(
   ctx: FlowContext,
   idOrKey: string,
 ): Promise<BrowserFlowView | null> {
-  const record = await resolveFlowRecord(ctx, idOrKey);
-  return record ? serializeFlow(record) : null;
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const record = await resolveFlowRecord(ctx, idOrKey, db);
+    return record ? serializeFlow(record) : null;
+  });
 }
 
 export async function listBrowserFlows(
   ctx: FlowContext,
   filters?: { status?: string; browserId?: string; search?: string },
 ): Promise<BrowserFlowView[]> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const records = await db.listBrowserFlows(ctx.tenantId, {
-    projectId: ctx.projectId,
-    ...filters,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const records = await db.listBrowserFlows(ctx.tenantId, {
+      projectId: ctx.projectId,
+      ...filters,
+    });
+    return records.map(serializeFlow);
   });
-  return records.map(serializeFlow);
 }
 
 export async function listBrowserFlowRuns(
   ctx: FlowContext,
   filters?: { flowId?: string; status?: string; limit?: number; skip?: number },
 ): Promise<BrowserFlowRunView[]> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const records = await db.listBrowserFlowRuns(ctx.tenantId, {
-    projectId: ctx.projectId,
-    ...filters,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const records = await db.listBrowserFlowRuns(ctx.tenantId, {
+      projectId: ctx.projectId,
+      ...filters,
+    });
+    return records.map(serializeRun);
   });
-  return records.map(serializeRun);
 }
 
 export async function getBrowserFlowRun(
   ctx: FlowContext,
   runId: string,
 ): Promise<BrowserFlowRunView | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const record = await db.findBrowserFlowRunById(runId);
-  if (!canAccess(ctx, record)) return null;
-  return record ? serializeRun(record) : null;
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const record = await db.findBrowserFlowRunById(runId);
+    if (!canAccess(ctx, record)) return null;
+    return record ? serializeRun(record) : null;
+  });
 }
 
 async function resolveFlowRecord(
   ctx: FlowContext,
   idOrKey: string,
-  scopedDb?: DatabaseProvider,
+  db: DatabaseProvider,
 ): Promise<IBrowserFlow | null> {
-  const db = scopedDb ?? await withTenantDb(ctx.tenantDbName);
   const record =
     (await db.findBrowserFlowById(idOrKey).catch(() => null))
     ?? (await db.findBrowserFlowByKey(ctx.tenantId, idOrKey, ctx.projectId));
@@ -299,61 +299,62 @@ export async function recordBrowserFlow(
   ctx: FlowContext,
   input: RecordBrowserFlowInput,
 ): Promise<BrowserFlowView> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const session = await db.findBrowserSessionById(input.sessionId);
-  if (!canAccess(ctx, session) || !session) {
-    throw new Error(`Browser session not found: ${input.sessionId}`);
-  }
-
-  const events = await db.listBrowserSessionEvents(input.sessionId, { limit: 5000 });
-  const excluded = new Set([...NON_REPLAYABLE_EVENT_TYPES, ...(input.excludeTypes ?? [])]);
-
-  const steps: IBrowserFlowStep[] = [];
-  const inputs: IBrowserFlowInput[] = [];
-  let skipped = 0;
-
-  for (const event of events) {
-    if (excluded.has(event.type)) continue;
-    // A failed step is not evidence of how the task is done — replaying it
-    // would only reproduce the failure.
-    if (event.status === 'error') {
-      skipped += 1;
-      continue;
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const session = await db.findBrowserSessionById(input.sessionId);
+    if (!canAccess(ctx, session) || !session) {
+      throw new Error(`Browser session not found: ${input.sessionId}`);
     }
 
-    const step = stepFromEvent(event, inputs);
-    if (!step) {
-      skipped += 1;
-      continue;
+    const events = await db.listBrowserSessionEvents(input.sessionId, { limit: 5000 });
+    const excluded = new Set([...NON_REPLAYABLE_EVENT_TYPES, ...(input.excludeTypes ?? [])]);
+
+    const steps: IBrowserFlowStep[] = [];
+    const inputs: IBrowserFlowInput[] = [];
+    let skipped = 0;
+
+    for (const event of events) {
+      if (excluded.has(event.type)) continue;
+      // A failed step is not evidence of how the task is done — replaying it
+      // would only reproduce the failure.
+      if (event.status === 'error') {
+        skipped += 1;
+        continue;
+      }
+
+      const step = stepFromEvent(event, inputs);
+      if (!step) {
+        skipped += 1;
+        continue;
+      }
+      steps.push(step);
     }
-    steps.push(step);
-  }
 
-  if (steps.length === 0) {
-    throw new Error(
-      'Nothing replayable in this session. Drive the browser first (navigate, click, type), then record.',
-    );
-  }
+    if (steps.length === 0) {
+      throw new Error(
+        'Nothing replayable in this session. Drive the browser first (navigate, click, type), then record.',
+      );
+    }
 
-  logger.info('Recorded browser flow from session', {
-    sessionId: input.sessionId,
-    steps: steps.length,
-    skipped,
-    inputs: inputs.length,
-  });
+    logger.info('Recorded browser flow from session', {
+      sessionId: input.sessionId,
+      steps: steps.length,
+      skipped,
+      inputs: inputs.length,
+    });
 
-  return createBrowserFlow(ctx, {
-    key: input.key,
-    name: input.name,
-    description: input.description,
-    // A recording lands as a draft: it was derived from one observed run and
-    // deserves a read before anything schedules it.
-    status: input.status ?? 'draft',
-    browserId: session.browserId,
-    inputs,
-    steps,
-    recordedFromSessionId: input.sessionId,
-    createdBy: input.createdBy,
+    return createBrowserFlow(ctx, {
+      key: input.key,
+      name: input.name,
+      description: input.description,
+      // A recording lands as a draft: it was derived from one observed run and
+      // deserves a read before anything schedules it.
+      status: input.status ?? 'draft',
+      browserId: session.browserId,
+      inputs,
+      steps,
+      recordedFromSessionId: input.sessionId,
+      createdBy: input.createdBy,
+    });
   });
 }
 
@@ -759,7 +760,7 @@ export async function runBrowserFlowSteps(
   input: RunBrowserFlowStepsInput,
 ): Promise<BrowserFlowStepsResult> {
   await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'browser');
-  const flow = await resolveFlowRecord(ctx, idOrKey);
+  const flow = await runWithTenantScope(ctx.tenantDbName, (db) => resolveFlowRecord(ctx, idOrKey, db));
   if (!flow) throw new Error(`Browser flow not found: ${idOrKey}`);
 
   const total = flow.steps.length;
