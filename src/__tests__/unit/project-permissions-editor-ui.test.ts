@@ -155,7 +155,7 @@ async function openEditor(name: string) {
   await mounted?.unmount();
   const member = MEMBERS.find((m) => m.name === name)!;
   mounted = await mount(
-    createElement(Fragment, null, createElement(Notifications, null), createElement(Harness, { member, key: member.userId })),
+    createElement(Fragment, null, createElement(Notifications, null), createElement(Harness, { member: member as unknown as PermissionsEditorMember, key: member.userId })),
     locale,
   );
   await settle(250);
