@@ -64,7 +64,7 @@ describe('channels community stubs', () => {
 describe('messaging run channel plumbing', () => {
   it('is accepted wherever runs and routing enumerate channels', () => {
     expect(read('server/api/plugins/client-agent-runs.ts')).toMatch(/RUN_CHANNELS[^;]*'messaging'/);
-    expect(read('server/api/plugins/agents.ts')).toMatch(/RUN_CHANNEL_VALUES[^;]*'messaging'/);
+    expect(read('server/api/plugins/agents/agentsRouteHelpers.ts')).toMatch(/RUN_CHANNEL_VALUES[^;]*'messaging'/);
     expect(read('lib/services/runtimeContext.ts')).toContain("'messaging'");
     expect(read('lib/iam/consoleIdentity.ts')).toContain("'messaging'");
   });
