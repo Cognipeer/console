@@ -7,6 +7,7 @@ import React, { createElement as h, type ReactNode } from 'react';
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MantineProvider } from '@mantine/core';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { I18nProvider } from '@/lib/i18n';
 import PiiProtectionField from '@/components/pii/PiiProtectionField';
 import {
@@ -19,6 +20,7 @@ import {
 import { changedConfigSections } from '@/components/agents/studio/configSections';
 import { extractAgentEdges, extractModelEdges } from '@/lib/resources/providers/core';
 import { EDGE_KINDS } from '@/lib/resources/references';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 import { piiProtectionEn } from '@/lib/i18n/messages/piiProtection.en';
 import { piiProtectionTr } from '@/lib/i18n/messages/piiProtection.tr';
 import { en } from '@/lib/i18n/messages/en';
@@ -26,8 +28,12 @@ import { tr } from '@/lib/i18n/messages/tr';
 
 (globalThis as { React?: typeof React }).React = React;
 
+// The field's create form saves through React Query, so every render sits inside a query client.
+const queryClient = newTestQueryClient();
 const render = (node: ReactNode, locale: 'en' | 'tr' = 'en') =>
-  renderToStaticMarkup(h(MantineProvider, null, h(I18nProvider, { locale, children: node })));
+  renderToStaticMarkup(
+    h(QueryClientProvider, { client: queryClient }, h(MantineProvider, null, h(I18nProvider, { locale, children: node }))),
+  );
 const noop = () => undefined;
 
 const policies: PiiPolicyOptions = {

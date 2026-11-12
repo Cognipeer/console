@@ -16,6 +16,8 @@ import FormShell, {
   ToggleRow,
 } from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useCreatePiiPolicy } from '@/lib/api/queries/pii';
 import type { PiiAction, PiiEngine } from '@/lib/services/pii/types';
 
 interface PiiPolicyView {
@@ -41,6 +43,7 @@ export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Pro
   const [defaultAction, setDefaultAction] = useState<PiiAction>('detect');
   const [engine, setEngine] = useState<PiiEngine>('regex');
   const [enabled, setEnabled] = useState(true);
+  const createPolicy = useCreatePiiPolicy();
   const [submitting, setSubmitting] = useState(false);
 
   const validName = name.trim().length > 0;
@@ -62,34 +65,25 @@ export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Pro
     if (!validName) return;
     setSubmitting(true);
     try {
-      const res = await fetch('/api/pii/policies', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: name.trim(),
-          description: description.trim() || undefined,
-          defaultAction,
-          engine,
-          enabled,
-        }),
+      const policy = await createPolicy.mutateAsync({
+        name: name.trim(),
+        description: description.trim() || undefined,
+        defaultAction,
+        engine,
+        enabled,
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? 'Failed to create');
-      }
-      const data = await res.json();
       notifications.show({
         title: t('notifications.created'),
-        message: data.policy.name,
+        message: policy.name,
         color: 'teal',
       });
-      onCreated(data.policy);
+      onCreated(policy);
       reset();
       onClose();
     } catch (err) {
       notifications.show({
         title: t('notifications.saveError'),
-        message: err instanceof Error ? err.message : '',
+        message: errorMessage(err, ''),
         color: 'red',
       });
     } finally {

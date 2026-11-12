@@ -9,6 +9,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createElement as h, type ComponentProps, type ReactNode } from 'react';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   buttonByText,
@@ -22,6 +23,7 @@ import {
   text,
   type Mounted,
 } from '../helpers/iamCenterUi';
+import { newTestQueryClient } from '../helpers/renderWithQuery';
 
 vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(),
@@ -81,6 +83,11 @@ async function render(node: ReactNode) {
 }
 
 const noop = () => {};
+
+/** The PII picker: its create form saves through React Query, so it needs a query client around it. */
+const piiField = (writable: PermissionService[]) =>
+  h(QueryClientProvider, { client: newTestQueryClient() },
+    shell(writable, h(PiiProtectionField, { surface: 'agent', value: null, onChange: noop, policies: NO_PII_POLICIES })));
 
 describe('who may create: canWriteDashboardService', () => {
   const levels = (level: ServicePermissionLevel) =>
@@ -228,13 +235,13 @@ describe('guardrails: + New guardrail', () => {
 
 describe('PII: + New PII policy', () => {
   it('a reader of PII gets no button and reads who can create one', async () => {
-    await render(shell([], h(PiiProtectionField, { surface: 'agent', value: null, onChange: noop, policies: NO_PII_POLICIES })));
+    await render(piiField([]));
     expect(q('[data-testid="pii-policy-create-inline"]')).toBeNull();
     expect(text()).toContain(piiProtectionEn.policy.noneReadOnly);
   });
 
   it('a writer gets it', async () => {
-    await render(shell(['pii'], h(PiiProtectionField, { surface: 'agent', value: null, onChange: noop, policies: NO_PII_POLICIES })));
+    await render(piiField(['pii']));
     expect(q('[data-testid="pii-policy-create-inline"]')).not.toBeNull();
   });
 });
