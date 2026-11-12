@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useCallback, useEffect, useMemo, useState } from 'react';
+import { use, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useDisclosure } from '@mantine/hooks';
 import {
@@ -61,6 +61,8 @@ import { createToolTurnKeys, sectionToolArgs, sectionToolResult } from '@/lib/sh
 import ToolDefinitionsCard, { readToolDefinitions } from '@/components/tracing/ToolDefinitionsCard';
 import { tracedMessageContent } from '@/components/common/llm/tracedMessageContent';
 import { useTraceSessionFiles } from '@/components/common/llm/useTraceSessionFiles';
+import { errorMessage } from '@/lib/api/client';
+import { useTracingThread, useTracingThreadSession } from '@/lib/api/queries/tracing';
 import { type PropertyRow } from '@/components/common/ui/PropertiesPanel';
 import FunctionsList from '@/components/common/ui/FunctionsList';
 import TokenStats from '@/components/common/ui/TokenStats';
@@ -385,17 +387,17 @@ export default function ThreadDetailPage({
   const router = useRouter();
   // The thread is an agent session's: its recorded pictures are drawn from the session's files.
   const sessionFiles = useTraceSessionFiles(threadId);
-  const [thread, setThread] = useState<ThreadDetail | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [selectedSessionEvents, setSelectedSessionEvents] = useState<TracingEvent[]>([]);
   const [eventsView, setEventsView] = useState<'grouped' | 'list'>('grouped');
-  // Same integration-agnostic grouping as the session page.
-  const sessionModel = useMemo(() => buildSessionModel(selectedSessionEvents), [selectedSessionEvents]);
-  const [sessionEventsLoading, setSessionEventsLoading] = useState(false);
-  const [sessionEventsError, setSessionEventsError] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+
+  // The thread is read again while one of its sessions is still running.
+  const threadQuery = useTracingThread<ThreadDetail>(threadId, (data) =>
+    Boolean(data?.sessions.some((session) => isInProgressStatus(session.status))),
+  );
+  const thread = threadQuery.data ?? null;
+  const loading = threadQuery.isPending;
+  const error = threadQuery.isError ? errorMessage(threadQuery.error, 'Failed to load thread') : null;
 
   const hasInProgressSession = thread
     ? thread.sessions.some((session) => isInProgressStatus(session.status))
@@ -403,55 +405,6 @@ export default function ThreadDetailPage({
 
   const selectedSession = thread?.sessions.find((session) => session.sessionId === selectedSessionId) || null;
   const hasInProgressSelectedSession = isInProgressStatus(selectedSession?.status);
-
-  const fetchThread = useCallback(async () => {
-    try {
-      setLoading(true);
-      const response = await fetch(`/api/tracing/threads/${encodeURIComponent(threadId)}`);
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Failed to fetch thread');
-      }
-
-      const data = await response.json();
-      setThread(data);
-    } catch (err) {
-      console.error('Failed to load thread:', err);
-      setError(err instanceof Error ? err.message : 'Failed to load thread');
-    } finally {
-      setLoading(false);
-    }
-  }, [threadId]);
-
-  const fetchSessionEvents = useCallback(async (sessionId: string) => {
-    try {
-      setSessionEventsLoading(true);
-      setSessionEventsError(null);
-
-      const response = await fetch(`/api/tracing/sessions/${encodeURIComponent(sessionId)}`);
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Failed to fetch session events');
-      }
-
-      const data: SessionDetailResponse = await response.json();
-      const events = foldSupersededSpans((data.events || []).slice().sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)));
-      setSelectedSessionEvents(events);
-      setSelectedEventId(events[0]?.id ?? null);
-    } catch (err) {
-      console.error('Failed to load session events:', err);
-      setSelectedSessionEvents([]);
-      setSelectedEventId(null);
-      setSessionEventsError(err instanceof Error ? err.message : 'Failed to load session events');
-    } finally {
-      setSessionEventsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchThread();
-  }, [fetchThread]);
 
   useEffect(() => {
     if (!thread || thread.sessions.length === 0) {
@@ -464,33 +417,27 @@ export default function ThreadDetailPage({
     }
   }, [thread, selectedSessionId]);
 
+  // The selected session's events; read again while that session is still running.
+  const sessionEventsQuery = useTracingThreadSession<SessionDetailResponse>(selectedSessionId, () => hasInProgressSelectedSession);
+  const sessionEventsData = sessionEventsQuery.isError ? undefined : sessionEventsQuery.data;
+  const selectedSessionEvents = useMemo<TracingEvent[]>(
+    () =>
+      sessionEventsData
+        ? foldSupersededSpans((sessionEventsData.events || []).slice().sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)))
+        : [],
+    [sessionEventsData],
+  );
+  // Same integration-agnostic grouping as the session page.
+  const sessionModel = useMemo(() => buildSessionModel(selectedSessionEvents), [selectedSessionEvents]);
+  const sessionEventsLoading = sessionEventsQuery.isFetching && !sessionEventsData;
+  const sessionEventsError = sessionEventsQuery.isError
+    ? errorMessage(sessionEventsQuery.error, 'Failed to load session events')
+    : null;
+
+  // A freshly read session opens on its first event.
   useEffect(() => {
-    if (!selectedSessionId) {
-      setSelectedSessionEvents([]);
-      setSelectedEventId(null);
-      return;
-    }
-
-    void fetchSessionEvents(selectedSessionId);
-  }, [selectedSessionId, fetchSessionEvents]);
-
-  // Auto-refresh if any session is in_progress
-  useEffect(() => {
-    if (!hasInProgressSession) return;
-
-    const interval = setInterval(() => fetchThread(), 4000);
-    return () => clearInterval(interval);
-  }, [hasInProgressSession, fetchThread]);
-
-  useEffect(() => {
-    if (!selectedSessionId || !hasInProgressSelectedSession) return;
-
-    const interval = setInterval(() => {
-      void fetchSessionEvents(selectedSessionId);
-    }, 4000);
-
-    return () => clearInterval(interval);
-  }, [selectedSessionId, hasInProgressSelectedSession, fetchSessionEvents]);
+    setSelectedEventId(selectedSessionEvents[0]?.id ?? null);
+  }, [selectedSessionEvents]);
 
   const selectedEvent = selectedSessionEvents.find((event) => event.id === selectedEventId) || null;
   const [fullViewOpened, fullViewHandlers] = useDisclosure(false);

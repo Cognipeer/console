@@ -22,6 +22,7 @@ import {
   type ApiMock,
   type Mounted,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 
 const nav = vi.hoisted(() => ({
   search: new URLSearchParams(),
@@ -408,7 +409,7 @@ describe('the agents list', () => {
 
   it('asks for the last day by default and lists every agent with health, deltas and the fixed statuses', async () => {
     mockAgents();
-    mounted = await mount(h(TracingAgentsPage));
+    mounted = await renderWithQuery(h(TracingAgentsPage));
     await settle(50);
 
     expect(api.to('GET', '/api/tracing/agents/health')[0]!.query).toMatchObject({ period: 'last_day', limit: '200' });
@@ -433,7 +434,7 @@ describe('the agents list', () => {
 
   it('writes the Trend header in the same case as the sortable ones', async () => {
     mockAgents();
-    mounted = await mount(h(TracingAgentsPage));
+    mounted = await renderWithQuery(h(TracingAgentsPage));
     await settle(50);
     const headers = qa('thead th');
     const sortable = headers.find((th) => th.textContent?.includes('Sessions'))!;
@@ -458,7 +459,7 @@ describe('the agents list', () => {
       ['GET', '/api/tracing/agents/health', () => body],
       ['GET', '/api/tracing/agents', () => directoryBody],
     ]);
-    mounted = await mount(h(TracingAgentsPage));
+    mounted = await renderWithQuery(h(TracingAgentsPage));
     await settle(50);
     const row = (name: string) => qa('tbody tr').find((r) => r.textContent?.includes(name))!;
     expect(row('support').textContent).toContain('No alert rule');
@@ -473,14 +474,14 @@ describe('the agents list', () => {
       ['GET', '/api/tracing/agents/health', () => ({ ...healthBody, agents: [{ ...healthBody.agents[1]!, alert: { phase: null, covered: true } }] })],
       ['GET', '/api/tracing/agents', () => directoryBody],
     ]);
-    mounted = await mount(h(TracingAgentsPage));
+    mounted = await renderWithQuery(h(TracingAgentsPage));
     await settle(50);
     const body = () => qa('tbody').map((el) => el.textContent ?? '').join(' ');
     expect(body()).toContain('OK');
     expect(body()).not.toContain('No alert rule');
     await mounted.unmount();
     mockAgents();
-    mounted = await mount(h(TracingAgentsPage));
+    mounted = await renderWithQuery(h(TracingAgentsPage));
     await settle(50);
     expect(qa('tbody tr').find((r) => r.textContent?.includes('support'))!.textContent).toContain('OK');
   });
@@ -494,7 +495,7 @@ describe('the agents list', () => {
       })],
       ['GET', '/api/tracing/agents', () => directoryBody],
     ]);
-    mounted = await mount(h(TracingAgentsPage));
+    mounted = await renderWithQuery(h(TracingAgentsPage));
     await settle(50);
     expect(q('[data-testid="agents-alerts-unavailable"]')).not.toBeNull();
     const rows = qa('tbody tr');
@@ -508,7 +509,7 @@ describe('the agents list', () => {
 
   it('opens the agent with the period, the name encoded once', async () => {
     mockAgents();
-    mounted = await mount(h(TracingAgentsPage));
+    mounted = await renderWithQuery(h(TracingAgentsPage));
     await settle(50);
     const hrefs = qa('tbody tr td a').map((a) => a.getAttribute('href'));
     expect(hrefs).toContain('/dashboard/tracing/agents/50%25off?period=last_day');
@@ -520,14 +521,14 @@ describe('the agents list', () => {
   it('keeps the period of the URL', async () => {
     nav.search = new URLSearchParams('period=last_7_days');
     mockAgents();
-    mounted = await mount(h(TracingAgentsPage));
+    mounted = await renderWithQuery(h(TracingAgentsPage));
     await settle(50);
     expect(api.to('GET', '/api/tracing/agents/health')[0]!.query.period).toBe('last_7_days');
   });
 
   it('sorts from the column headers, both ways', async () => {
     mockAgents();
-    mounted = await mount(h(TracingAgentsPage));
+    mounted = await renderWithQuery(h(TracingAgentsPage));
     await settle(50);
     const header = (label: string) => qa<HTMLButtonElement>('thead button').find((b) => b.getAttribute('aria-label') === `Sort by ${label}`)!;
 
@@ -549,7 +550,7 @@ describe('the agents list', () => {
 
   it('filters by name search', async () => {
     mockAgents();
-    mounted = await mount(h(TracingAgentsPage));
+    mounted = await renderWithQuery(h(TracingAgentsPage));
     await settle(50);
     const search = q<HTMLInputElement>('input[placeholder="Search by agent name…"]')!;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
@@ -567,7 +568,7 @@ describe('the agents list', () => {
       ['GET', '/api/tracing/agents/health', () => (healthFails ? jsonResponse({ error: 'boom' }, 500) : healthBody)],
       ['GET', '/api/tracing/agents', () => jsonResponse({ error: 'slow' }, 500)],
     ]);
-    mounted = await mount(h(TracingAgentsPage));
+    mounted = await renderWithQuery(h(TracingAgentsPage));
     await settle(50);
     expect(text()).toContain('Could not load the agent health overview.');
     healthFails = false;
@@ -581,7 +582,7 @@ describe('the agents list', () => {
       ['GET', '/api/tracing/agents/health', () => healthBody],
       ['GET', '/api/tracing/agents', () => jsonResponse({ error: 'directory down' }, 500)],
     ]);
-    mounted = await mount(h(TracingAgentsPage));
+    mounted = await renderWithQuery(h(TracingAgentsPage));
     await settle(50);
     expect(q('[data-testid="agents-directory-error"]')).not.toBeNull();
     expect(text()).toContain('Latest status is unavailable right now');
@@ -598,7 +599,7 @@ describe('the sessions list', () => {
     const to = '2026-10-15T00:00:00.000Z';
     nav.search = new URLSearchParams({ agent: 'Pulse Main', status: 'error', from, to });
     api = installApiMock([['GET', '/api/tracing/sessions', () => sessionsBody]]);
-    mounted = await mount(h(TracingSessionsPage));
+    mounted = await renderWithQuery(h(TracingSessionsPage));
     await settle(50);
     const call = api.to('GET', '/api/tracing/sessions')[0]!;
     expect(call.query).toMatchObject({ agent: 'Pulse Main', status: 'error', from, to });
@@ -608,7 +609,7 @@ describe('the sessions list', () => {
   it('ignores a status the filter does not offer and an unreadable date', async () => {
     nav.search = new URLSearchParams({ status: 'bogus', from: 'not-a-date' });
     api = installApiMock([['GET', '/api/tracing/sessions', () => sessionsBody]]);
-    mounted = await mount(h(TracingSessionsPage));
+    mounted = await renderWithQuery(h(TracingSessionsPage));
     await settle(50);
     const call = api.to('GET', '/api/tracing/sessions')[0]!;
     expect(call.query.status).toBeUndefined();
@@ -622,7 +623,7 @@ describe('the sessions list', () => {
     nav.replace.mockImplementation((url: string) => {
       nav.search = new URLSearchParams(url.split('?')[1] ?? '');
     });
-    mounted = await mount(h(TracingSessionsPage));
+    mounted = await renderWithQuery(h(TracingSessionsPage));
     await settle(50);
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
     const type = async (placeholder: string, value: string) => {
@@ -655,7 +656,7 @@ describe('the sessions list', () => {
   it('accepts abandoned and clears the range from the chip, in the URL too', async () => {
     nav.search = new URLSearchParams({ status: 'abandoned', from: '2026-10-14T00:00:00.000Z' });
     api = installApiMock([['GET', '/api/tracing/sessions', () => sessionsBody]]);
-    mounted = await mount(h(TracingSessionsPage));
+    mounted = await renderWithQuery(h(TracingSessionsPage));
     await settle(50);
     expect(api.to('GET', '/api/tracing/sessions')[0]!.query.status).toBe('abandoned');
     await click(q('[data-testid="sessions-range-chip"] button'));
@@ -672,7 +673,7 @@ describe('the sessions list', () => {
 describe('the sessions and threads lists speak Turkish', () => {
   it('has no English column, placeholder or footer left on the sessions list', async () => {
     api = installApiMock([['GET', '/api/tracing/sessions', () => ({ sessions: [], total: 0 })]]);
-    mounted = await mount(h(TracingSessionsPage), 'tr');
+    mounted = await renderWithQuery(h(TracingSessionsPage), { locale: 'tr' });
     await settle(50);
     const body = text();
     expect(body).toContain('Oturum gezgini');
@@ -684,7 +685,7 @@ describe('the sessions and threads lists speak Turkish', () => {
 
   it('has no English column, placeholder or footer left on the threads list', async () => {
     api = installApiMock([['GET', '/api/tracing/threads', () => ({ threads: [], total: 0 })]]);
-    mounted = await mount(h(TracingThreadsPage), 'tr');
+    mounted = await renderWithQuery(h(TracingThreadsPage), { locale: 'tr' });
     await settle(50);
     const body = text();
     expect(body).toContain('Konuşma gezgini');

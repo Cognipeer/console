@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import {
@@ -48,6 +48,8 @@ import {
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useTracingAgentOverview } from '@/lib/api/queries/tracing';
 
 interface AgentOverviewResponse {
   agent: {
@@ -151,10 +153,7 @@ export default function AgentTracingAgentPage() {
   const t = useTranslations('tracingHealth');
   const locale = useLocale();
   const { openDocs } = useDocsDrawer();
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<AgentOverviewResponse | null>(null);
+  // Counts refreshes: the health panel reads again when it changes.
   const [refreshKey, setRefreshKey] = useState(0);
   const [rawDailyOpen, setRawDailyOpen] = useState(false);
   // Same 24h default as the agents list and the health panel when the link carries no period.
@@ -178,45 +177,25 @@ export default function AgentTracingAgentPage() {
     }
   }, []);
 
-  useEffect(() => {
-    if (!agentName) return;
-    const controller = new AbortController();
-    const load = async () => {
-      try {
-        // The first load of an agent shows skeletons; later ones keep the page and show the refresh state.
-        setRefreshing(true);
-        setError(null);
-
-        const query = buildDashboardDateSearchParams(dateFilter);
-        query.append('timezone', timezone);
-
-        const response = await fetch(
-          `/api/tracing/agents/${encodeURIComponent(agentName)}/overview?${query}`,
-          { signal: controller.signal },
-        );
-        if (!response.ok) {
-          const payload = (await response.json().catch(() => ({}))) as { error?: unknown };
-          throw new Error(typeof payload.error === 'string' ? payload.error : t('detail.loadError'));
-        }
-
-        const payload = (await response.json()) as AgentOverviewResponse;
-        if (!controller.signal.aborted) setData(payload);
-      } catch (err: unknown) {
-        if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-        console.error('Agent overview fetch error:', err);
-        setError(err instanceof Error && err.message ? err.message : t('detail.loadError'));
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-          setRefreshing(false);
-        }
-      }
-    };
-    void load();
-    return () => controller.abort();
-    // `filterKey` stands for `dateFilter`: the filter object is replaced on every URL change.
+  // `filterKey` stands for `dateFilter`: the filter object is replaced on every URL change.
+  const overviewQuery = useMemo(() => {
+    const query = buildDashboardDateSearchParams(dateFilter);
+    query.append('timezone', timezone);
+    return query.toString();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentName, filterKey, timezone, refreshKey, t]);
+  }, [filterKey, timezone]);
+
+  // The first load of an agent shows skeletons; later ones keep the page and show the refresh state.
+  const overview = useTracingAgentOverview<AgentOverviewResponse>(agentName, overviewQuery);
+  const data = overview.data ?? null;
+  const loading = overview.isPending;
+  const refreshing = overview.isFetching;
+  const error = overview.isError && !overview.isFetching ? errorMessage(overview.error, t('detail.loadError')) : null;
+
+  const refresh = () => {
+    setRefreshKey((key) => key + 1);
+    void overview.refetch();
+  };
 
   const handleShowAllSessions = () => {
     router.push(`/dashboard/tracing/sessions?agent=${encodeURIComponent(agentName)}`);
@@ -349,7 +328,7 @@ export default function AgentTracingAgentPage() {
             variant="light"
             size="xs"
             leftSection={<IconRefresh size={14} />}
-            onClick={() => setRefreshKey((key) => key + 1)}
+            onClick={refresh}
             loading={refreshing}
           >
             {t('common.refresh')}

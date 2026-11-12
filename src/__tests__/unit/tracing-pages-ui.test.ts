@@ -12,7 +12,6 @@ import {
   installApiMock,
   installDomStubs,
   jsonResponse,
-  mount,
   q,
   qa,
   settle,
@@ -20,6 +19,7 @@ import {
   type ApiMock,
   type Mounted,
 } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
 
 const nav = vi.hoisted(() => ({
   search: new URLSearchParams(),
@@ -105,7 +105,7 @@ const dashboard = {
 describe('the tracing overview', () => {
   it('shows skeletons while loading, not a page-wide loader', async () => {
     api = installApiMock([['GET', '/api/tracing/dashboard', () => new Promise(() => undefined)]]);
-    mounted = await mount(h(AgentTracingPage));
+    mounted = await renderWithQuery(h(AgentTracingPage));
     // The only spinner is the refresh button's own; there is no page-wide loader.
     expect(qa('.mantine-Loader-root').filter((el) => !el.closest('button'))).toHaveLength(0);
     expect(q('.ds-page-header')).not.toBeNull(); // the header and its date filter are there at once
@@ -115,7 +115,7 @@ describe('the tracing overview', () => {
 
   it('draws the daily trend as charts, not as a table', async () => {
     api = installApiMock([['GET', '/api/tracing/dashboard', () => dashboard]]);
-    mounted = await mount(h(AgentTracingPage));
+    mounted = await renderWithQuery(h(AgentTracingPage));
     await settle(50);
     expect(qa('.recharts-wrapper').length).toBe(2); // sessions and tokens per day
     expect(text()).toContain('Sessions per day');
@@ -129,7 +129,7 @@ describe('the tracing overview', () => {
     api = installApiMock([
       ['GET', '/api/tracing/dashboard', () => ({ ...dashboard, analytics: { ...dashboard.analytics, daily: dashboard.analytics.daily.slice(0, 1) } })],
     ]);
-    mounted = await mount(h(AgentTracingPage));
+    mounted = await renderWithQuery(h(AgentTracingPage));
     await settle(50);
     expect(qa('.recharts-wrapper').length).toBe(0);
     expect(text()).toContain('Not enough daily data in this range to draw a trend yet.');
@@ -138,7 +138,7 @@ describe('the tracing overview', () => {
   it('shows the failure with a retry', async () => {
     let fail = true;
     api = installApiMock([['GET', '/api/tracing/dashboard', () => (fail ? jsonResponse({ error: 'db down' }, 500) : dashboard)]]);
-    mounted = await mount(h(AgentTracingPage));
+    mounted = await renderWithQuery(h(AgentTracingPage));
     await settle(50);
     expect(text()).toContain('db down');
     fail = false;
@@ -150,7 +150,7 @@ describe('the tracing overview', () => {
 
   it('speaks Turkish', async () => {
     api = installApiMock([['GET', '/api/tracing/dashboard', () => dashboard]]);
-    mounted = await mount(h(AgentTracingPage), 'tr');
+    mounted = await renderWithQuery(h(AgentTracingPage), { locale: 'tr' });
     await settle(50);
     expect(text()).toContain('Günlük oturum');
     expect(text()).toContain('Toplam oturum');
@@ -200,7 +200,7 @@ describe('the agent page', () => {
 
   it('shows a skeleton first, then the page with the health panel between the tiles and the token breakdown', async () => {
     mockAgent();
-    mounted = await mount(h(AgentTracingAgentPage));
+    mounted = await renderWithQuery(h(AgentTracingAgentPage));
     expect(q('.mantine-Loader-root')).toBeNull();
     await settle(50);
 
@@ -218,7 +218,7 @@ describe('the agent page', () => {
 
   it('defaults to the last 24 hours, like the list, for both the overview and the health panel', async () => {
     mockAgent();
-    mounted = await mount(h(AgentTracingAgentPage));
+    mounted = await renderWithQuery(h(AgentTracingAgentPage));
     await settle(50);
     const calls = api.to('GET', /\/api\/tracing\/agents\/Pulse%20Main\/(overview|health)$/);
     expect(calls).toHaveLength(2);
@@ -227,7 +227,7 @@ describe('the agent page', () => {
 
   it('keeps the raw daily table collapsed until asked', async () => {
     mockAgent();
-    mounted = await mount(h(AgentTracingAgentPage));
+    mounted = await renderWithQuery(h(AgentTracingAgentPage));
     await settle(50);
     const toggle = buttonByText('Raw daily')!;
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
@@ -239,7 +239,7 @@ describe('the agent page', () => {
 
   it('refreshes both the overview and the health panel', async () => {
     mockAgent();
-    mounted = await mount(h(AgentTracingAgentPage));
+    mounted = await renderWithQuery(h(AgentTracingAgentPage));
     await settle(50);
     await click(buttonByText('Refresh'));
     await settle(50);
@@ -252,7 +252,7 @@ describe('the agent page', () => {
       ['GET', /\/overview$/, () => jsonResponse({ error: 'overview exploded' }, 500)],
       ['GET', /\/health$/, () => health],
     ]);
-    mounted = await mount(h(AgentTracingAgentPage));
+    mounted = await renderWithQuery(h(AgentTracingAgentPage));
     await settle(50);
     expect(text()).toContain('overview exploded');
     expect(text()).toContain('Total sessions');
@@ -260,7 +260,7 @@ describe('the agent page', () => {
 
   it('speaks Turkish', async () => {
     mockAgent();
-    mounted = await mount(h(AgentTracingAgentPage), 'tr');
+    mounted = await renderWithQuery(h(AgentTracingAgentPage), { locale: 'tr' });
     await settle(50);
     expect(text()).toContain('Toplam oturum');
     expect(text()).toContain('Token dağılımı');

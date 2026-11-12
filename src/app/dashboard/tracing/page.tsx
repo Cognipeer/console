@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -48,6 +48,8 @@ import {
   calcCacheHitRate,
 } from '@/lib/utils/tracingUtils';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import { errorMessage } from '@/lib/api/client';
+import { useTracingDashboard } from '@/lib/api/queries/tracing';
 import type { AgentTracingAgentSummary, DashboardOverview } from '@/lib/services/agentTracing';
 
 type DashboardData = DashboardOverview;
@@ -58,13 +60,6 @@ export default function AgentTracingPage() {
   const th = useTranslations('tracingHealth');
   const tNav = useTranslations('navigation');
   const locale = useLocale();
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [dashboardData, setDashboardData] = useState<DashboardData | null>(
-    null,
-  );
-  const [refreshKey, setRefreshKey] = useState(0);
   const [dateFilter, setDateFilter] = useDashboardDateFilterState();
   const filterKey = dashboardDateFilterKey(dateFilter);
 
@@ -76,46 +71,21 @@ export default function AgentTracingPage() {
     }
   }, []);
 
-  const fetchDashboard = useCallback(async (signal: AbortSignal) => {
-    try {
-      // The first load shows skeletons; later ones (filter change, refresh) keep the page in place.
-      setRefreshing(true);
-      setError(null);
-
-      const params = buildDashboardDateSearchParams(dateFilter);
-      params.append('timezone', timezone);
-
-      const response = await fetch(`/api/tracing/dashboard?${params}`, { signal });
-
-      if (!response.ok) {
-        const errorData = (await response.json().catch(() => ({}))) as { error?: unknown };
-        console.error('Dashboard fetch error:', errorData);
-        throw new Error(typeof errorData.error === 'string' ? errorData.error : th('overview.loadError'));
-      }
-
-      const data = (await response.json()) as DashboardData;
-      if (!signal.aborted) setDashboardData(data);
-    } catch (fetchError) {
-      if (signal.aborted || (fetchError instanceof DOMException && fetchError.name === 'AbortError')) {
-        return;
-      }
-      console.error('Error fetching dashboard:', fetchError);
-      setError(fetchError instanceof Error && fetchError.message ? fetchError.message : th('overview.loadError'));
-    } finally {
-      if (!signal.aborted) {
-        setLoading(false);
-        setRefreshing(false);
-      }
-    }
-    // `filterKey` stands for `dateFilter`: the filter object is replaced on every URL change.
+  // `filterKey` stands for `dateFilter`: the filter object is replaced on every URL change.
+  const dashboardQuery = useMemo(() => {
+    const params = buildDashboardDateSearchParams(dateFilter);
+    params.append('timezone', timezone);
+    return params.toString();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterKey, timezone, th]);
+  }, [filterKey, timezone]);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    void fetchDashboard(controller.signal);
-    return () => controller.abort();
-  }, [fetchDashboard, refreshKey]);
+  // The first load shows skeletons; later ones (filter change, refresh) keep the page in place.
+  const dashboard = useTracingDashboard<DashboardData>(dashboardQuery);
+  const dashboardData = dashboard.data ?? null;
+  const loading = dashboard.isPending;
+  const refreshing = dashboard.isFetching;
+  const error = dashboard.isError && !dashboard.isFetching ? errorMessage(dashboard.error, th('overview.loadError')) : null;
+  const reload = () => void dashboard.refetch();
 
   const handleRowClick = (sessionId: string) => {
     if (!sessionId) return;
@@ -143,7 +113,7 @@ export default function AgentTracingPage() {
           <Button
             variant="default"
             size="sm"
-            onClick={() => setRefreshKey((key) => key + 1)}
+            onClick={reload}
             loading={refreshing}
             leftSection={<IconRefresh size={14} stroke={1.7} />}>
             {th('overview.refresh')}
@@ -196,7 +166,7 @@ export default function AgentTracingPage() {
         <Alert icon={<IconAlertCircle size={16} />} color="red" variant="light" title={th('overview.loadError')}>
           <div className="ds-row-between" style={{ gap: 12 }}>
             <Text size="sm">{error}</Text>
-            <Button size="xs" variant="default" onClick={() => setRefreshKey((key) => key + 1)}>
+            <Button size="xs" variant="default" onClick={reload}>
               {th('common.retry')}
             </Button>
           </div>
