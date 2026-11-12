@@ -6,9 +6,13 @@ const db = {
   listGuardrails: vi.fn(),
 };
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(async () => db),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn(async () => db);
+  return {
+    getDatabase,
+    runWithTenantScope: vi.fn(async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase())),
+  };
+});
 
 const evaluateGuardrail = vi.fn();
 vi.mock('@/lib/services/guardrail/guardrailService', () => ({

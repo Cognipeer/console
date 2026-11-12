@@ -5,9 +5,13 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    runWithTenantScope: vi.fn(async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase())),
+  };
+});
 
 import { getDatabase } from '@/lib/database';
 import { createMockDb } from '../helpers/db.mock';

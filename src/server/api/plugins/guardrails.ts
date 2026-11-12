@@ -5,7 +5,7 @@ import type {
   IUser,
 } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
 import {
   deleteGuardrail,
   evaluateGuardrail,
@@ -754,40 +754,39 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
       const { id } = request.params as { id: string };
       const query = (request.query ?? {}) as EvaluationsQuery;
 
-      const db = await getDatabase();
-      await db.switchToTenant(session.tenantDbName);
+      return await runWithTenantScope(session.tenantDbName, async (db) => {
+        const guardrail = await guardrailInProjectScope(session.tenantDbName, id, projectId);
+        if (!guardrail) {
+          return reply.code(404).send({ error: 'Guardrail not found' });
+        }
 
-      const guardrail = await guardrailInProjectScope(session.tenantDbName, id, projectId);
-      if (!guardrail) {
-        return reply.code(404).send({ error: 'Guardrail not found' });
-      }
+        const filter = parseDashboardDateFilterFromSearchParams(
+          new URLSearchParams(query as Record<string, string>),
+        );
+        const limit = Math.min(Number.parseInt(query.limit ?? '50', 10), 200);
+        const skip = Number.parseInt(query.skip ?? '0', 10);
+        const from = query.from ?? filter.from?.toISOString();
+        const to = query.to ?? filter.to?.toISOString();
+        const passed = parseBooleanQuery(query.passed);
+        const groupBy = query.groupBy ?? 'day';
 
-      const filter = parseDashboardDateFilterFromSearchParams(
-        new URLSearchParams(query as Record<string, string>),
-      );
-      const limit = Math.min(Number.parseInt(query.limit ?? '50', 10), 200);
-      const skip = Number.parseInt(query.skip ?? '0', 10);
-      const from = query.from ?? filter.from?.toISOString();
-      const to = query.to ?? filter.to?.toISOString();
-      const passed = parseBooleanQuery(query.passed);
-      const groupBy = query.groupBy ?? 'day';
+        const [logs, aggregate] = await Promise.all([
+          db.listGuardrailEvaluationLogs(id, {
+            from: from ? new Date(from) : undefined,
+            limit,
+            passed,
+            skip,
+            to: to ? new Date(to) : undefined,
+          }),
+          db.aggregateGuardrailEvaluations(id, {
+            from: from ? new Date(from) : undefined,
+            groupBy,
+            to: to ? new Date(to) : undefined,
+          }),
+        ]);
 
-      const [logs, aggregate] = await Promise.all([
-        db.listGuardrailEvaluationLogs(id, {
-          from: from ? new Date(from) : undefined,
-          limit,
-          passed,
-          skip,
-          to: to ? new Date(to) : undefined,
-        }),
-        db.aggregateGuardrailEvaluations(id, {
-          from: from ? new Date(from) : undefined,
-          groupBy,
-          to: to ? new Date(to) : undefined,
-        }),
-      ]);
-
-      return reply.code(200).send({ aggregate, logs });
+        return reply.code(200).send({ aggregate, logs });
+      });
     } catch (error) {
       logger.error('List guardrail evaluations error', { error });
       return sendProjectContextError(reply, error)

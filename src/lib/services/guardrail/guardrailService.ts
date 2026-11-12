@@ -20,8 +20,8 @@ import { safetyCheckSkipped } from '@/lib/services/availability/safetySkip';
 import { randomUUID } from 'node:crypto';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase } from '@/lib/database';
-import type { IGuardrail, IGuardrailPresetPolicy, GuardrailType } from '@/lib/database';
+import { runWithTenantScope } from '@/lib/database';
+import type { DatabaseProvider, IGuardrail, IGuardrailPresetPolicy, GuardrailType } from '@/lib/database';
 import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
 import { generateUniqueSlugKey } from './keyGeneration';
 import type {
@@ -102,12 +102,10 @@ export function serializeGuardrail(record: IGuardrail): GuardrailView {
 // ── Key generation ────────────────────────────────────────────────────────
 
 async function generateUniqueKey(
-  tenantDbName: string,
+  db: DatabaseProvider,
   projectId: string | undefined,
   desiredKey: string,
 ): Promise<string> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
   return generateUniqueSlugKey(desiredKey, 'guardrail', async (candidate) => {
     // RESERVED. The default tool guardrail is pinned to this literal and
     // `ensureDefaultToolGuardrail` materialises it lazily as a tenant-wide row,
@@ -183,44 +181,43 @@ export async function createGuardrail(
   createdBy: string,
   input: CreateGuardrailInput,
 ): Promise<GuardrailView> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const key = await generateUniqueKey(db, input.projectId, input.name);
 
-  const key = await generateUniqueKey(tenantDbName, input.projectId, input.name);
+    // A create with no `hooks` is a guardrail with nothing configured yet: an
+    // empty config, which enforces nothing until policies are added.
+    const hooks = normalizeAuthoredHooks(input.hooks ?? emptyHooksConfig(), {
+      defaultStreamEnabled: true,
+    });
 
-  // A create with no `hooks` is a guardrail with nothing configured yet: an
-  // empty config, which enforces nothing until policies are added.
-  const hooks = normalizeAuthoredHooks(input.hooks ?? emptyHooksConfig(), {
-    defaultStreamEnabled: true,
+    const guardrail = await db.createGuardrail({
+      tenantId,
+      projectId: input.projectId,
+      key,
+      name: input.name,
+      description: input.description,
+      // Stored labels with one value each: nothing reads them to decide what to
+      // enforce. The columns stay for the list screen and the evaluation log.
+      type: 'preset',
+      target: 'input',
+      action: input.action,
+      enabled: input.enabled ?? true,
+      failMode: input.failMode ?? resolveDefaultFailMode(hooks),
+      modelKey: input.modelKey,
+      hooks,
+      hooksVersion: GUARDRAIL_CONTRACT_VERSION,
+      mode: input.mode,
+      createdBy,
+    });
+
+    // The read path caches MISSES for 5s, so a key someone evaluated moments
+    // before creating it would otherwise report "not found" — and the facade
+    // turns that into a thrown error and a 404 — for several seconds after the
+    // UI said the guardrail exists.
+    invalidateGuardrailCache(tenantDbName, guardrail.key);
+
+    return serializeGuardrail(guardrail);
   });
-
-  const guardrail = await db.createGuardrail({
-    tenantId,
-    projectId: input.projectId,
-    key,
-    name: input.name,
-    description: input.description,
-    // Stored labels with one value each: nothing reads them to decide what to
-    // enforce. The columns stay for the list screen and the evaluation log.
-    type: 'preset',
-    target: 'input',
-    action: input.action,
-    enabled: input.enabled ?? true,
-    failMode: input.failMode ?? resolveDefaultFailMode(hooks),
-    modelKey: input.modelKey,
-    hooks,
-    hooksVersion: GUARDRAIL_CONTRACT_VERSION,
-    mode: input.mode,
-    createdBy,
-  });
-
-  // The read path caches MISSES for 5s, so a key someone evaluated moments
-  // before creating it would otherwise report "not found" — and the facade
-  // turns that into a thrown error and a 404 — for several seconds after the
-  // UI said the guardrail exists.
-  invalidateGuardrailCache(tenantDbName, guardrail.key);
-
-  return serializeGuardrail(guardrail);
 }
 
 export async function updateGuardrail(
@@ -229,62 +226,61 @@ export async function updateGuardrail(
   updatedBy: string,
   input: UpdateGuardrailInput,
 ): Promise<GuardrailView | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    // `hooks` is spread through verbatim when absent, so an update that only
+    // renames a guardrail cannot clear its hook config.
+    const hooks = input.hooks
+      ? normalizeAuthoredHooks(input.hooks, { defaultStreamEnabled: false })
+      : undefined;
 
-  // `hooks` is spread through verbatim when absent, so an update that only
-  // renames a guardrail cannot clear its hook config.
-  const hooks = input.hooks
-    ? normalizeAuthoredHooks(input.hooks, { defaultStreamEnabled: false })
-    : undefined;
+    const updated = await db.updateGuardrail(id, {
+      ...input,
+      ...(hooks ? { hooks, hooksVersion: GUARDRAIL_CONTRACT_VERSION } : {}),
+      updatedBy,
+    });
 
-  const updated = await db.updateGuardrail(id, {
-    ...input,
-    ...(hooks ? { hooks, hooksVersion: GUARDRAIL_CONTRACT_VERSION } : {}),
-    updatedBy,
+    if (!updated) return null;
+
+    // THE invalidation that matters. The engine resolves records through a 60s
+    // TTL cache, so without this an operator who disables a guardrail, softens
+    // its action or edits its policies watches the old policy keep enforcing for
+    // up to a minute with a UI that says otherwise. It lives here rather than in
+    // the API plugin so every caller of this function is covered — including the
+    // ones that do not exist yet.
+    invalidateGuardrailCache(tenantDbName, updated.key);
+
+    return serializeGuardrail(updated);
   });
-
-  if (!updated) return null;
-
-  // THE invalidation that matters. The engine resolves records through a 60s
-  // TTL cache, so without this an operator who disables a guardrail, softens
-  // its action or edits its policies watches the old policy keep enforcing for
-  // up to a minute with a UI that says otherwise. It lives here rather than in
-  // the API plugin so every caller of this function is covered — including the
-  // ones that do not exist yet.
-  invalidateGuardrailCache(tenantDbName, updated.key);
-
-  return serializeGuardrail(updated);
 }
 
 export async function deleteGuardrail(
   tenantDbName: string,
   id: string,
 ): Promise<boolean> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const deleted = await db.deleteGuardrail(id);
-  if (deleted) {
-    // The whole TENANT, not one key: this signature takes an id and the row is
-    // gone by the time we could ask it for its key. Reading the record first
-    // purely to name it would add a round trip to every delete, and clearing a
-    // tenant's slice of a 500-entry cache costs one re-read per guardrail that
-    // is actually in use. A guardrail that keeps enforcing after it was
-    // deleted is the failure worth paying that for.
-    invalidateGuardrailCache(tenantDbName);
-  }
-  return deleted;
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const deleted = await db.deleteGuardrail(id);
+    if (deleted) {
+      // The whole TENANT, not one key: this signature takes an id and the row is
+      // gone by the time we could ask it for its key. Reading the record first
+      // purely to name it would add a round trip to every delete, and clearing a
+      // tenant's slice of a 500-entry cache costs one re-read per guardrail that
+      // is actually in use. A guardrail that keeps enforcing after it was
+      // deleted is the failure worth paying that for.
+      invalidateGuardrailCache(tenantDbName);
+    }
+    return deleted;
+  });
 }
 
 export async function getGuardrail(
   tenantDbName: string,
   id: string,
 ): Promise<GuardrailView | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const record = await db.findGuardrailById(id);
-  if (!record) return null;
-  return serializeGuardrail(record);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const record = await db.findGuardrailById(id);
+    if (!record) return null;
+    return serializeGuardrail(record);
+  });
 }
 
 /** `projectId` keeps the provider contract's three-way meaning: a string for
@@ -295,11 +291,11 @@ export async function getGuardrailByKey(
   key: string,
   projectId?: string | null,
 ): Promise<GuardrailView | null> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const record = await db.findGuardrailByKey(key, projectId);
-  if (!record) return null;
-  return serializeGuardrail(record);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const record = await db.findGuardrailByKey(key, projectId);
+    if (!record) return null;
+    return serializeGuardrail(record);
+  });
 }
 
 export async function listGuardrails(
@@ -311,10 +307,10 @@ export async function listGuardrails(
     search?: string;
   },
 ): Promise<GuardrailView[]> {
-  const db = await getDatabase();
-  await db.switchToTenant(tenantDbName);
-  const records = await db.listGuardrails(filters);
-  return records.map(serializeGuardrail);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const records = await db.listGuardrails(filters);
+    return records.map(serializeGuardrail);
+  });
 }
 
 // ── Evaluation ────────────────────────────────────────────────────────────
