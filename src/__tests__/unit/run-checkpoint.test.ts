@@ -268,6 +268,33 @@ describe('run checkpointer: fencing', () => {
         expect(store.doc?.messageCount).toBe(2);
     });
 
+    it('a write that fails once is tried again (in full) before the tool is refused', async () => {
+        const store = memoryStore();
+        let failures = 1;
+        const blinking = {
+            async writeAgentRunCheckpoint(write: AgentRunCheckpointWrite) {
+                if (failures > 0) {
+                    failures -= 1;
+                    throw new Error('connection timed out');
+                }
+                return store.writeAgentRunCheckpoint(write);
+            },
+        };
+        const { checkpointer } = setup({ db: blinking });
+        const step1 = [user('hi'), assistant('', [{ id: 'c1', name: 'send_email' }])];
+        checkpointer.onStateChange({ messages: step1, toolHistory: [] });
+        await expect(checkpointer.beforeTool('send_email')).resolves.toBeUndefined();
+        expect(store.writes).toHaveLength(1);
+        expect(store.writes[0]).toMatchObject({ mode: 'reset', messageCount: 2 });
+
+        // Later on, a failed delta is followed by a full write, not by the same delta again.
+        const step2 = [...step1, toolResult('c1', 'send_email'), assistant('', [{ id: 'c2', name: 'send_email' }])];
+        checkpointer.onStateChange({ messages: step2, toolHistory: [] });
+        failures = 1;
+        await expect(checkpointer.beforeTool('send_email')).resolves.toBeUndefined();
+        expect(store.writes.at(-1)).toMatchObject({ mode: 'reset', messageCount: 4 });
+    });
+
     it('a tool with side effects is refused once this execution may have lost its hold on the run', async () => {
         let holds = true;
         const { store, checkpointer } = setup({ leaseHolds: () => holds });

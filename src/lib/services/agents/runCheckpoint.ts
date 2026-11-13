@@ -413,10 +413,15 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
     const checkBeforeTool = async (toolName: string): Promise<void> => {
         if (!sealed) {
             const target = latestVersion;
-            if (latest && writtenVersion < target) {
-                await writeLatest();
-            } else {
-                await chain;
+            // Tried twice (the second time a full write): a database that blinked (a failover, a
+            // connection that timed out) does not cost the turn its tool.
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+                if (latest && writtenVersion < target) {
+                    await writeLatest();
+                } else {
+                    await chain;
+                }
+                if (fenced || stopped || sealed || writtenVersion >= target) break;
             }
             if (fenced || stopped) throw new Error(RUN_MOVED_ON);
             // Past the size cap the run cannot be continued elsewhere anyway; otherwise a step
