@@ -9,7 +9,7 @@
  */
 
 import type { Filter } from 'mongodb';
-import type { AgentRunCheckpointWrite, AgentRunClass, IAgentRun, IAgentRunCheckpoint } from '../provider.interface';
+import type { AgentRunCheckpointWrite, AgentRunClass, AgentRunExecutionGuard, IAgentRun, IAgentRunCheckpoint } from '../provider.interface';
 import { AgentRunConflictError, AgentRunIdempotencyKeyTakenError } from '../provider/errors';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
@@ -39,6 +39,12 @@ interface AgentRunLockDoc {
 }
 
 const isDuplicateKey = isDuplicateKeyError;
+
+/** A row written before generations existed counts as generation 1 (`not > 1` also matches a missing field). */
+const executionFilter = (guard?: AgentRunExecutionGuard): Filter<IAgentRun> => {
+  if (guard?.generation === undefined) return {};
+  return { queueGeneration: guard.generation === 1 ? { $not: { $gt: 1 } } : guard.generation };
+};
 
 /**
  * A durable run's checkpoint, as stored: one small document per run naming the
@@ -277,9 +283,10 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       id: string,
       workerId: string,
       heartbeatAt: Date,
+      guard?: AgentRunExecutionGuard,
     ): Promise<IAgentRun | null> {
       return this.setAgentRun(
-        { _id: objectId(id), workerId, status: 'running' },
+        { _id: objectId(id), workerId, status: 'running', ...executionFilter(guard) },
         { heartbeatAt, updatedAt: new Date() },
       );
     }
@@ -311,11 +318,12 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       id: string,
       tenantId: string,
       data: Partial<Omit<IAgentRun, '_id' | 'tenantId' | 'createdAt'>>,
+      guard?: AgentRunExecutionGuard,
     ): Promise<IAgentRun | null> {
       // A paused (`requires_action`) run can be finalized too: cancelled, or
       // settled by a continuation that ran inline.
       const run = await this.setAgentRun(
-        { _id: objectId(id), tenantId, status: { $in: ['running', 'requires_action'] } },
+        { _id: objectId(id), tenantId, status: { $in: ['running', 'requires_action'] }, ...executionFilter(guard) },
         { ...data, updatedAt: new Date() },
       );
       if (run && !ACTIVE_STATUSES.has(run.status)) await this.releaseConversationLock(run.conversationId, id);

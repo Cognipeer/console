@@ -1013,6 +1013,64 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
       reloadConfig();
     }
   });
+
+  it('with durable runs, a handed-off run that another node already took is not ended by the old execution', async () => {
+    process.env.AGENT_DURABLE_RUNS = 'true';
+    reloadConfig();
+    try {
+      const db = await getDatabase();
+      await db.switchToTenant(dbName);
+      // The old execution has written a checkpoint (the next node goes on from it), and its turn
+      // ends as soon as it sees its cell tripped, the way a real one stops at its next check.
+      hoisted.executeAgentChatLocal.mockImplementation((request: { cancellationCell?: { cancelled?: boolean; checkpointer?: unknown } }) => {
+        const cell = request.cancellationCell;
+        if (cell) {
+          cell.checkpointer = {
+            wrote: true, sealed: false, stop: () => undefined, flush: async () => true,
+            onStateChange: () => true, beforeTool: async () => undefined, afterTool: () => undefined,
+          };
+        }
+        return new Promise((resolve) => {
+          const poll = setInterval(() => {
+            if (!cell?.cancelled) return;
+            clearInterval(poll);
+            resolve(fakeResponse('resp_cut_off'));
+          }, 5);
+        });
+      });
+      const run = await startQueued('conv-drain-handoff-taken');
+      const runId = String(run._id);
+      const job = runAgentJobLocal({ runId, tenantId, tenantDbName: dbName });
+      await vi.waitFor(() => {
+        expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
+      });
+      await db.writeAgentRunCheckpoint({
+        runId, tenantId, conversationId: 'conv-drain-handoff-taken', generation: 1, seq: 1, mode: 'reset', head: 'h',
+        messageChunks: ['m'], toolHistoryChunks: [], messageCount: 1, toolHistoryCount: 0, sizeBytes: 2, schema: 1,
+        expiresAt: new Date(Date.now() + 3_600_000),
+      });
+      // Another node takes the job the moment it is published, before the old execution's tail runs.
+      hoisted.publish.mockImplementation(async (_queue: string, _name: string, payload: { runId?: string }) => {
+        if (payload.runId === runId) await db.claimAgentRun(runId, tenantId, 'node-b', new Date());
+      });
+
+      expect(await drainLocalAgentRuns(50)).toEqual({ settled: 0, interrupted: 0, handedOff: 1 });
+      await job;
+
+      const after = await db.getAgentRunById(runId, tenantId, PROJECT_ID);
+      expect(after).toMatchObject({ status: 'running', workerId: 'node-b', queueGeneration: 2 });
+      expect(after?.errorReason ?? null).toBeNull();
+      // Its checkpoint stays for the execution that has the run now.
+      expect(await db.findAgentRunCheckpoint(runId, tenantId)).not.toBeNull();
+      // The old execution keeps it alive no more either.
+      expect(await db.updateAgentRunHeartbeat(runId, 'node-b', new Date(), { generation: 1 })).toBeNull();
+      expect(await db.updateAgentRunHeartbeat(runId, 'node-b', new Date(), { generation: 2 })).not.toBeNull();
+    } finally {
+      hoisted.publish.mockReset();
+      delete process.env.AGENT_DURABLE_RUNS;
+      reloadConfig();
+    }
+  });
   describe('the agents service switched off', () => {
     /** Runs `fn` with the agents service off for the deployment, and puts the environment back. */
     async function withAgentsOff<T>(fn: () => Promise<T>): Promise<T> {

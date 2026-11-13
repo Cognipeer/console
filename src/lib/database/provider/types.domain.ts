@@ -4645,6 +4645,16 @@ export interface IAgentRunCheckpoint {
   expiresAt: Date;
 }
 
+/**
+ * Narrows a run write to one execution of the run: it applies only while the row's
+ * `queueGeneration` is still `generation`. A run that was handed off or recovered is
+ * queued again with the next generation, so the execution that had it before cannot
+ * end it or keep it alive any more.
+ */
+export interface AgentRunExecutionGuard {
+  generation?: number;
+}
+
 /** One checkpoint write: a full rewrite (`reset`) or chunks appended to the stored ones. */
 export interface AgentRunCheckpointWrite {
   runId: string;

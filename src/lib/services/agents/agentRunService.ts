@@ -1972,6 +1972,9 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
     // continue it. The checkpoint goes when the run ends or pauses; a run that never wrote one
     // (and was never recovered) has none, and costs no delete.
     const durable = cfg.agent.durableRuns && claimed.mode !== 'sync';
+    // This execution's generation. A handoff or a recovery queues the run again with the next one, and
+    // from then on the run is not this execution's to end or keep alive (its late tail writes nothing).
+    const executionGuard = { generation: claimed.queueGeneration ?? 1 };
     const checkpointOf: { cell?: AgentRunCancellationCell } = {};
     const dropCheckpoint = async () => {
       if (!durable || (!checkpointOf.cell?.checkpointer?.wrote && !claimed.lastRecoveredAt)) return;
@@ -1989,7 +1992,8 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       data: Pick<IAgentRun, 'errorReason' | 'errorMessage' | 'result' | 'stopReason'>,
       callbackData: Record<string, unknown> = {},
     ) => {
-      await dropCheckpoint();
+      // No checkpoint write lands from here on.
+      checkpointOf.cell?.checkpointer?.stop();
       // A failed / canceled run says so; a succeeded one passes how its turn ended.
       const stopReason = data.stopReason
         ?? (status === 'failed' ? 'error' : status === 'canceled' ? 'cancelled' : undefined);
@@ -2003,7 +2007,10 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
         runtimeContext: null,
         resumeActionIds: null,
         expiresAt: agentRunRetainedUntil(completedAt),
-      });
+      }, executionGuard);
+      // Only the execution that ended the run clears its checkpoint: a run handed off or
+      // recovered elsewhere goes on from it.
+      if (finalized) await dropCheckpoint();
       // A continuation that died leaves the conversation marked as waiting;
       // its requests are answered, so there is nothing left to wait for.
       if (finalized && status !== 'succeeded' && claimed.resumeActionIds?.length) {
@@ -2100,10 +2107,10 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
     });
 
     const heartbeatTimer = setInterval(() => {
-      void db.updateAgentRunHeartbeat(runId, workerId, new Date())
+      void db.updateAgentRunHeartbeat(runId, workerId, new Date(), executionGuard)
         .then((updated) => {
           // Null = the row is no longer ours and running (the reconciler
-          // failed it as worker_lost, or it was finalized elsewhere). Stop
+          // failed it as worker_lost or queued it again, or it was finalized elsewhere). Stop
           // the turn instead of letting it write a result nobody will record.
           if (!updated) {
             logger.warn('Agent run is no longer owned by this worker; stopping the turn', { runId });
@@ -2148,7 +2155,7 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
     try {
       const request = buildRequestFromRun(claimed, cancellationCell);
       const durableTurn: DurableTurn | undefined = durable
-        ? { generation: claimed.queueGeneration ?? 1, turnKey: agentRunTurnKey(runId, claimed.resumeActionIds) }
+        ? { generation: executionGuard.generation, turnKey: agentRunTurnKey(runId, claimed.resumeActionIds) }
         : undefined;
       if (durableTurn) request.durable = durableTurn;
 
@@ -2342,13 +2349,14 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
         // Paused for a person: not terminal. The run waits as `requires_action`
         // (the conversation's slot is free) until the actions are resolved.
         // The pause keeps its own state (the conversation's paused snapshot).
-        await dropCheckpoint();
+        checkpointOf.cell?.checkpointer?.stop();
         const paused = await db.finalizeAgentRun(runId, tenantId, {
           status: 'requires_action',
           result: responseWithRunId as unknown as Record<string, unknown>,
           stopReason: 'requires_action',
           resumeActionIds: null,
-        });
+        }, executionGuard);
+        if (paused) await dropCheckpoint();
         if (paused) {
           await fireAgentRunCallback(paused, 'requires_action', { result: responseWithRunId }).catch((error) => {
             logger.warn('Could not queue the run callback', { runId, error: error instanceof Error ? error.message : String(error) });
@@ -2733,6 +2741,11 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
       }));
       if (finalized) {
         interrupted += 1;
+        // Its checkpoint is of no use any more (the run is final); the TTL is only the fallback.
+        if (local.durable) {
+          local.cell.checkpointer?.stop();
+          await runWithTenantDb(local.tenantDbName, (db) => db.deleteAgentRunCheckpoint(local.runId, local.tenantId)).catch(() => undefined);
+        }
         await fireAgentRunCallback(finalized, 'failed', { errorReason: 'interrupted', message: INTERRUPTED_RUN_MESSAGE }).catch(() => undefined);
         ended.push({ local, run: finalized });
       }

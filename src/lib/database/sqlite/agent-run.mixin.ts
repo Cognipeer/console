@@ -8,7 +8,7 @@
  * irreversible tool side effects that crawl jobs do not.
  */
 
-import type { AgentRunCheckpointWrite, AgentRunClass, IAgentRun, IAgentRunCheckpoint } from '../provider.interface';
+import type { AgentRunCheckpointWrite, AgentRunClass, AgentRunExecutionGuard, IAgentRun, IAgentRunCheckpoint } from '../provider.interface';
 import { AgentRunConflictError, AgentRunIdempotencyKeyTakenError } from '../provider/errors';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
@@ -153,12 +153,17 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       id: string,
       workerId: string,
       heartbeatAt: Date,
+      guard?: AgentRunExecutionGuard,
     ): Promise<IAgentRun | null> {
+      const generation = guard?.generation;
       return this.updateAgentRunIf(id, `
         UPDATE ${TABLES.agentRuns}
         SET heartbeatAt = @heartbeatAt, updatedAt = @updatedAt
-        WHERE id = @id AND workerId = @workerId AND status = 'running'
-      `, { id, workerId, heartbeatAt: heartbeatAt.toISOString(), updatedAt: this.now() });
+        WHERE id = @id AND workerId = @workerId AND status = 'running'${generation === undefined ? '' : ' AND COALESCE(queueGeneration, 1) = @generation'}
+      `, {
+        id, workerId, heartbeatAt: heartbeatAt.toISOString(), updatedAt: this.now(),
+        ...(generation === undefined ? {} : { generation }),
+      });
     }
 
     async requestAgentRunCancel(
@@ -189,14 +194,16 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       id: string,
       tenantId: string,
       data: Partial<Omit<IAgentRun, '_id' | 'tenantId' | 'createdAt'>>,
+      guard?: AgentRunExecutionGuard,
     ): Promise<IAgentRun | null> {
       const { sets, params } = this.buildAgentRunSetClause(data, id, this.now());
       params.tenantId = tenantId;
-      return this.updateAgentRunIf(
-        id,
-        `UPDATE ${TABLES.agentRuns} SET ${sets.join(', ')} WHERE id = @id AND tenantId = @tenantId AND status IN ('running', 'requires_action')`,
-        params,
-      );
+      let where = "id = @id AND tenantId = @tenantId AND status IN ('running', 'requires_action')";
+      if (guard?.generation !== undefined) {
+        where += ' AND COALESCE(queueGeneration, 1) = @guardGeneration';
+        params.guardGeneration = guard.generation;
+      }
+      return this.updateAgentRunIf(id, `UPDATE ${TABLES.agentRuns} SET ${sets.join(', ')} WHERE ${where}`, params);
     }
 
     async requeueAgentRunForRecovery(

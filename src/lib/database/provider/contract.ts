@@ -14,6 +14,7 @@ import type {
   IAgentConversationState,
   IAgentRunCheckpoint,
   AgentRunCheckpointWrite,
+  AgentRunExecutionGuard,
   IAgentPendingAction,
   IAgentMessageFeedback,
   AgentMessageFeedbackFilter,
@@ -2520,12 +2521,14 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * Update `heartbeatAt` for a run this worker still owns. Guarded by
    * `status = 'running' AND workerId = ?` so a worker that has already been
    * superseded (e.g. reclaimed by the reconciler) cannot resurrect a run by
-   * writing a fresh heartbeat to it.
+   * writing a fresh heartbeat to it. With `guard.generation`, also only while
+   * the row is still that execution's (see `AgentRunExecutionGuard`).
    */
   updateAgentRunHeartbeat(
     id: string,
     workerId: string,
     heartbeatAt: Date,
+    guard?: AgentRunExecutionGuard,
   ): Promise<IAgentRun | null>;
   /**
    * Record a cancellation request, scoped by tenantId + projectId (§12.11).
@@ -2546,12 +2549,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * `succeeded` by an abandoned `invoke()` call that eventually settles
    * (§12.12) — the CAS guard, not the caller's discretion, is the actual
    * protection. A paused (`requires_action`) run can be finalized as well:
-   * a cancel, or a continuation that completed inline.
+   * a cancel, or a continuation that completed inline. With `guard.generation`,
+   * only while the row is still that execution's: one that was handed off or
+   * recovered elsewhere is running again, and is not this execution's to end.
    */
   finalizeAgentRun(
     id: string,
     tenantId: string,
     data: Partial<Omit<IAgentRun, '_id' | 'tenantId' | 'createdAt'>>,
+    guard?: AgentRunExecutionGuard,
   ): Promise<IAgentRun | null>;
   /**
    * Puts a paused (`requires_action`) run back in the queue to continue its
