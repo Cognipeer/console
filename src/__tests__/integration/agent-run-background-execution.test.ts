@@ -1014,6 +1014,44 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
     }
   });
 
+  it('with durable runs, a handoff not done by the end of the drain neither fails the run nor counts as handed off', async () => {
+    process.env.AGENT_DURABLE_RUNS = 'true';
+    reloadConfig();
+    let release: (() => void) | undefined;
+    try {
+      hoisted.executeAgentChatLocal.mockImplementation(() => new Promise(() => undefined));
+      const run = await startQueued('conv-drain-handoff-slow');
+      const runId = String(run._id);
+      const job = runAgentJobLocal({ runId, tenantId, tenantDbName: dbName });
+      await vi.waitFor(() => {
+        expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
+      });
+      // The queue does not answer before the process would end.
+      hoisted.publish.mockImplementation(() => new Promise<void>((resolve) => { release = resolve; }));
+
+      const started = performance.now();
+      const drained = await drainLocalAgentRuns(50);
+
+      // Bounded: the drain does not wait on the handoff past its reserve (at least the time a
+      // handoff gives a running tool and the flush: 3.5 s).
+      expect(performance.now() - started).toBeLessThan(4_500);
+      expect(drained).toEqual({ settled: 0, interrupted: 0, handedOff: 0 });
+      const db = await getDatabase();
+      await db.switchToTenant(dbName);
+      // Not failed: requeued, and the reconciler republishes a queued run the queue never got.
+      const after = await db.getAgentRunById(runId, tenantId, PROJECT_ID);
+      expect(after?.status).toBe('queued');
+      expect(after?.errorReason ?? null).toBeNull();
+      release?.();
+      await job;
+    } finally {
+      release?.();
+      hoisted.publish.mockReset();
+      delete process.env.AGENT_DURABLE_RUNS;
+      reloadConfig();
+    }
+  });
+
   it('with durable runs, a handed-off run that another node already took is not ended by the old execution', async () => {
     process.env.AGENT_DURABLE_RUNS = 'true';
     reloadConfig();
@@ -1026,7 +1064,7 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
         const cell = request.cancellationCell;
         if (cell) {
           cell.checkpointer = {
-            wrote: true, sealed: false, stop: () => undefined, flush: async () => true,
+            wrote: true, sealed: false, stop: () => undefined, idle: async () => undefined, flush: async () => true, handoff: async () => true,
             onStateChange: () => true, beforeTool: async () => undefined, afterTool: () => undefined,
           };
         }
@@ -1086,7 +1124,7 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
         cell = request.cancellationCell;
         if (cell) {
           cell.checkpointer = {
-            wrote: false, sealed: false, stop: () => { stoppedWhileCancelled.push(Boolean(cell?.cancelled)); }, flush: async () => true,
+            wrote: false, sealed: false, stop: () => { stoppedWhileCancelled.push(Boolean(cell?.cancelled)); }, idle: async () => undefined, flush: async () => true, handoff: async () => true,
             onStateChange: () => false, beforeTool: async () => undefined, afterTool: () => undefined,
           };
         }

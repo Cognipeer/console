@@ -24,6 +24,8 @@ const log = createLogger('lifecycle');
 interface ShutdownHandler {
   name: string;
   handler: () => Promise<void>;
+  /** Runs before every handler without it (see `registerShutdownHandler`). */
+  first?: boolean;
 }
 
 const handlers: ShutdownHandler[] = [];
@@ -33,9 +35,20 @@ let initialized = false;
 /**
  * Register a handler that will be called during graceful shutdown.
  * Handlers run in LIFO order (last registered = first to run).
+ *
+ * `first`: the handler runs before every handler registered without it
+ * (LIFO among themselves), whenever it was registered. For work the shutdown
+ * timeout must not cut short because handlers registered later (a lazy flush)
+ * took the time: handing running agent runs to another node.
  */
-export function registerShutdownHandler(name: string, handler: () => Promise<void>): void {
-  handlers.push({ name, handler });
+export function registerShutdownHandler(name: string, handler: () => Promise<void>, options?: { first?: boolean }): void {
+  handlers.push({ name, handler, ...(options?.first ? { first: true } : {}) });
+}
+
+/** The order shutdown runs the handlers in: the `first` ones, then the rest, each LIFO. */
+export function shutdownHandlerOrder(list: ReadonlyArray<{ name: string; first?: boolean }> = handlers): string[] {
+  const reversed = [...list].reverse();
+  return [...reversed.filter((h) => h.first), ...reversed.filter((h) => !h.first)].map((h) => h.name);
 }
 
 /**
@@ -56,9 +69,10 @@ async function shutdown(signal: string): Promise<void> {
   }, timeout);
   timer.unref();
 
-  // Run handlers in reverse order (LIFO)
-  const reversedHandlers = [...handlers].reverse();
-  for (const { name, handler } of reversedHandlers) {
+  // Run handlers in reverse order (LIFO), the `first` ones before the rest.
+  const reversed = [...handlers].reverse();
+  const ordered = [...reversed.filter((h) => h.first), ...reversed.filter((h) => !h.first)];
+  for (const { name, handler } of ordered) {
     try {
       log.info(`Shutting down: ${name}`);
       await handler();

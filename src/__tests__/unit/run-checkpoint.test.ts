@@ -324,6 +324,92 @@ describe('run checkpointer: fencing', () => {
         expect(store.writes).toHaveLength(1);
     });
 
+    it('idle: a handoff waits for a tool with side effects still running and for the step with its result', async () => {
+        const { store, checkpointer } = setup();
+        const asked = [user('hi'), assistant('', [{ id: 'c1', name: 'send_email' }])];
+        checkpointer.onStateChange({ messages: asked, toolHistory: [] });
+        // Nothing running: idle at once.
+        await checkpointer.idle();
+
+        await checkpointer.beforeTool('send_email');
+        let idle = false;
+        void checkpointer.idle().then(() => { idle = true; });
+        await Promise.resolve();
+        expect(idle).toBe(false);
+        // A read-only tool ending changes nothing; the tool with side effects ending is not enough.
+        await checkpointer.beforeTool('search');
+        checkpointer.afterTool('search');
+        checkpointer.afterTool('send_email');
+        await Promise.resolve();
+        expect(idle).toBe(false);
+        // The step that holds its result: idle, and a flush now stores that result.
+        const answered = [...asked, toolResult('c1', 'send_email', 'sent')];
+        checkpointer.onStateChange({ messages: answered, toolHistory: [] });
+        await vi.waitFor(() => expect(idle).toBe(true));
+        expect(await checkpointer.flush()).toBe(true);
+        expect(store.doc?.messageCount).toBe(3);
+    });
+
+    it('idle: a tool still waiting for its step to be written counts as running', async () => {
+        const { checkpointer } = setup();
+        checkpointer.onStateChange({ messages: [user('hi'), assistant('', [{ id: 'c1', name: 'send_email' }])], toolHistory: [] });
+        const entering = checkpointer.beforeTool('send_email');
+        let idle = false;
+        void checkpointer.idle().then(() => { idle = true; });
+        await entering;
+        await Promise.resolve();
+        expect(idle).toBe(false);
+        checkpointer.afterTool('send_email');
+        checkpointer.onStateChange({ messages: [user('hi'), assistant('', [{ id: 'c1', name: 'send_email' }]), toolResult('c1', 'send_email')], toolHistory: [] });
+        await vi.waitFor(() => expect(idle).toBe(true));
+    });
+
+    it('handoff: a last step asking for tools none of which started is stored without the ask', async () => {
+        const { store, checkpointer } = setup();
+        const before = [user('hi'), assistant('', [{ id: 'c1', name: 'send_email' }]), toolResult('c1', 'send_email')];
+        checkpointer.onStateChange({ messages: before, toolHistory: [] });
+        // The model asked again; the handoff comes before the tool started.
+        checkpointer.onStateChange({ messages: [...before, assistant('', [{ id: 'c2', name: 'create_ticket' }])], toolHistory: [] });
+        expect(await checkpointer.handoff()).toBe(true);
+        expect(store.doc?.messageCount).toBe(3);
+        // From now on no tool with side effects starts here, and nothing more is written.
+        await expect(checkpointer.beforeTool('create_ticket')).rejects.toThrow(/another server/);
+        expect(store.doc?.messageCount).toBe(3);
+        // A tool that only reads is not held back.
+        await checkpointer.beforeTool('search');
+    });
+
+    it('handoff: a step whose tool started keeps its ask (that tool\'s outcome is unknown)', async () => {
+        const { store, checkpointer } = setup();
+        checkpointer.onStateChange({ messages: [user('hi'), assistant('', [{ id: 'c1', name: 'send_email' }])], toolHistory: [] });
+        await checkpointer.beforeTool('send_email');
+        expect(await checkpointer.handoff()).toBe(true);
+        expect(store.doc?.messageCount).toBe(2);
+    });
+
+    it('handoff: a last step that is not an ask is stored as it is', async () => {
+        const { store, checkpointer } = setup();
+        checkpointer.onStateChange({ messages: [user('hi'), assistant('', [{ id: 'c1', name: 'send_email' }]), toolResult('c1', 'send_email')], toolHistory: [] });
+        expect(await checkpointer.handoff()).toBe(true);
+        expect(store.doc?.messageCount).toBe(3);
+    });
+
+    it('idle: tools running side by side are all waited for; stop ends the wait', async () => {
+        const { checkpointer } = setup();
+        checkpointer.onStateChange({ messages: [user('hi'), assistant('', [{ id: 'c1', name: 'send_email' }, { id: 'c2', name: 'create_ticket' }])], toolHistory: [] });
+        await checkpointer.beforeTool('send_email');
+        await checkpointer.beforeTool('create_ticket');
+        checkpointer.afterTool('send_email');
+        // A step reported while one is still running does not count as the results' step.
+        checkpointer.onStateChange({ messages: [user('hi'), assistant('partial')], toolHistory: [] });
+        let idle = false;
+        void checkpointer.idle().then(() => { idle = true; });
+        await Promise.resolve();
+        expect(idle).toBe(false);
+        checkpointer.stop();
+        await vi.waitFor(() => expect(idle).toBe(true));
+    });
+
     it('a wrapped tool waits for the checkpoint and is not run when the run moved on', async () => {
         const { store, checkpointer } = setup();
         const run = vi.fn<(input: unknown) => Promise<string>>(async () => 'sent');

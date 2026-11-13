@@ -182,8 +182,22 @@ export interface RunCheckpointer {
     beforeTool(toolName: string, readOnly?: boolean): Promise<void>;
     /** After a tool with possible side effects finished: the next boundary is written. */
     afterTool(toolName: string, readOnly?: boolean): void;
+    /**
+     * Resolves once no tool with side effects is running (one waiting for its step's write
+     * counts) and the step holding the last one's result was reported. A handoff waits for it
+     * (bounded) so the run goes on with that result, not with an unknown outcome for a tool that
+     * was about to end.
+     */
+    idle(): Promise<void>;
     /** Writes the latest step now (shutdown). False when it could not be stored. */
     flush(): Promise<boolean>;
+    /**
+     * Shutdown handoff: no tool with side effects starts here any more, and the latest step is
+     * stored. When none is running, a last step that asked for tools is stored without that ask
+     * (none of them started): the next node asks the model again instead of reading that a tool
+     * which never ran has an unknown outcome. False when the step could not be stored.
+     */
+    handoff(): Promise<boolean>;
     /** Writes nothing more, and refuses tools with side effects (the run was handed to another node). */
     stop(): void;
     /** Something was written for this execution (so there is a checkpoint to delete at the end). */
@@ -227,6 +241,17 @@ async function encodeList(list: unknown[]): Promise<string[]> {
     return list.length > 0 ? [await encodeStoredStateAsync(JSON.stringify(list))] : [];
 }
 
+/**
+ * The state without its last message when that one asks for tools: for a handoff, when none of
+ * those tools started (a step stored with an ask and no results reads as "outcome unknown").
+ */
+function withoutUnstartedAsk(state: StateLike): StateLike {
+    const messages = Array.isArray(state.messages) ? state.messages : [];
+    const last = toPlainMessage(messages[messages.length - 1]) as unknown as LooseMessage | null;
+    if (!last || last.role !== 'assistant' || !Array.isArray(last.tool_calls) || last.tool_calls.length === 0) return state;
+    return { ...state, messages: messages.slice(0, -1) };
+}
+
 export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheckpointer {
     const now = options.now ?? Date.now;
     const isReadOnly = options.isReadOnlyTool ?? (() => false);
@@ -245,6 +270,22 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
     let wrote = false;
     /** Numbers this execution's writes (a segment store keys each write by it). */
     let seq = 0;
+    /**
+     * Tools with side effects running now (counted from the wait for their step's write), and
+     * whether one ended after the latest step reported. `quiesced`: a handoff began, and no
+     * such tool starts here any more.
+     */
+    let quiesced = false;
+    let toolsRunning = 0;
+    let toolResultUnreported = false;
+    let idleWaiters: Array<() => void> = [];
+    const isIdle = () => stopped || fenced || sealed || (toolsRunning === 0 && !toolResultUnreported);
+    const wakeIdle = () => {
+        if (idleWaiters.length === 0 || !isIdle()) return;
+        const waiters = idleWaiters;
+        idleWaiters = [];
+        for (const wake of waiters) wake();
+    };
 
     const expiresAt = () => new Date(Math.max(options.deadlineAt, now()) + CHECKPOINT_TTL_SLACK_MS);
 
@@ -352,10 +393,8 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
         return true;
     };
 
-    /** Queues a write of the latest state; writes run one at a time, in order. */
-    const writeLatest = (): Promise<boolean> => {
-        const state = latest;
-        const version = latestVersion;
+    /** Queues a write of the latest state (or `state`); writes run one at a time, in order. */
+    const writeLatest = (state: StateLike | null = latest, version = latestVersion): Promise<boolean> => {
         if (!state) return chain;
         chain = chain.then(() => writeState(state, version)).catch((error: unknown) => {
             // Whether the store kept any of it is unknown (a timeout after the write landed): the
@@ -370,11 +409,40 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
         return chain;
     };
 
+    /** The step a tool with side effects asked from is stored, and this execution still holds the run. */
+    const checkBeforeTool = async (toolName: string): Promise<void> => {
+        if (!sealed) {
+            const target = latestVersion;
+            if (latest && writtenVersion < target) {
+                await writeLatest();
+            } else {
+                await chain;
+            }
+            if (fenced || stopped) throw new Error(RUN_MOVED_ON);
+            // Past the size cap the run cannot be continued elsewhere anyway; otherwise a step
+            // that is not stored would leave a continuing node unaware that this tool ran.
+            if (!sealed && writtenVersion < target) {
+                logger.warn('Tool not run: its step could not be stored', { runId: options.runId, toolName });
+                throw new Error(STEP_NOT_SAVED);
+            }
+        }
+        // Checked last: the write above may have waited long on a database that did not answer.
+        if (options.leaseHolds && !options.leaseHolds()) {
+            logger.warn('Tool not run: this execution may no longer hold the run', { runId: options.runId, toolName });
+            throw new Error(RUN_HOLD_LOST);
+        }
+    };
+
     return {
         onStateChange(state: unknown): boolean {
             if (stopped || fenced || sealed || !state || typeof state !== 'object') return false;
             latest = state as StateLike;
             latestVersion += 1;
+            // A step reported with no tool running holds the results of the ones that ended.
+            if (toolsRunning === 0 && toolResultUnreported) {
+                toolResultUnreported = false;
+                wakeIdle();
+            }
             if (sideEffectSinceWrite || now() - lastWriteAt >= options.intervalMs) {
                 sideEffectSinceWrite = false;
                 lastWriteAt = now();
@@ -386,37 +454,45 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
         async beforeTool(toolName: string, readOnly?: boolean): Promise<void> {
             if (fenced || stopped) throw new Error(RUN_MOVED_ON);
             if (readOnly ?? isReadOnly(toolName)) return;
-            if (!sealed) {
-                const target = latestVersion;
-                if (latest && writtenVersion < target) {
-                    await writeLatest();
-                } else {
-                    await chain;
-                }
-                if (fenced || stopped) throw new Error(RUN_MOVED_ON);
-                // Past the size cap the run cannot be continued elsewhere anyway; otherwise a step
-                // that is not stored would leave a continuing node unaware that this tool ran.
-                if (!sealed && writtenVersion < target) {
-                    logger.warn('Tool not run: its step could not be stored', { runId: options.runId, toolName });
-                    throw new Error(STEP_NOT_SAVED);
-                }
-            }
-            // Checked last: the write above may have waited long on a database that did not answer.
-            if (options.leaseHolds && !options.leaseHolds()) {
-                logger.warn('Tool not run: this execution may no longer hold the run', { runId: options.runId, toolName });
-                throw new Error(RUN_HOLD_LOST);
+            // A handoff began: not run, and its step is not written as having asked for it.
+            if (quiesced) throw new Error(RUN_MOVED_ON);
+            toolsRunning += 1;
+            try {
+                await checkBeforeTool(toolName);
+            } catch (error) {
+                // Not run: the step that reports its refusal is what a handoff waits for now.
+                toolsRunning = Math.max(0, toolsRunning - 1);
+                toolResultUnreported = true;
+                throw error;
             }
         },
         afterTool(toolName: string, readOnly?: boolean): void {
-            if (!(readOnly ?? isReadOnly(toolName))) sideEffectSinceWrite = true;
+            if (readOnly ?? isReadOnly(toolName)) return;
+            sideEffectSinceWrite = true;
+            toolsRunning = Math.max(0, toolsRunning - 1);
+            toolResultUnreported = true;
+        },
+        idle(): Promise<void> {
+            if (isIdle()) return Promise.resolve();
+            return new Promise((resolve) => {
+                idleWaiters.push(resolve);
+            });
         },
         async flush(): Promise<boolean> {
             if (fenced || sealed) return false;
             if (latest && latestWritten !== latest) return writeLatest();
             return chain;
         },
+        async handoff(): Promise<boolean> {
+            quiesced = true;
+            if (fenced || sealed) return false;
+            const state = latest && toolsRunning === 0 && !toolResultUnreported ? withoutUnstartedAsk(latest) : latest;
+            if (state && latestWritten !== state) return writeLatest(state, latestVersion);
+            return chain;
+        },
         stop(): void {
             stopped = true;
+            wakeIdle();
         },
         get wrote() {
             return wrote;

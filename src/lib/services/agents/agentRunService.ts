@@ -2713,7 +2713,10 @@ const DRAIN_EVENTS_MAX_WAIT_MS = 5_000;
 export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled: number; interrupted: number; handedOff: number }> {
   const initial = [...activeLocalRuns.values()];
   if (initial.length === 0) return { settled: 0, interrupted: 0, handedOff: 0 };
-  const timer = delaySentinel(timeoutMs, TIMEOUT_SENTINEL);
+  // With durable runs here, the wait for runs to finish ends early enough that handing off the
+  // rest fits in the drain too (a slow database stretches every flush and requeue).
+  const handoffReserveMs = initial.some((run) => run.durable) ? Math.min(HANDOFF_RESERVE_MS, timeoutMs) : 0;
+  const timer = delaySentinel(timeoutMs - handoffReserveMs, TIMEOUT_SENTINEL);
   try {
     await Promise.race([Promise.allSettled(initial.map((run) => run.settled)), timer.promise]);
   } finally {
@@ -2723,20 +2726,40 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
   let interrupted = 0;
   let handedOff = 0;
   const ended: Array<{ local: LocalRun; run: IAgentRun }> = [];
-  for (const local of leftovers) {
-    // Durable runs go on elsewhere: the latest step is stored and the run is queued again.
-    if (local.durable) {
-      const handed = await handOffLocalRun(local).catch((error: unknown) => {
-        logger.warn('Could not hand an agent run off; it ends interrupted', {
-          runId: local.runId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        return null;
+  // Durable runs go on elsewhere: the latest step is stored and the run is queued again. All at
+  // once: one after another, a slow database runs the shutdown out of time with runs still here.
+  // A handoff not done within the reserve is left as it is: if its requeue does not land before
+  // the process ends, the run is orphaned and the reconciler continues it (never failed here).
+  const handoff = new Map<string, 'pending' | 'handed' | 'failed'>();
+  const handoffs = leftovers.filter((local) => local.durable).map(async (local) => {
+    handoff.set(local.runId, 'pending');
+    const handed = await handOffLocalRun(local).catch((error: unknown) => {
+      logger.warn('Could not hand an agent run off; it ends interrupted', {
+        runId: local.runId,
+        error: error instanceof Error ? error.message : String(error),
       });
-      if (handed) {
-        handedOff += 1;
-        continue;
-      }
+      return null;
+    });
+    handoff.set(local.runId, handed ? 'handed' : 'failed');
+  });
+  if (handoffs.length > 0) {
+    const handoffTimer = delaySentinel(Math.max(handoffReserveMs, HANDOFF_TOOL_SETTLE_MAX_MS + HANDOFF_FLUSH_MAX_MS), TIMEOUT_SENTINEL);
+    try {
+      await Promise.race([Promise.all(handoffs), handoffTimer.promise]);
+    } finally {
+      handoffTimer.clear();
+    }
+  }
+  let stillHandingOff = 0;
+  for (const local of leftovers) {
+    const state = handoff.get(local.runId);
+    if (state === 'handed') {
+      handedOff += 1;
+      continue;
+    }
+    if (state === 'pending') {
+      stillHandingOff += 1;
+      continue;
     }
     try {
       const completedAt = new Date();
@@ -2791,12 +2814,22 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
     local.abort();
   }
   const result = { settled: initial.length - leftovers.length, interrupted, handedOff };
-  logger.info('Agent runs drained for shutdown', { ...result, timeoutMs });
+  logger.info('Agent runs drained for shutdown', { ...result, ...(stillHandingOff ? { stillHandingOff } : {}), timeoutMs });
   return result;
 }
 
 /** How long a shutdown waits for a run's last checkpoint before handing it off with the one before. */
 const HANDOFF_FLUSH_MAX_MS = 2_000;
+
+/** How long a handoff waits for a tool with side effects still running to end (and its step). */
+const HANDOFF_TOOL_SETTLE_MAX_MS = 1_500;
+
+/**
+ * The end of the shutdown drain kept for handing durable runs off: a running tool's end
+ * (`HANDOFF_TOOL_SETTLE_MAX_MS`), the flush (`HANDOFF_FLUSH_MAX_MS`), the requeue and the
+ * publish, for all of them at once.
+ */
+const HANDOFF_RESERVE_MS = 4_000;
 
 /**
  * Durable runs: stores the turn's latest step, queues the run again for
@@ -2811,9 +2844,17 @@ async function handOffLocalRun(local: LocalRun): Promise<IAgentRun | null> {
   const checkpointer = local.cell.checkpointer;
   if (checkpointer?.sealed) return null;
   if (checkpointer) {
+    // A tool with side effects still running gets a moment to end, so the run goes on with its
+    // result instead of an unknown outcome (a deploy would otherwise leave one in many runs).
+    const settle = delaySentinel(HANDOFF_TOOL_SETTLE_MAX_MS, TIMEOUT_SENTINEL);
+    try {
+      await Promise.race([checkpointer.idle(), settle.promise]);
+    } finally {
+      settle.clear();
+    }
     const timer = delaySentinel(HANDOFF_FLUSH_MAX_MS, TIMEOUT_SENTINEL);
     try {
-      await Promise.race([checkpointer.flush(), timer.promise]);
+      await Promise.race([checkpointer.handoff(), timer.promise]);
     } finally {
       timer.clear();
     }
