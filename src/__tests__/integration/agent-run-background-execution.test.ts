@@ -1014,6 +1014,33 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
     }
   });
 
+  it('with durable runs off, a run moved here from a node that stopped is not run again from the start', async () => {
+    const run = await startQueued('conv-moved-flag-off');
+    const runId = String(run._id);
+    const db = await getDatabase();
+    await db.switchToTenant(dbName);
+    // A node with durable runs claimed it and handed it off (or it was recovered).
+    await db.claimAgentRun(runId, tenantId, 'node-a', new Date(), { durable: true });
+    await db.writeAgentRunCheckpoint({
+      runId, tenantId, conversationId: 'conv-moved-flag-off', generation: 1, seq: 1, mode: 'reset', head: 'h',
+      messageChunks: ['m'], toolHistoryChunks: [], messageCount: 1, toolHistoryCount: 0, sizeBytes: 2, schema: 1,
+      expiresAt: new Date(Date.now() + 3_600_000),
+    });
+    await db.requeueAgentRunForRecovery(runId, tenantId, {}, { reason: 'handoff', deadlineAt: new Date(Date.now() + 60_000) });
+    process.env.AGENT_DURABLE_RUNS = 'false';
+    reloadConfig();
+    try {
+      await runAgentJobLocal({ runId, tenantId, tenantDbName: dbName });
+      expect(hoisted.executeAgentChatLocal).not.toHaveBeenCalled();
+      expect(await db.getAgentRunById(runId, tenantId, PROJECT_ID)).toMatchObject({ status: 'failed', errorReason: 'worker_lost' });
+      // Its checkpoint goes with it: nothing will continue from it.
+      expect(await db.findAgentRunCheckpoint(runId, tenantId)).toBeNull();
+    } finally {
+      delete process.env.AGENT_DURABLE_RUNS;
+      reloadConfig();
+    }
+  });
+
   it('with durable runs, a handoff not done by the end of the drain neither fails the run nor counts as handed off', async () => {
     process.env.AGENT_DURABLE_RUNS = 'true';
     reloadConfig();

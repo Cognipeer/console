@@ -1980,7 +1980,8 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
     const executionGuard = { generation: claimed.queueGeneration ?? 1 };
     const checkpointOf: { cell?: AgentRunCancellationCell } = {};
     const dropCheckpoint = async () => {
-      if (!durable || (!checkpointOf.cell?.checkpointer?.wrote && !claimed.lastRecoveredAt)) return;
+      // A run moved here may have one from the node before (also on a node with durable runs off).
+      if (!claimed.lastRecoveredAt && (!durable || !checkpointOf.cell?.checkpointer?.wrote)) return;
       checkpointOf.cell?.checkpointer?.stop();
       await db.deleteAgentRunCheckpoint(runId, tenantId).catch((error) => {
         logger.warn('Could not delete the run checkpoint (its TTL removes it)', {
@@ -2172,6 +2173,18 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       // A run taken from a node that stopped: go on from its checkpoint, or finish it if its
       // turn was already written, or run the turn again when it never reached a side effect.
       let recovery: LoadedCheckpoint | undefined;
+      if (!durableTurn && claimed.lastRecoveredAt) {
+        // Moved here from a node that stopped, but this node does not continue runs (durable runs
+        // off, for instance before a rollback): running the turn again from the start could
+        // repeat what it already did, so it ends the way such a run ends with durable runs off.
+        stopAllTimers();
+        await finalize(
+          'failed',
+          { errorReason: 'worker_lost', errorMessage: UNRECOVERABLE_RUN_MESSAGE },
+          { errorReason: 'worker_lost', message: UNRECOVERABLE_RUN_MESSAGE },
+        );
+        return;
+      }
       if (durableTurn && claimed.lastRecoveredAt) {
         const plan = await planRunRecovery(db, claimed, durableTurn.turnKey);
         logger.info('Agent run recovered on this node', { runId, plan: plan.kind, reason: claimed.lastRecoveryReason });
