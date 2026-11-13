@@ -261,6 +261,43 @@ describe('MCP PII protection with a guardrail on the server', () => {
     expect((logged.requestPayload.arguments as { email: string }).email).toMatch(TOKEN);
   });
 
+  it('gives the reason of a block with tokens, on both sides', async () => {
+    const reason = 'Path /home/ayse@example.com/notes is deny-listed';
+    mcpGuardrailHook.current = guardrail({ beforeToolCall: async () => ({ allowed: false, reason }) });
+    const pre = executeMcpToolLocal(guarded(), 'find_contact', { email: 'ayse@example.com' });
+    await expect(pre).rejects.toThrow(/^Blocked by Aegis shield: Path \/home\/\[EMAIL_[a-z]{8}\]\/notes is deny-listed$/);
+
+    mcpGuardrailHook.current = guardrail({ afterToolCall: async () => ({ allowed: false, reason }) });
+    remoteCallTool.mockImplementation(echo);
+    const post = executeMcpToolLocal(guarded(), 'find_contact', { email: 'ayse@example.com' });
+    await expect(post).rejects.toThrow(/^Response blocked by Aegis shield: Path \/home\/\[EMAIL_[a-z]{8}\]\/notes is deny-listed$/);
+
+    // A server without PII protection gives the reason as it is.
+    mcpGuardrailHook.current = guardrail({ beforeToolCall: async () => ({ allowed: false, reason }) });
+    const plain = executeMcpToolLocal(guarded({ metadata: {} } as Partial<IMcpServer>), 'find_contact', { email: 'ayse@example.com' });
+    await expect(plain).rejects.toThrow(`Blocked by Aegis shield: ${reason}`);
+  });
+
+  it('hands the guardrail a masker for its finding messages, with the call’s tokens', async () => {
+    let masked: string | undefined;
+    const sent: string[] = [];
+    mcpGuardrailHook.current = guardrail({
+      beforeToolCall: async (ctx: McpGuardrailContext) => {
+        masked = await getMcpGuardrailLogView(ctx)?.mask?.('Matched ayse@example.com in the arguments');
+        return { allowed: true };
+      },
+    });
+    remoteCallTool.mockImplementation(async (_config: unknown, _tool: string, args: Record<string, unknown>) => {
+      sent.push(String(args.email));
+      return echo(_config, _tool, args);
+    });
+
+    await executeMcpToolLocal(guarded(), 'find_contact', { email: 'ayse@example.com' });
+
+    expect(masked).toBe(`Matched ${sent[0]} in the arguments`);
+    expect(sent[0]).toMatch(TOKEN);
+  });
+
   it('sends arguments the guardrail rewrote, tokenized', async () => {
     mcpGuardrailHook.current = guardrail({
       beforeToolCall: async () => ({ allowed: true, args: { email: 'other@example.com' } }),

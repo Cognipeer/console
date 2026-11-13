@@ -174,6 +174,9 @@ describe('the guardrail of a server', () => {
 
   it('still takes the mode an older client sends', () => {
     expect(parseGuardrail({ mode: 'enforce' })).toEqual({ mode: 'enforce' });
+    expect(parseGuardrail({ mode: 'monitor' })).toEqual({ mode: 'monitor' });
+    expect(parseGuardrail({ guardrailKey: '   ' })).toEqual({ mode: 'off' });
+    expect(parseGuardrail('checks')).toBeUndefined();
     expect(parseGuardrail({ mode: 'monitor', guardrailKey: 'checks' })).toEqual({ guardrailKey: 'checks', mode: 'monitor' });
     expect(parseGuardrail({ mode: 'enforce', guardrailKey: 'checks' })).toEqual({ guardrailKey: 'checks', mode: 'enforce' });
   });

@@ -59,6 +59,7 @@ import {
   piiLoggedPayloads,
   preparePiiLogView,
   type McpPiiLog,
+  type McpPiiRoundTrip,
 } from './mcpPii';
 import {
   applyToolReviewDecision,
@@ -2867,6 +2868,17 @@ async function withConsoleIdentityScrubbed<T>(
   }
 }
 
+/**
+ * The reason a guardrail block gives, as the error carries it. For a call with
+ * PII protection the values in it (a deny-listed path, a quoted word) become the
+ * call's tokens: the error is kept by the request log and an agent's trace. A
+ * reason that cannot be masked is left out.
+ */
+async function blockReasonFor(reason: string | undefined, pii: McpPiiRoundTrip | null): Promise<string | undefined> {
+  if (!reason || !pii) return reason;
+  return pii.protectText(reason).catch(() => undefined);
+}
+
 export async function executeMcpToolLocal(
   server: IMcpServer,
   toolName: string,
@@ -2940,20 +2952,22 @@ export async function executeMcpToolLocal(
   // even a call the guardrail blocks is logged without the values.
   const pii = await openMcpPiiRoundTrip(server, sourceType, realToolName);
   const tokenizedArgs = pii ? await pii.protect(args) : undefined;
-  if (tokenizedArgs) {
+  if (pii && tokenizedArgs) {
     markPiiArgumentsView(args, tokenizedArgs);
-    setMcpGuardrailLogView(guardCtx, { args: tokenizedArgs });
+    // Finding messages can quote a value (a deny-listed path): logged with the same tokens.
+    setMcpGuardrailLogView(guardCtx, { args: tokenizedArgs, mask: (text) => pii.protectText(text) });
   }
 
   let effectiveArgs = args;
   if (guardrailMode !== 'off') {
     const verdict = await guardrail.beforeToolCall(guardCtx, args);
     if (!verdict.allowed && guardrailMode === 'enforce') {
+      const reason = await blockReasonFor(verdict.reason, pii);
       // TODO(v1.3.0): rename to `Blocked by guardrail` once the operator
       // runbooks and log greps that match this exact sentence have been
       // updated. Both strings below are load-bearing OUTSIDE this repo — do
       // not "clean them up" with the rest of the Aegis removal.
-      throw new Error(`Blocked by Aegis shield${verdict.reason ? `: ${verdict.reason}` : ''}`);
+      throw new Error(`Blocked by Aegis shield${reason ? `: ${reason}` : ''}`);
     }
     if (verdict.args) effectiveArgs = verdict.args;
   }
@@ -3046,8 +3060,9 @@ export async function executeMcpToolLocal(
     if (pii) setMcpGuardrailLogView(guardCtx, { result: { value: upstreamResult } });
     const verdict = await guardrail.afterToolCall(guardCtx, result);
     if (!verdict.allowed && guardrailMode === 'enforce') {
+      const reason = await blockReasonFor(verdict.reason, pii);
       // TODO(v1.3.0): see the `tool.pre` throw above — same runbook contract.
-      throw new Error(`Response blocked by Aegis shield${verdict.reason ? `: ${verdict.reason}` : ''}`);
+      throw new Error(`Response blocked by Aegis shield${reason ? `: ${reason}` : ''}`);
     }
     if (verdict.result !== undefined) result = verdict.result;
   }

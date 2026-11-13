@@ -69,14 +69,22 @@ interface AgentToolSpec {
     /**
      * For a tool whose values must not be stored (a tool of an MCP server with
      * PII protection): what the evaluation log keeps instead, the arguments and
-     * the result as they crossed to the upstream. The hooks still judge the real
-     * values. A side the view cannot give is withheld from the log.
+     * the result as they crossed to the upstream, and finding messages masked
+     * the same way. The hooks still judge the real values. A side the view cannot
+     * give is withheld from the log.
      */
     logView?: {
-        args(args: Record<string, unknown>): Promise<Record<string, unknown> | undefined>;
+        /** Once per call, before the hooks run: the arguments as they leave, and the masker for finding messages. */
+        open(args: Record<string, unknown>): Promise<AgentToolLogView>;
         /** Called after the call returned, with the arguments it was made with. */
         result(args: Record<string, unknown>): unknown;
     };
+}
+
+/** What the evaluation log of one protected call may keep. */
+export interface AgentToolLogView {
+    args?: Record<string, unknown>;
+    mask?: (text: string) => Promise<string>;
 }
 
 /** What the evaluation log keeps for a side of a protected call that has no tokenized view. */
@@ -230,12 +238,15 @@ export function createAgentToolGuard(input: {
 
             return async (args: A, ...rest: unknown[]) => {
                 const scope = scopeForCall();
+                // Made before the hooks run: a call they block is logged without the values too.
+                const view: AgentToolLogView | undefined = logView
+                    ? await logView.open(args).catch((): AgentToolLogView => ({}))
+                    : undefined;
+                const logMask = view?.mask ? { logMask: view.mask } : {};
                 try {
                     let safeArgs = args;
 
                     if (callPreKeys.length > 0) {
-                        // The view is made before the hook runs: a call it blocks is logged without the values too.
-                        const loggedArgs = logView ? await logView.args(args).catch(() => undefined) : undefined;
                         const pre = await runHook({
                             contractVersion: GUARDRAIL_CONTRACT_VERSION,
                             hook: 'tool.pre',
@@ -247,11 +258,12 @@ export function createAgentToolGuard(input: {
                             }),
                             scope,
                             guardrailKeys: callPreKeys,
-                            ...(logView
+                            ...(view
                                 ? {
-                                    logText: loggedArgs
-                                        ? toolCallSubject({ toolName: spec.name, args: loggedArgs, providerRef }).text
+                                    logText: view.args
+                                        ? toolCallSubject({ toolName: spec.name, args: view.args, providerRef }).text
                                         : WITHHELD_LOG_TEXT,
+                                    ...logMask,
                                 }
                                 : {}),
                         });
@@ -275,7 +287,7 @@ export function createAgentToolGuard(input: {
                     if (callPostKeys.length === 0) return result;
 
                     let logText: string | undefined;
-                    if (logView) {
+                    if (logView && view) {
                         const loggedResult = logView.result(safeArgs);
                         logText = loggedResult === undefined
                             ? WITHHELD_LOG_TEXT
@@ -292,7 +304,7 @@ export function createAgentToolGuard(input: {
                         }),
                         scope,
                         guardrailKeys: callPostKeys,
-                        ...(logText !== undefined ? { logText } : {}),
+                        ...(logText !== undefined ? { logText, ...logMask } : {}),
                     });
                     if (post.decision === 'block') throw new GuardrailEnforcementError('blocked', post);
                     return post.subject?.kind === 'tool_result' ? (post.subject.result as R) : result;

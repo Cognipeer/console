@@ -3,7 +3,7 @@
  * turned into agent-sdk tools, and the cleanup of what they open.
  */
 
-import { type AgentToolGuard, agentToolPolicyName, protectBuiltTool } from './agentToolGuard';
+import { type AgentToolGuard, type AgentToolLogView, agentToolPolicyName, protectBuiltTool } from './agentToolGuard';
 import { type AgentRuntimeContext, resolveRuntimeHeaders, runtimeHeaderPolicyFromMetadata, describeRuntimeAuth } from '@/lib/services/runtimeContext';
 import { type ConsoleIdentityCaller, consoleIdentityCallerOf } from '@/lib/iam/consoleIdentity';
 import type { ToolInterface as AgentSdkToolInterface } from '@cognipeer/agent-sdk';
@@ -45,10 +45,11 @@ const logger = createLogger('agents');
  */
 function mcpPiiGuardLogView(server: IMcpServer, sourceType: McpSourceType, toolName: string) {
     return {
-        args: async (args: Record<string, unknown>) => {
+        open: async (args: Record<string, unknown>): Promise<AgentToolLogView> => {
             const roundTrip = await openMcpPiiRoundTrip(server, sourceType, toolName);
             // No round trip (the policy is turned off): the values go to the upstream as they are.
-            return roundTrip ? roundTrip.protect(args) : args;
+            if (!roundTrip) return { args, mask: async (text) => text };
+            return { args: await roundTrip.protect(args), mask: (text) => roundTrip.protectText(text) };
         },
         result: (args: Record<string, unknown>) => {
             const logged = piiLogOf(args);

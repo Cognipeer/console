@@ -1491,6 +1491,25 @@ function maskTextForLogging(text: string, findings: readonly GuardrailFinding[])
  * request's AsyncLocalStorage scope is still in place; `fireAndForget` then
  * reopens a snapshot of it for the write itself.
  */
+/** What the evaluation log keeps of a finding message whose call withholds its values (`logText`). */
+const WITHHELD_FINDING_MESSAGE = 'Not logged: PII protection is on for this call';
+
+/**
+ * A finding message as the evaluation log keeps it. A message can quote a value
+ * (a deny-listed path, a matched word, a model's explanation), so for a call
+ * logged with `logText` it goes through the caller's `logMask`, and is withheld
+ * when there is none or masking fails.
+ */
+async function loggedFindingMessage<S extends HookSubject>(call: HookCall<S>, message: string): Promise<string> {
+  if (call.logText === undefined || !message) return message;
+  if (!call.logMask) return WITHHELD_FINDING_MESSAGE;
+  try {
+    return await call.logMask(message);
+  } catch {
+    return WITHHELD_FINDING_MESSAGE;
+  }
+}
+
 function logHookEvaluation<S extends HookSubject>(params: {
   call: HookCall<S>;
   record: IGuardrailV2;
@@ -1520,6 +1539,17 @@ function logHookEvaluation<S extends HookSubject>(params: {
   const passed = !verdict.findings.some((finding) => finding.block);
 
   fireAndForget('guardrail-eval-log', async () => {
+    // Messages first, outside the tenant scope: masking one may scan it.
+    const messages = await Promise.all(verdict.findings.map((finding) => loggedFindingMessage(call, finding.message)));
+    const findings = verdict.findings.map((finding, index) => ({
+      ...finding,
+      message: messages[index],
+      // Never persist raw PII/banned values; keep a hint of the shape only —
+      // and not even that when the caller withholds the values (`logText`).
+      value: finding.value && call.logText === undefined
+        ? `${finding.value.slice(0, 2)}…(${finding.value.length} chars)`
+        : undefined,
+    }));
     // A fresh tenant scope: the runHook scope has usually exited by the time
     // this runs, and `switchToTenant` in a detached task is the cross-tenant
     // race in its purest form.
@@ -1537,19 +1567,12 @@ function logHookEvaluation<S extends HookSubject>(params: {
         target: hook,
         action: record.action,
         passed,
-        findings: verdict.findings.map((finding) => ({
-          ...finding,
-          // Never persist raw PII/banned values; keep a hint of the shape only —
-          // and not even that when the caller withholds the values (`logText`).
-          value: finding.value && call.logText === undefined
-            ? `${finding.value.slice(0, 2)}…(${finding.value.length} chars)`
-            : undefined,
-        })),
+        findings,
         inputText: maskTextForLogging(call.logText ?? subject.text, verdict.findings),
         latencyMs: verdict.latencyMs,
         source: scope.source,
         requestId: scope.requestId,
-        message: passed ? null : (verdict.findings[0]?.message ?? null),
+        message: passed ? null : (findings[0]?.message ?? null),
         hook,
         decision: verdict.decision,
         riskScore: verdict.riskScore,

@@ -198,13 +198,17 @@ function traceIdFor(ctx: McpGuardrailContext): string {
  * call of a server with PII protection is judged on the real values and logged
  * with their tokens, as the request log keeps it. `mcpService` sets it on the
  * call's context before each hook; keyed on the context object like the trace
- * id, so the seam (which an overlay may also implement) needs no new field.
+ * id, so the seam needs no new field. Any implementation of the seam must read
+ * it (`getMcpGuardrailLogView`): for a call with a view, nothing it stores may
+ * hold the values.
  */
 export interface McpGuardrailLogView {
   /** The arguments as they leave for the upstream. */
   args?: Record<string, unknown>;
   /** The result as the upstream returned it (`value` may itself be undefined). */
   result?: { value: unknown };
+  /** Text about the call (a finding message) as the log may keep it: the same tokens for the same values. */
+  mask?: (text: string) => Promise<string>;
 }
 
 const logViews = new WeakMap<McpGuardrailContext, McpGuardrailLogView>();
@@ -278,7 +282,8 @@ async function evaluate<S extends HookSubject>(
   ctx: McpGuardrailContext,
   hook: 'tool.pre' | 'tool.post',
   subject: S,
-  logText: string | undefined,
+  /** Set for a call whose values must not be stored: the text its log keeps, and the masker for finding messages. */
+  log: { text: string; mask?: (text: string) => Promise<string> } | undefined,
 ): Promise<HookVerdict<S> | null> {
   const tenantDbName = await resolveTenantDbName(ctx.tenantId);
   if (!tenantDbName) {
@@ -316,7 +321,7 @@ async function evaluate<S extends HookSubject>(
     subject,
     scope: buildScope(ctx, tenantDbName),
     guardrailKeys: [guardrailKey],
-    ...(logText !== undefined ? { logText } : {}),
+    ...(log ? { logText: log.text, ...(log.mask ? { logMask: log.mask } : {}) } : {}),
   });
 }
 
@@ -344,12 +349,14 @@ export const consoleMcpGuardrailHook: McpGuardrailHook = {
       // entry written against the stored name matches.
       const toolName = `${ctx.serverKey}/${ctx.toolName}`;
       const providerRef = `mcp:${ctx.serverKey}`;
-      const logged = logViews.get(ctx)?.args;
+      const view = logViews.get(ctx);
       const verdict = await evaluate(
         ctx,
         'tool.pre',
         toolCallSubject({ toolName, args, providerRef }),
-        logged ? toolCallSubject({ toolName, args: logged, providerRef }).text : undefined,
+        view?.args
+          ? { text: toolCallSubject({ toolName, args: view.args, providerRef }).text, mask: view.mask }
+          : undefined,
       );
       if (!verdict) return { allowed: true };
 
@@ -381,7 +388,7 @@ export const consoleMcpGuardrailHook: McpGuardrailHook = {
     try {
       const toolName = `${ctx.serverKey}/${ctx.toolName}`;
       const providerRef = `mcp:${ctx.serverKey}`;
-      const logged = logViews.get(ctx)?.result;
+      const view = logViews.get(ctx);
       const verdict = await evaluate(
         ctx,
         'tool.post',
@@ -395,7 +402,9 @@ export const consoleMcpGuardrailHook: McpGuardrailHook = {
           result,
           providerRef,
         }),
-        logged ? toolResultSubject({ toolName, args: {}, result: logged.value, providerRef }).text : undefined,
+        view?.result
+          ? { text: toolResultSubject({ toolName, args: {}, result: view.result.value, providerRef }).text, mask: view.mask }
+          : undefined,
       );
       if (!verdict) return { allowed: true };
 

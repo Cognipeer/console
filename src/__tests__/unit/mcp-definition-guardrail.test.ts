@@ -13,6 +13,7 @@ import type { IMcpTool } from '@/lib/database';
 
 const hoisted = vi.hoisted(() => ({
   runHook: vi.fn(),
+  resolveGuardrail: vi.fn(),
   findMcpServerByKey: vi.fn(),
   findTenantById: vi.fn(),
 }));
@@ -30,6 +31,7 @@ vi.mock('@/lib/database', () => ({
 
 vi.mock('@/lib/services/guardrail/hooks/engine', () => ({
   runHook: hoisted.runHook,
+  resolveGuardrail: hoisted.resolveGuardrail,
   ensureDefaultToolGuardrail: vi.fn(async () => ({ key: 'tool-safety-default' })),
   DEFAULT_TOOL_GUARDRAIL_KEY: 'tool-safety-default',
 }));
@@ -108,9 +110,15 @@ function blocks(marker: string, hook: 'input.pre' | 'tool.post' = 'tool.post') {
 
 const calls = (): HookCall[] => hoisted.runHook.mock.calls.map(([call]) => call as HookCall);
 
+/** The guardrail record as the definition check finds it; `changedAt` is its last save. */
+function guardrailSaved(changedAt: string) {
+  hoisted.resolveGuardrail.mockResolvedValue({ _id: 'gr-1', key: 'definition-rules', updatedAt: new Date(changedAt) });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   hoisted.runHook.mockImplementation(async (call: HookCall) => verdict(call));
+  guardrailSaved('2026-11-13T08:00:00Z');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -254,6 +262,38 @@ describe('the definition check guardrail', () => {
     hoisted.runHook.mockClear();
     await checkToolDefinitionsWithGuardrail({ ...base, metadata: first.metadata, tools: [tool('a'), tool('b')], all: true });
     expect(hoisted.runHook).toHaveBeenCalledTimes(4);
+  });
+
+  it('checks every definition again after the guardrail itself changes', async () => {
+    const first = await checkToolDefinitionsWithGuardrail({ ...base, metadata: selected, tools: [tool('a'), tool('b')] });
+    hoisted.runHook.mockClear();
+    await checkToolDefinitionsWithGuardrail({ ...base, metadata: first.metadata, tools: [tool('a'), tool('b')] });
+    expect(hoisted.runHook).not.toHaveBeenCalled();
+
+    guardrailSaved('2026-11-13T09:30:00Z');
+    const after = await checkToolDefinitionsWithGuardrail({ ...base, metadata: first.metadata, tools: [tool('a'), tool('b')] });
+    expect(hoisted.runHook).toHaveBeenCalledTimes(4);
+    expect(hoisted.resolveGuardrail).toHaveBeenLastCalledWith('t_db', 'definition-rules', 'proj-a');
+    expect(getDefinitionGuardrail(after.metadata)?.version).not.toBe(getDefinitionGuardrail(first.metadata)?.version);
+  });
+
+  it('checks a few definitions at a time and keeps the results in tool order', async () => {
+    let running = 0;
+    let most = 0;
+    hoisted.runHook.mockImplementation(async (call: HookCall) => {
+      running += 1;
+      most = Math.max(most, running);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      running -= 1;
+      return call.hook === 'tool.post' ? verdict(call, { findings: [finding({ block: false, action: 'flag' })] }) : verdict(call);
+    });
+    const names = Array.from({ length: 10 }, (_, i) => `t${i}`);
+    const result = await checkToolDefinitionsWithGuardrail({ ...base, metadata: selected, tools: names.map((name) => tool(name)) });
+
+    expect(most).toBeGreaterThan(1);
+    expect(most).toBeLessThanOrEqual(4);
+    expect(Object.keys(result.findings)).toEqual(names);
+    expect(Object.keys(getDefinitionGuardrail(result.metadata)?.checked ?? {})).toEqual(names);
   });
 
   it('reports a block as new only when the same definition was not blocked before', async () => {
@@ -407,6 +447,21 @@ describe('the evaluation log of the MCP bridge', () => {
     expect(pre.logText).toBe('[EMAIL_kqzvtmwb]');
     expect(post.subject.text).toContain('ayse@example.com');
     expect(post.logText).toBe('[EMAIL_kqzvtmwb]');
+    // No masker in the view: the engine withholds the finding messages.
+    expect(pre.logMask).toBeUndefined();
+  });
+
+  it('hands the engine the call’s masker for finding messages', async () => {
+    const ctx = context();
+    const mask = async (text: string) => text.replaceAll('ayse@example.com', '[EMAIL_kqzvtmwb]');
+    setMcpGuardrailLogView(ctx, { args: { email: '[EMAIL_kqzvtmwb]' }, mask });
+    await consoleMcpGuardrailHook.beforeToolCall(ctx, { email: 'ayse@example.com' });
+    setMcpGuardrailLogView(ctx, { result: { value: { owner: '[EMAIL_kqzvtmwb]' } } });
+    await consoleMcpGuardrailHook.afterToolCall(ctx, { owner: 'ayse@example.com' });
+
+    const [pre, post] = calls();
+    expect(pre.logMask).toBe(mask);
+    expect(post.logMask).toBe(mask);
   });
 
   it('keeps an empty upstream result as empty, never the result the guardrail judged', async () => {

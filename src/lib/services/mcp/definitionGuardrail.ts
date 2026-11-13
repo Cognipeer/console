@@ -16,7 +16,8 @@
  *
  * Results are kept per tool with the hash of the definition they were made for
  * (`metadata.definitionGuardrail.checked`), so a refresh checks only new and
- * changed definitions. Saving the selection checks every tool again.
+ * changed definitions. Saving the selection, or a change to the guardrail
+ * itself, checks every tool again.
  */
 import { randomUUID } from 'node:crypto';
 import type { IMcpTool, McpSourceType } from '@/lib/database';
@@ -27,7 +28,7 @@ import {
   toolResultSubject,
 } from '@/lib/services/guardrail/hooks/contract';
 import type { HookScope, HookSubject, HookVerdict } from '@/lib/services/guardrail/hooks/contract';
-import { runHook } from '@/lib/services/guardrail/hooks/engine';
+import { resolveGuardrail, runHook } from '@/lib/services/guardrail/hooks/engine';
 import { createLogger } from '@/lib/core/logger';
 import type { McpDefinitionFinding, McpDefinitionSeverity } from './definitionScan';
 import { isPinnedSource, toolDefinitionHash } from './toolSecurity';
@@ -38,6 +39,8 @@ type Metadata = Record<string, unknown>;
 
 const MAX_FINDINGS_PER_TOOL = 4;
 const MAX_EXCERPT_CHARS = 200;
+/** Definitions checked at once: a guardrail with a model-backed check is a model call per hook. */
+const CHECK_CONCURRENCY = 4;
 /** Text families only: tool access rules judge calls, not definitions. */
 const DEFINITION_FAMILIES = POLICY_FAMILIES.filter((family) => family !== 'tool_access');
 const DEFINITION_HOOKS = ['input.pre', 'tool.post'] as const;
@@ -52,6 +55,8 @@ export interface McpDefinitionGuardrailCheck {
 
 export interface McpDefinitionGuardrail {
   guardrailKey: string;
+  /** The guardrail as it was when `checked` was made (its last change); another one means checking again. */
+  version?: string;
   /** Results of the last check, keyed by the real tool name. */
   checked?: Record<string, McpDefinitionGuardrailCheck>;
 }
@@ -84,7 +89,20 @@ export function getDefinitionGuardrail(metadata: Metadata | undefined): McpDefin
       };
     }
   }
-  return { guardrailKey: raw.guardrailKey, checked };
+  return {
+    guardrailKey: raw.guardrailKey,
+    ...(typeof raw.version === 'string' ? { version: raw.version } : {}),
+    checked,
+  };
+}
+
+/** The guardrail's last change, as `resolveGuardrail` finds it where the server's calls are evaluated. */
+async function guardrailVersion(tenantDbName: string, guardrailKey: string, projectId?: string): Promise<string> {
+  const record = await resolveGuardrail(tenantDbName, guardrailKey, projectId);
+  if (!record) return 'missing';
+  const changed = record.updatedAt ?? record.createdAt;
+  const stamp = changed ? new Date(changed as Date | string).getTime() : NaN;
+  return `${String(record._id ?? '')}@${Number.isNaN(stamp) ? '' : stamp}`;
 }
 
 /** What the model reads of a definition, as the strings the guardrail checks. */
@@ -207,17 +225,29 @@ export async function checkToolDefinitionsWithGuardrail(input: {
     return { metadata, findings, newlyBlocked: [] };
   }
 
+  const version = await guardrailVersion(input.tenantDbName, selection.guardrailKey, input.projectId);
+  const checkAll = input.all || selection.version !== version;
   const before = selection.checked ?? nameMap<McpDefinitionGuardrailCheck>();
-  const checked = nameMap<McpDefinitionGuardrailCheck>();
-  const newlyBlocked: string[] = [];
-  for (const tool of input.tools) {
+  const rows = input.tools.map((tool) => {
     const hash = toolDefinitionHash(tool);
     const earlier = hasName(before, tool.name) && before[tool.name].hash === hash ? before[tool.name] : undefined;
-    let entry = !input.all ? earlier : undefined;
-    if (!entry) {
-      const outcome = await checkDefinition(tool, { ...input, guardrailKey: selection.guardrailKey });
-      entry = { hash, findings: outcome.findings, ...(outcome.blocked ? { blocked: true } : {}) };
+    return { tool, hash, earlier, entry: checkAll ? undefined : earlier };
+  });
+
+  const toCheck = rows.filter((row) => !row.entry);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(CHECK_CONCURRENCY, toCheck.length) }, async () => {
+    while (next < toCheck.length) {
+      const row = toCheck[next++];
+      const outcome = await checkDefinition(row.tool, { ...input, guardrailKey: selection.guardrailKey });
+      row.entry = { hash: row.hash, findings: outcome.findings, ...(outcome.blocked ? { blocked: true } : {}) };
     }
+  }));
+
+  const checked = nameMap<McpDefinitionGuardrailCheck>();
+  const newlyBlocked: string[] = [];
+  for (const { tool, earlier, entry } of rows) {
+    if (!entry) continue;
     checked[tool.name] = entry;
     if (entry.findings.length) findings[tool.name] = entry.findings;
     if (entry.blocked && !earlier?.blocked) newlyBlocked.push(tool.name);
@@ -233,6 +263,7 @@ export async function checkToolDefinitionsWithGuardrail(input: {
 
   metadata.definitionGuardrail = {
     guardrailKey: selection.guardrailKey,
+    version,
     checked: Object.fromEntries(Object.entries(checked)),
   };
   return { metadata, findings, newlyBlocked };

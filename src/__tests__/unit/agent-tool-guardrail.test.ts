@@ -574,6 +574,7 @@ describe('MCP tools run the agent guardrails and the server guardrail in turn', 
     hoisted.isMcpPiiProtected.mockReturnValue(true);
     hoisted.openMcpPiiRoundTrip.mockResolvedValue({
       protect: async (args: Record<string, unknown>) => ({ ...args, email: '[EMAIL_kqzvtmwb]' }),
+      protectText: async (text: string) => text.replaceAll('ada@example.com', '[EMAIL_kqzvtmwb]'),
     });
     hoisted.piiLogOf.mockReturnValue({ arguments: { email: '[EMAIL_kqzvtmwb]' }, result: { owner: '[EMAIL_kqzvtmwb]' } });
     hoisted.executeMcpTool.mockResolvedValue({ result: { owner: 'ada@example.com' }, latencyMs: 3 });
@@ -585,6 +586,11 @@ describe('MCP tools run the agent guardrails and the server guardrail in turn', 
     expect(pre.logText).toBe('[EMAIL_kqzvtmwb]');
     expect(post.subject.text).toContain('ada@example.com');
     expect(post.logText).toBe(JSON.stringify({ owner: '[EMAIL_kqzvtmwb]' }));
+    // Finding messages can quote a value: both hooks log them with the call's tokens.
+    expect(await pre.logMask?.('Path /home/ada@example.com is deny-listed')).toBe('Path /home/[EMAIL_kqzvtmwb] is deny-listed');
+    expect(post.logMask).toBe(pre.logMask);
+    // One round trip per call, for both hooks.
+    expect(hoisted.openMcpPiiRoundTrip).toHaveBeenCalledTimes(1);
   });
 
   it('withholds a side of a PII-protected call it has no tokenized view of', async () => {
@@ -596,13 +602,19 @@ describe('MCP tools run the agent guardrails and the server guardrail in turn', 
     const [pre, post] = hoisted.runHook.mock.calls.map(([call]) => call as HookCall);
     expect(pre.logText).toBe('Not logged: PII protection is on for this tool');
     expect(post.logText).toBe('Not logged: PII protection is on for this tool');
+    // No masker: the engine withholds the finding messages too.
+    expect(pre.logMask).toBeUndefined();
+    expect(post.logMask).toBeUndefined();
   });
 
   it('logs the values themselves for a server without PII protection', async () => {
     const { tools } = await build([MCP_BINDING], ARMED);
     await invoke(tools[0], { email: 'ada@example.com' });
 
-    for (const [call] of hoisted.runHook.mock.calls) expect((call as HookCall).logText).toBeUndefined();
+    for (const [call] of hoisted.runHook.mock.calls) {
+      expect((call as HookCall).logText).toBeUndefined();
+      expect((call as HookCall).logMask).toBeUndefined();
+    }
   });
 });
 

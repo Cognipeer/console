@@ -280,7 +280,7 @@ export default function McpSecurityPanel({ server, onServerUpdated, guardrailSec
               Optionally check each definition with one of your guardrails too, with its input and tool-result
               checks. Its own mode applies: a definition it blocks waits for review, even an approved one; in
               monitor mode its findings are only shown. Saving checks every tool again; Update tools checks new
-              and changed definitions.
+              and changed definitions, or every tool once the guardrail has changed.
             </Text>
             <Group gap="xs" mt="xs" align="center">
               <Select
