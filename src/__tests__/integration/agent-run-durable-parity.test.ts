@@ -28,7 +28,7 @@ describeForEachProvider('AgentRun — durable runs', (getDb) => {
   const handoff = { reason: 'handoff' as const, deadlineAt };
   const orphaned = { reason: 'orphaned' as const, deadlineAt };
   const read = async (run: IAgentRun) => (await getDb().getAgentRunById(id(run), tenantId, projectId))!;
-  const running = async (workerId = 'node-a', startedAt = new Date()) => {
+  const running = async (workerId = 'node-a', startedAt = new Date(), options?: { durable?: boolean }) => {
     const db = getDb();
     const run = await db.createAgentRun({
       mode: 'background',
@@ -41,8 +41,19 @@ describeForEachProvider('AgentRun — durable runs', (getDb) => {
       status: 'queued',
       queueGeneration: 1,
     } as Omit<IAgentRun, '_id' | 'createdAt' | 'updatedAt'>);
-    return (await db.claimAgentRun(id(run), tenantId, workerId, startedAt))!;
+    return (await db.claimAgentRun(id(run), tenantId, workerId, startedAt, options))!;
   };
+
+  it('a claim records whether its execution checkpoints the turn, and the next claim says it again', async () => {
+    const db = getDb();
+    expect((await running('node-a')).durable ?? false).toBe(false);
+    const run = await running('node-a', new Date(), { durable: true });
+    expect(run.durable).toBe(true);
+    expect((await read(run)).durable).toBe(true);
+    // Continued by a node without durable runs: that execution does not checkpoint.
+    await db.requeueAgentRunForRecovery(id(run), tenantId, { fromWorkerId: 'node-a' }, handoff);
+    expect((await db.claimAgentRun(id(run), tenantId, 'node-b', new Date()))?.durable).toBe(false);
+  });
 
   it('a handoff requeues only the run its worker still holds, and bumps the generation but not the orphan count', async () => {
     const db = getDb();

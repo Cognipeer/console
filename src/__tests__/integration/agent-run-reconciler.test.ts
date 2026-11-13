@@ -442,10 +442,10 @@ describe('durable runs: an orphaned run continues on another node', () => {
     delete process.env.AGENT_BACKGROUND_MAX_DURATION_MS;
   });
 
-  const staleRun = async (conversationId: string) => {
+  const staleRun = async (conversationId: string, durable = true) => {
     const run = await db.createAgentRun(baseRecord(conversationId));
     const startedAt = new Date(Date.now() - 120_000);
-    await db.claimAgentRun(String(run._id), tenantId, 'dead-worker', startedAt);
+    await db.claimAgentRun(String(run._id), tenantId, 'dead-worker', startedAt, { durable });
     return { runId: String(run._id), startedAt };
   };
 
@@ -459,6 +459,18 @@ describe('durable runs: an orphaned run continues on another node', () => {
     expect(after?.workerId ?? null).toBeNull();
     expect(new Date(after!.recoveryDeadlineAt!).getTime()).toBe(startedAt.getTime() + 600_000);
     expect(hoisted.publish).toHaveBeenCalledWith(AGENT_RUN_QUEUE, 'run', expect.objectContaining({ runId }), expect.anything());
+  });
+
+  it('fails it as worker_lost when its execution did not checkpoint (no checkpoint does not mean no side effect)', async () => {
+    // Claimed by an execution without durable runs: an inline turn, a node with them off, the code before them.
+    const { runId } = await staleRun('conv-durable-not-checkpointed', false);
+
+    await triggerAgentRunReconcilerRun();
+
+    const after = await db.getAgentRunById(runId, tenantId, PROJECT_ID);
+    expect(after).toMatchObject({ status: 'failed', errorReason: 'worker_lost' });
+    expect(after?.recoveryCount ?? 0).toBe(0);
+    expect(hoisted.publish).not.toHaveBeenCalledWith(AGENT_RUN_QUEUE, 'run', expect.objectContaining({ runId }), expect.anything());
   });
 
   it('fails it as worker_lost once it used up its recoveries, and drops its checkpoint', async () => {

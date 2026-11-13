@@ -5935,6 +5935,13 @@ export interface IAgentRun extends IUsageAttributionFields {
   /** The ceiling of the turn being recovered: a recovered execution does not get a fresh one. */
   recoveryDeadlineAt?: Date | null;
   /**
+   * Durable runs: the execution that claimed the run checkpoints its turn, so a node that stops
+   * can be continued elsewhere. Not set for a run executed without checkpoints (an inline turn, a
+   * node with durable runs off, the code before them): no checkpoint then does not mean that no
+   * tool with side effects ran, and the reconciler ends such a run `worker_lost` instead.
+   */
+  durable?: boolean;
+  /**
    * The principal whose spend and quota policies the run counts against when
    * its owner is a synthetic actor (a trigger fire): the trigger's last
    * updater (or creator), or the person and token that pressed Run now.

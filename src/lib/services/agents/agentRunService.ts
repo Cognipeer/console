@@ -1949,7 +1949,8 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
 
     // The hold on the run counts from before the claim was sent (`runLeaseHolds`).
     const claimSentAt = performance.now();
-    let claimed = await db.claimAgentRun(runId, tenantId, workerId, startedAt);
+    // Only a run claimed by a checkpointing execution is continued elsewhere if this node stops.
+    let claimed = await db.claimAgentRun(runId, tenantId, workerId, startedAt, { durable: cfg.agent.durableRuns });
     if (!claimed) {
       logger.info('Agent run already claimed or not queued; skipping duplicate delivery', { runId });
       return;

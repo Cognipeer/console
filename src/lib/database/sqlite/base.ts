@@ -1275,7 +1275,7 @@ export class SQLiteProviderBase {
       ['accountableUserId', 'TEXT'], ['accountableTokenId', 'TEXT'],
       // Durable runs: times continued on another node, and the last such move.
       ['recoveryCount', 'INTEGER'], ['lastRecoveredAt', 'TEXT'], ['lastRecoveryReason', 'TEXT'],
-      ['recoveryDeadlineAt', 'TEXT'],
+      ['recoveryDeadlineAt', 'TEXT'], ['durable', 'INTEGER'],
     ] as const) {
       this.ensureTableColumn(db, TABLES.agentRuns, column, `${column} ${type}`);
     }

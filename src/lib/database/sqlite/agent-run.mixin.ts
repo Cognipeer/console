@@ -140,13 +140,14 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       tenantId: string,
       workerId: string,
       startedAt: Date,
+      options?: { durable?: boolean },
     ): Promise<IAgentRun | null> {
       return this.updateAgentRunIf(id, `
         UPDATE ${TABLES.agentRuns}
         SET status = 'running', workerId = @workerId, startedAt = @startedAt,
-            heartbeatAt = @startedAt, updatedAt = @updatedAt
+            heartbeatAt = @startedAt, durable = @durable, updatedAt = @updatedAt
         WHERE id = @id AND tenantId = @tenantId AND status = 'queued'
-      `, { id, tenantId, workerId, startedAt: startedAt.toISOString(), updatedAt: this.now() });
+      `, { id, tenantId, workerId, startedAt: startedAt.toISOString(), durable: options?.durable ? 1 : 0, updatedAt: this.now() });
     }
 
     async updateAgentRunHeartbeat(
@@ -797,6 +798,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         accountableTokenId: (row.accountableTokenId as string) ?? null,
         ...(row.recoveryCount !== null && row.recoveryCount !== undefined ? { recoveryCount: Number(row.recoveryCount) } : {}),
         lastRecoveredAt: this.toDate(row.lastRecoveredAt) ?? null,
+        ...(row.durable !== null && row.durable !== undefined ? { durable: Boolean(row.durable) } : {}),
         lastRecoveryReason: (row.lastRecoveryReason as IAgentRun['lastRecoveryReason']) ?? null,
         recoveryDeadlineAt: this.toDate(row.recoveryDeadlineAt) ?? null,
         createdAt: this.toDate(row.createdAt),

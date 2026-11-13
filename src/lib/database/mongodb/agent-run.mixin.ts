@@ -272,10 +272,11 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       tenantId: string,
       workerId: string,
       startedAt: Date,
+      options?: { durable?: boolean },
     ): Promise<IAgentRun | null> {
       return this.setAgentRun(
         { _id: objectId(id), tenantId, status: 'queued' },
-        { status: 'running', workerId, startedAt, heartbeatAt: startedAt, updatedAt: new Date() },
+        { status: 'running', workerId, startedAt, heartbeatAt: startedAt, durable: options?.durable === true, updatedAt: new Date() },
       );
     }
 

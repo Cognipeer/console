@@ -2769,6 +2769,8 @@ export const TENANT_SCHEMA_SQL = `
     lastRecoveredAt TEXT,
     lastRecoveryReason TEXT,
     recoveryDeadlineAt TEXT,
+    -- Durable runs: the execution holding the run checkpoints its turn (1).
+    durable INTEGER,
     createdAt TEXT NOT NULL,
     startedAt TEXT,
     completedAt TEXT,

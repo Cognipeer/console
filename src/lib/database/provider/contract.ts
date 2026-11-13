@@ -2516,6 +2516,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     tenantId: string,
     workerId: string,
     startedAt: Date,
+    /** `durable`: this execution checkpoints its turn (stored as `IAgentRun.durable`). */
+    options?: { durable?: boolean },
   ): Promise<IAgentRun | null>;
   /**
    * Update `heartbeatAt` for a run this worker still owns. Guarded by

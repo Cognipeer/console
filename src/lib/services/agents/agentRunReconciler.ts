@@ -239,8 +239,10 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
 
           // Durable runs: the turn goes on on another node, from its checkpoint (or from the
           // start when it never reached a side effect) — up to AGENT_RUN_MAX_RECOVERIES times,
-          // so a run that kills every node it lands on does not take them all down.
-          if (cfg.agent.durableRuns && (run.recoveryCount ?? 0) < cfg.agent.runMaxRecoveries) {
+          // so a run that kills every node it lands on does not take them all down. Only a run
+          // whose execution checkpointed: for any other (an inline turn, a node without durable
+          // runs) no checkpoint does not mean no side effect, so it ends worker_lost as before.
+          if (cfg.agent.durableRuns && run.durable === true && (run.recoveryCount ?? 0) < cfg.agent.runMaxRecoveries) {
             // The turn's ceiling stays where it was when the turn started (or was first recovered).
             const startedAtMs = run.startedAt ? new Date(run.startedAt).getTime() : Date.now();
             const deadlineAt = run.recoveryDeadlineAt ?? new Date(startedAtMs + agentRunCeilingMs(run));
