@@ -159,7 +159,11 @@ export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSan
                 label="Give this agent a sandbox"
                 description="An isolated Linux machine the agent can run commands and code in, and read and write files on. Provisioned only when the agent first uses it."
                 checked={enabled}
-                onChange={(event) => patch({ enabled: event.currentTarget.checked })}
+                onChange={(event) => {
+                    const on = event.currentTarget.checked;
+                    // A sandbox set up now starts without network access; one saved earlier keeps its setting.
+                    patch(on && value?.blockNetwork === undefined ? { enabled: true, blockNetwork: true } : { enabled: on });
+                }}
                 disabled={Boolean(unavailable) && capabilities?.reason !== 'unreachable' && !enabled}
             />
 
@@ -249,7 +253,7 @@ export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSan
                                 </Group>
                                 <Switch
                                     label="Block network access"
-                                    description="No internet from inside the sandbox — package installs will fail."
+                                    description="No internet from inside the sandbox — package installs will fail. On for a new sandbox; turn it off to let the agent reach the internet."
                                     checked={value?.blockNetwork ?? false}
                                     onChange={(event) => patch({ blockNetwork: event.currentTarget.checked })}
                                 />

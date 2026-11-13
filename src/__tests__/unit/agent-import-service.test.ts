@@ -209,10 +209,10 @@ describe('applyAgentDocumentImport', () => {
         await expect(applyAgentDocumentImport(CTX, { content: DOC, modelKey: 'opus', key: 'gone', overwrite: true })).rejects.toMatchObject({ status: 404 });
     });
 
-    it('turns on the sandbox when it is available', async () => {
+    it('turns on the sandbox when it is available, without network access', async () => {
         fn(resolveSandboxAvailability).mockResolvedValue({ available: true });
         await applyAgentDocumentImport(CTX, { content: DOC, modelKey: 'opus', mcp: { github: { action: 'skip' }, jira: { action: 'skip' } } });
-        expect(fn(applyAgentManifest).mock.calls[0][4].spec.sandbox).toEqual({ enabled: true, mode: 'ephemeral' });
+        expect(fn(applyAgentManifest).mock.calls[0][4].spec.sandbox).toEqual({ enabled: true, mode: 'ephemeral', blockNetwork: true });
     });
 });
 
