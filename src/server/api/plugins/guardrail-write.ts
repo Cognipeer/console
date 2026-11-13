@@ -441,6 +441,8 @@ export function parseGuardrailCreateBody(body: Record<string, unknown>): Guardra
 export async function createGuardrailFromRequest(
   ctx: GuardrailWriteContext,
   parsed: ParsedGuardrailCreate,
+  /** Server-set record fields a request body may not carry (a template marker). */
+  extras: { metadata?: Record<string, unknown> } = {},
 ): Promise<GuardrailView> {
   const { body, name, action, enabled, mode, hooks, hooksVersion } = parsed;
 
@@ -492,6 +494,7 @@ export async function createGuardrailFromRequest(
     projectId: ctx.projectId,
     target: legacy?.target,
     type: legacy?.type ?? (body.type as GuardrailType),
+    ...(extras.metadata ? { metadata: extras.metadata } : {}),
   });
 }
 

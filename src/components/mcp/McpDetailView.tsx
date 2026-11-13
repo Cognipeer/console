@@ -60,6 +60,7 @@ import McpToolArgsEditor from '@/components/mcp/McpToolArgsEditor';
 import McpToolsPanel from '@/components/mcp/McpToolsPanel';
 import McpMembersPanel from '@/components/mcp/McpMembersPanel';
 import McpSecurityPanel from '@/components/mcp/McpSecurityPanel';
+import McpGuardrailTemplateMenu from '@/components/mcp/McpGuardrailTemplateMenu';
 import {
   DEFAULT_TOOL_GUARDRAIL_KEY,
   MCP_GUARDRAIL_MODE_HINTS,
@@ -1758,22 +1759,31 @@ async with sse_client(
                   <Text size="xs" c="dimmed" mt={4}>
                     Checks this server’s tool calls (tool.pre and tool.post). The guardrail’s own mode applies.
                   </Text>
-                  <Select
-                    mt="sm"
-                    size="xs"
-                    aria-label="Guardrail"
-                    clearable
-                    searchable
-                    placeholder="No guardrail"
-                    nothingFoundMessage="No guardrail found"
-                    data={mcpGuardrailSelectData(guardrails, guardrailKeyValue)}
-                    value={guardrailKeyValue}
-                    disabled={savingGuardrail}
-                    onChange={(val) => {
-                      if ((val ?? null) === guardrailKeyValue && !legacyMonitorOnly) return;
-                      void handleSaveGuardrail(val ?? null);
-                    }}
-                  />
+                  <Group mt="sm" gap="xs" wrap="nowrap" align="center">
+                    <Select
+                      style={{ flex: 1 }}
+                      size="xs"
+                      aria-label="Guardrail"
+                      clearable
+                      searchable
+                      placeholder="No guardrail"
+                      nothingFoundMessage="No guardrail found"
+                      data={mcpGuardrailSelectData(guardrails, guardrailKeyValue)}
+                      value={guardrailKeyValue}
+                      disabled={savingGuardrail}
+                      onChange={(val) => {
+                        if ((val ?? null) === guardrailKeyValue && !legacyMonitorOnly) return;
+                        void handleSaveGuardrail(val ?? null);
+                      }}
+                    />
+                    <McpGuardrailTemplateMenu
+                      disabled={savingGuardrail}
+                      onCreated={(created) => {
+                        setGuardrails((prev) => [...prev.filter((g) => g.key !== created.key), created]);
+                        void handleSaveGuardrail(created.key);
+                      }}
+                    />
+                  </Group>
                   {boundGuardrail && !legacyMonitorOnly ? (
                     <Text size="xs" c="dimmed" mt={6}>{MCP_GUARDRAIL_MODE_HINTS[boundGuardrail.mode]}</Text>
                   ) : null}

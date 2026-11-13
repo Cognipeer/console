@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
+  Group,
   PasswordInput,
   Select,
   Textarea,
@@ -31,6 +32,7 @@ import {
   readMcpGuardrailOptions,
   type McpGuardrailOption,
 } from './mcpGuardrailOptions';
+import McpGuardrailTemplateMenu from './McpGuardrailTemplateMenu';
 
 interface CreateMcpModalProps {
   opened: boolean;
@@ -1265,17 +1267,26 @@ export default function CreateMcpModal({
           label="Guardrail"
           hint={selectedGuardrail
             ? MCP_GUARDRAIL_MODE_HINTS[selectedGuardrail.mode]
-            : 'Optional. Choose one of your guardrails; create and edit them under Guardrails.'}
+            : 'Optional. Choose one of your guardrails, or create one from a template; edit them under Guardrails.'}
         >
-          <Select
-            clearable
-            searchable
-            placeholder="No guardrail"
-            nothingFoundMessage="No guardrail found"
-            data={mcpGuardrailSelectData(guardrails, v.guardrailKey || null)}
-            value={v.guardrailKey || null}
-            onChange={(val) => form.setFieldValue('guardrailKey', val ?? '')}
-          />
+          <Group gap="xs" wrap="nowrap" align="center">
+            <Select
+              style={{ flex: 1 }}
+              clearable
+              searchable
+              placeholder="No guardrail"
+              nothingFoundMessage="No guardrail found"
+              data={mcpGuardrailSelectData(guardrails, v.guardrailKey || null)}
+              value={v.guardrailKey || null}
+              onChange={(val) => form.setFieldValue('guardrailKey', val ?? '')}
+            />
+            <McpGuardrailTemplateMenu
+              onCreated={(created) => {
+                setGuardrails((prev) => [...prev.filter((g) => g.key !== created.key), created]);
+                form.setFieldValue('guardrailKey', created.key);
+              }}
+            />
+          </Group>
         </FormField>
         {selectedGuardrail && !selectedGuardrail.toolBound ? (
           <Alert color="yellow" icon={<IconInfoCircle size={16} />}>

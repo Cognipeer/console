@@ -718,6 +718,10 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   applies. No guardrail is selected by default. An agent's tool guardrails run around it: on the way in the agent's
   first, then the server's; on the way out the server's first, then the agent's. A guardrail both name in the same
   project runs once.
+- **From a template** next to that picker creates a guardrail from one of the templates meant for MCP servers and
+  selects it. *MCP server protection* (recommended) checks size limits and private-network URLs in both directions,
+  masks credentials and stops instructions hidden in tool results; personal data is left to the server's PII
+  protection. *Injection in tool results* and *Private network (SSRF) guard* are offered too.
 - With PII protection on, the guardrails judge the real values in both directions; their evaluation logs keep the
   tokens, as the request log does, finding messages included. The reason of a block names the values by their tokens
   too.
@@ -728,6 +732,18 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   every tool again; a tool refresh checks new and changed definitions, or every tool once the guardrail has changed.
 - API tokens can be limited to some MCP servers (`allowedMcpServerIds`; *MCP servers* on the token form).
 - MCP tool calls made by agent runs appear in the server's request log.
+
+### Guardrail templates
+
+- Twelve ready-made templates create a finished guardrail in one step: baseline, credential leak, profanity, KVKK,
+  GDPR, payment card, prompt injection, injection in tool results, agent tool safety, MCP server protection, private
+  network guard and strict content. None of them needs a model.
+- The create guardrail form has a **Start from** section: Blank (the default) or a template, grouped by category. A
+  guardrail created from a template starts in monitor mode; switch it to enforce once its findings look right.
+- Templates that scan personal data create their PII policy in the project once and reuse it on later applies.
+- API: `GET /api/guardrails/templates` lists the catalog with the number of guardrails made from each template;
+  `POST /api/guardrails/templates/:key/apply` creates a guardrail (optional `name` and `description`), marked with
+  `metadata.template: { key, version }`.
 
 ### Console identity for MCP servers and connected agents
 

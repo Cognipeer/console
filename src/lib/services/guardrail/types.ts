@@ -354,6 +354,8 @@ export interface CreateGuardrailInput {
   hooksVersion?: IGuardrail['hooksVersion'];
   /** enforce | monitor | disabled. Absent behaves as 'enforce'. */
   mode?: IGuardrail['mode'];
+  /** Free-form record metadata, e.g. `template: { key, version }` for a guardrail made from a template. */
+  metadata?: IGuardrail['metadata'];
 }
 
 export interface UpdateGuardrailInput {
@@ -388,6 +390,7 @@ export interface GuardrailView {
   hooks?: IGuardrail['hooks'];
   hooksVersion?: IGuardrail['hooksVersion'];
   mode?: IGuardrail['mode'];
+  metadata?: IGuardrail['metadata'];
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date | string;
