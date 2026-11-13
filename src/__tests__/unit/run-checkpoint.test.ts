@@ -21,6 +21,7 @@ import {
     agentRunTurnKey,
     createRunCheckpointer,
     readRunCheckpoint,
+    runLeaseHolds,
     settleInterruptedToolCalls,
     stampRunTurn,
     transcriptHasTurn,
@@ -247,6 +248,72 @@ describe('run checkpointer: fencing', () => {
         expect(await checkpointer.flush()).toBe(false);
     });
 
+    it('a write that fails (the database is unreachable) does not let a tool with side effects run', async () => {
+        const store = memoryStore();
+        let fail = true;
+        const flaky = {
+            async writeAgentRunCheckpoint(write: AgentRunCheckpointWrite) {
+                if (fail) throw new Error('connection reset');
+                return store.writeAgentRunCheckpoint(write);
+            },
+        };
+        const { checkpointer } = setup({ db: flaky });
+        checkpointer.onStateChange({ messages: [user('hi'), assistant('', [{ id: 'c1', name: 'send_email' }])], toolHistory: [] });
+        await expect(checkpointer.beforeTool('send_email')).rejects.toThrow(/could not be saved/);
+        // A tool that only reads needs no checkpoint and still runs.
+        await expect(checkpointer.beforeTool('search')).resolves.toBeUndefined();
+        // Once the database answers again, the same step is stored and the tool runs.
+        fail = false;
+        await expect(checkpointer.beforeTool('send_email')).resolves.toBeUndefined();
+        expect(store.doc?.messageCount).toBe(2);
+    });
+
+    it('a tool with side effects is refused once this execution may have lost its hold on the run', async () => {
+        let holds = true;
+        const { store, checkpointer } = setup({ leaseHolds: () => holds });
+        const step1 = [user('hi'), assistant('', [{ id: 'c1', name: 'send_email' }])];
+        checkpointer.onStateChange({ messages: step1, toolHistory: [] });
+        await expect(checkpointer.beforeTool('send_email')).resolves.toBeUndefined();
+        holds = false;
+        checkpointer.onStateChange({ messages: [...step1, toolResult('c1', 'send_email'), assistant('', [{ id: 'c2', name: 'send_email' }])], toolHistory: [] });
+        await expect(checkpointer.beforeTool('send_email')).rejects.toThrow(/could not confirm/);
+        // Reading is harmless: a tool that only reads still runs.
+        await expect(checkpointer.beforeTool('search')).resolves.toBeUndefined();
+        // The step is stored all the same: a node continuing the run sees the call.
+        expect(store.doc?.messageCount).toBe(4);
+    });
+
+    it('a write the store applied but answered with an error is not read back twice', async () => {
+        const store = memoryStore();
+        let ambiguous = false;
+        const lossy = {
+            async writeAgentRunCheckpoint(write: AgentRunCheckpointWrite) {
+                const ok = await store.writeAgentRunCheckpoint(write);
+                if (ambiguous) {
+                    ambiguous = false;
+                    throw new Error('socket timeout after the write was applied');
+                }
+                return ok;
+            },
+        };
+        const { checkpointer } = setup({ db: lossy });
+        const step1 = [user('hi'), assistant('', [{ id: 'c1', name: 'send_email' }])];
+        checkpointer.onStateChange({ messages: step1, toolHistory: [] });
+        await checkpointer.beforeTool('send_email');
+        const step2 = [...step1, toolResult('c1', 'send_email'), assistant('', [{ id: 'c2', name: 'send_email' }])];
+        checkpointer.onStateChange({ messages: step2, toolHistory: [] });
+        ambiguous = true;
+        await checkpointer.beforeTool('send_email').catch(() => undefined);
+        const step3 = [...step2, toolResult('c2', 'send_email'), assistant('', [{ id: 'c3', name: 'send_email' }])];
+        checkpointer.onStateChange({ messages: step3, toolHistory: [] });
+        await checkpointer.beforeTool('send_email');
+
+        const read = await readRunCheckpoint(store.doc);
+        expect(read.kind).toBe('ok');
+        const messages = read.kind === 'ok' ? read.checkpoint.carried.messages ?? [] : [];
+        expect(messages.map((m) => m.role)).toEqual(step3.map((m) => m.role));
+    });
+
     it('after a handoff (stop) no tool starts and nothing is written', async () => {
         const { store, checkpointer } = setup();
         checkpointer.onStateChange({ messages: [user('hi'), assistant('', [{ id: 'c1', name: 'send_email' }])], toolHistory: [] });
@@ -290,6 +357,16 @@ describe('run checkpointer: fencing', () => {
         // A bound tool without a read-only marking.
         await tool('crm_update_contact', 'writes').invoke({});
         expect(store.writes).toHaveLength(1);
+    });
+});
+
+describe('the hold an execution has on its run', () => {
+    it('lapses one heartbeat before the reconciler may give the run to another node', () => {
+        // Defaults: a heartbeat every 15 s, stale after 45 s: tools stop 30 s after the last accepted one.
+        expect(runLeaseHolds({ leaseRenewedAt: 1_000 }, 1_000 + 29_999)).toBe(true);
+        expect(runLeaseHolds({ leaseRenewedAt: 1_000 }, 1_000 + 30_000)).toBe(false);
+        expect(runLeaseHolds({}, 10_000_000)).toBe(true);
+        expect(runLeaseHolds(undefined)).toBe(true);
     });
 });
 

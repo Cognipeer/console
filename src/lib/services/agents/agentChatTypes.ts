@@ -48,6 +48,11 @@ export interface AgentRunCancellationCell {
     abandoned?: boolean;
     /** Durable runs: the turn's checkpointer, so a shutdown can write the latest step and hand the run off. */
     checkpointer?: RunCheckpointer;
+    /**
+     * Background runs: when this execution last renewed its hold on the run (`performance.now()`
+     * when the claim, or a heartbeat the store accepted, was sent). See `runLeaseHolds`.
+     */
+    leaseRenewedAt?: number;
 }
 
 /** True once a deadline has passed or an explicit cancel has been recorded. */

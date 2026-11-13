@@ -82,7 +82,7 @@ import { buildFileOutputTools, fileOutputsPrompt, mergeOutputCollectors, type Fi
 import { buildReminderTools, reminderApprovalMode, reminderNoteText, remindersPrompt, type ReminderTools, type ReminderWake } from './agentReminderTools';
 import { resolveRemindersConfig } from './agentRemindersConfig';
 import { getConfig } from '@/lib/core/config';
-import { createRunCheckpointer, stampRunTurn, withCheckpointBeforeTool, type CheckpointTurn, type RunCheckpointer } from './runCheckpoint';
+import { createRunCheckpointer, runLeaseHolds, stampRunTurn, withCheckpointBeforeTool, type CheckpointTurn, type RunCheckpointer } from './runCheckpoint';
 import { inspectFileBucket } from './sessionFilesBucket';
 import { outputsAvailability } from './sessionFilesConfig';
 import {
@@ -1543,6 +1543,7 @@ async function runAgentChatTurn(
             onFenced: () => {
                 if (request.cancellationCell) request.cancellationCell.cancelled = true;
             },
+            leaseHolds: () => runLeaseHolds(request.cancellationCell),
         })
         : undefined;
     if (checkpointer && request.cancellationCell) request.cancellationCell.checkpointer = checkpointer;

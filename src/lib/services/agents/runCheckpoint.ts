@@ -35,6 +35,14 @@
  * continue elsewhere the generation moved on, the store refuses the write, and
  * the checkpointer reports it (`onFenced`) and refuses to start another tool
  * with side effects: an execution that lost its run must not act for it.
+ *
+ * Two more rules keep an execution that is cut off from the database (or was
+ * frozen) from acting for a run another node already continues:
+ *  - a tool with side effects runs only once the step that asked for it is
+ *    stored; a write that fails refuses the tool instead of running it unrecorded;
+ *  - it runs only while the execution's hold on the run is fresh (`leaseHolds`):
+ *    its last accepted heartbeat is younger than the time after which the
+ *    reconciler may give the run to another node, less one heartbeat of margin.
  */
 
 import { createHash } from 'node:crypto';
@@ -44,6 +52,7 @@ import type {
     SmartState as AgentSdkSmartState,
 } from '@cognipeer/agent-sdk';
 
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import type { DatabaseProvider, IAgentConversation, IAgentRunCheckpoint } from '@/lib/database';
 import { isReadOnlyTool, toolKindOf } from './agentHumanInTheLoop';
@@ -61,6 +70,28 @@ const logger = createLogger('agent-run-checkpoint');
 
 /** Format of `head` and the chunks. A node that does not know a checkpoint's schema does not continue from it. */
 export const CHECKPOINT_SCHEMA = 1;
+
+/** What the model reads for a tool refused because the run continues elsewhere (or was stopped). */
+const RUN_MOVED_ON = 'This run continues on another server; the tool was not run here.';
+/** ... because the step that asked for it could not be stored. */
+const STEP_NOT_SAVED = 'The run\'s progress could not be saved (the database did not answer), so this tool was not run: '
+    + 'a server continuing the run would not know it had run. Try it again shortly.';
+/** ... because this execution may no longer hold the run. */
+const RUN_HOLD_LOST = 'This server could not confirm that it still holds the run (its heartbeat was not recorded in time), '
+    + 'so this tool was not run here: another server may be continuing the run.';
+
+/**
+ * True while an execution may still act for its run: its last heartbeat the
+ * store accepted (`leaseRenewedAt`, `performance.now()` when it was sent) is
+ * younger than `AGENT_RUN_HEARTBEAT_STALE_MS` less one heartbeat interval. After
+ * that the reconciler may already have given the run to another node. A cell
+ * that records no heartbeat holds nothing to lose.
+ */
+export function runLeaseHolds(cell: { leaseRenewedAt?: number } | undefined, nowMs = performance.now()): boolean {
+    if (cell?.leaseRenewedAt === undefined) return true;
+    const { runHeartbeatStaleMs, runHeartbeatIntervalMs } = getConfig().agent;
+    return nowMs - cell.leaseRenewedAt < runHeartbeatStaleMs - runHeartbeatIntervalMs;
+}
 
 /** A checkpoint outlives its run's ceiling by this much before the TTL removes it. */
 const CHECKPOINT_TTL_SLACK_MS = 60 * 60 * 1000;
@@ -132,6 +163,11 @@ export interface RunCheckpointerOptions {
     isReadOnlyTool?: (toolName: string) => boolean;
     /** The run moved to another execution: stop the turn. */
     onFenced?: () => void;
+    /**
+     * False once this execution may have lost its run (see `runLeaseHolds`): a tool with
+     * side effects is then not started. Default: always holds.
+     */
+    leaseHolds?: () => boolean;
     now?: () => number;
 }
 
@@ -139,7 +175,8 @@ export interface RunCheckpointer {
     /** The SDK's `onStateChange`: remembers the state at a step boundary; never pauses the turn. */
     onStateChange(state: unknown): boolean;
     /**
-     * Awaited before a tool runs. Throws when the run continues elsewhere (the tool must not run).
+     * Awaited before a tool runs. Throws when the tool must not run: the run continues elsewhere,
+     * the step that asked for it could not be stored, or this execution may no longer hold the run.
      * `readOnly` overrides `isReadOnlyTool` for this call.
      */
     beforeTool(toolName: string, readOnly?: boolean): Promise<void>;
@@ -195,6 +232,9 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
     const isReadOnly = options.isReadOnlyTool ?? (() => false);
     let latest: StateLike | null = null;
     let latestWritten: StateLike | null = null;
+    /** Numbers the states the SDK reported, and the newest one stored, so a tool knows its step is stored. */
+    let latestVersion = 0;
+    let writtenVersion = 0;
     let lastWriteAt = now();
     let sideEffectSinceWrite = false;
     let persisted: Persisted | null = null;
@@ -218,9 +258,12 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
         return JSON.stringify(head);
     };
 
-    const writeState = async (state: StateLike): Promise<boolean> => {
+    const writeState = async (state: StateLike, version: number): Promise<boolean> => {
         if (stopped || fenced || sealed) return !fenced && !sealed;
-        if (latestWritten === state) return true;
+        if (latestWritten === state) {
+            writtenVersion = Math.max(writtenVersion, version);
+            return true;
+        }
         const messages = Array.isArray(state.messages) ? state.messages : [];
         const toolHistory = Array.isArray(state.toolHistory) ? state.toolHistory : [];
         const headJson = headOf(state);
@@ -294,6 +337,7 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
             return false;
         }
         wrote = true;
+        writtenVersion = Math.max(writtenVersion, version);
         persisted = {
             messageCount: messages.length,
             lastMessage: messages[messages.length - 1],
@@ -311,8 +355,12 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
     /** Queues a write of the latest state; writes run one at a time, in order. */
     const writeLatest = (): Promise<boolean> => {
         const state = latest;
+        const version = latestVersion;
         if (!state) return chain;
-        chain = chain.then(() => writeState(state)).catch((error: unknown) => {
+        chain = chain.then(() => writeState(state, version)).catch((error: unknown) => {
+            // Whether the store kept any of it is unknown (a timeout after the write landed): the
+            // next write is a full one, so a delta the store did keep is not read back twice.
+            persisted = null;
             logger.warn('Run checkpoint write failed', {
                 runId: options.runId,
                 error: error instanceof Error ? error.message : String(error),
@@ -326,6 +374,7 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
         onStateChange(state: unknown): boolean {
             if (stopped || fenced || sealed || !state || typeof state !== 'object') return false;
             latest = state as StateLike;
+            latestVersion += 1;
             if (sideEffectSinceWrite || now() - lastWriteAt >= options.intervalMs) {
                 sideEffectSinceWrite = false;
                 lastWriteAt = now();
@@ -335,14 +384,28 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
             return false;
         },
         async beforeTool(toolName: string, readOnly?: boolean): Promise<void> {
-            if (fenced || stopped) throw new Error('This run continues on another server; the tool was not run here.');
-            if (sealed || (readOnly ?? isReadOnly(toolName))) return;
-            if (!latest || latestWritten === latest) {
-                await chain;
-            } else {
-                await writeLatest();
+            if (fenced || stopped) throw new Error(RUN_MOVED_ON);
+            if (readOnly ?? isReadOnly(toolName)) return;
+            if (!sealed) {
+                const target = latestVersion;
+                if (latest && writtenVersion < target) {
+                    await writeLatest();
+                } else {
+                    await chain;
+                }
+                if (fenced || stopped) throw new Error(RUN_MOVED_ON);
+                // Past the size cap the run cannot be continued elsewhere anyway; otherwise a step
+                // that is not stored would leave a continuing node unaware that this tool ran.
+                if (!sealed && writtenVersion < target) {
+                    logger.warn('Tool not run: its step could not be stored', { runId: options.runId, toolName });
+                    throw new Error(STEP_NOT_SAVED);
+                }
             }
-            if (fenced) throw new Error('This run continues on another server; the tool was not run here.');
+            // Checked last: the write above may have waited long on a database that did not answer.
+            if (options.leaseHolds && !options.leaseHolds()) {
+                logger.warn('Tool not run: this execution may no longer hold the run', { runId: options.runId, toolName });
+                throw new Error(RUN_HOLD_LOST);
+            }
         },
         afterTool(toolName: string, readOnly?: boolean): void {
             if (!(readOnly ?? isReadOnly(toolName))) sideEffectSinceWrite = true;

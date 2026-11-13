@@ -1071,6 +1071,60 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
       reloadConfig();
     }
   });
+
+  it('with durable runs, the claim and each accepted heartbeat renew the hold on the run, and losing the run stops its tools at once', async () => {
+    process.env.AGENT_DURABLE_RUNS = 'true';
+    process.env.AGENT_RUN_HEARTBEAT_INTERVAL_MS = '1000';
+    reloadConfig();
+    try {
+      const db = await getDatabase();
+      await db.switchToTenant(dbName);
+      let cell: { cancelled?: boolean; leaseRenewedAt?: number; checkpointer?: unknown } | undefined;
+      // Whether the turn was already cancelled each time its checkpointer was stopped.
+      const stoppedWhileCancelled: boolean[] = [];
+      hoisted.executeAgentChatLocal.mockImplementation((request: { cancellationCell?: typeof cell }) => {
+        cell = request.cancellationCell;
+        if (cell) {
+          cell.checkpointer = {
+            wrote: false, sealed: false, stop: () => { stoppedWhileCancelled.push(Boolean(cell?.cancelled)); }, flush: async () => true,
+            onStateChange: () => false, beforeTool: async () => undefined, afterTool: () => undefined,
+          };
+        }
+        return new Promise((resolve) => {
+          const poll = setInterval(() => {
+            if (!cell?.cancelled) return;
+            clearInterval(poll);
+            resolve(fakeResponse('resp_lost'));
+          }, 5);
+        });
+      });
+      const run = await startQueued('conv-lease');
+      const runId = String(run._id);
+      const before = performance.now();
+      const job = runAgentJobLocal({ runId, tenantId, tenantDbName: dbName });
+      await vi.waitFor(() => {
+        expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
+      });
+      // The hold counts from the claim, and an accepted heartbeat renews it.
+      const claimedAt = cell!.leaseRenewedAt!;
+      expect(claimedAt).toBeGreaterThanOrEqual(before);
+      await vi.waitFor(() => {
+        expect(cell!.leaseRenewedAt!).toBeGreaterThan(claimedAt);
+      }, { timeout: 5000 });
+      expect(stoppedWhileCancelled).toEqual([]);
+
+      // The run is given to another node: the next heartbeat finds it gone, and the checkpointer is
+      // stopped before the turn is even told to end (no tool with side effects starts in between).
+      await db.requeueAgentRunForRecovery(runId, tenantId, {}, { reason: 'orphaned', deadlineAt: new Date(Date.now() + 60_000) });
+      await job;
+      expect(stoppedWhileCancelled[0]).toBe(false);
+      expect(await db.getAgentRunById(runId, tenantId, PROJECT_ID)).toMatchObject({ status: 'queued', queueGeneration: 2 });
+    } finally {
+      delete process.env.AGENT_DURABLE_RUNS;
+      delete process.env.AGENT_RUN_HEARTBEAT_INTERVAL_MS;
+      reloadConfig();
+    }
+  });
   describe('the agents service switched off', () => {
     /** Runs `fn` with the agents service off for the deployment, and puts the environment back. */
     async function withAgentsOff<T>(fn: () => Promise<T>): Promise<T> {

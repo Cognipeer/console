@@ -80,7 +80,7 @@ import { describeRunOutcome } from './agentRecords';
 import { answeredWithMetadata, createReasoningTap, liveStreamOptions, createTurnFlowSink, turnFlowRecord, turnReasoning } from './agentStreamTaps';
 import { outputFileEvents, mergeSessionRuntimeContext } from './agentAttachments';
 import { buildLocalAgentRun, agentMayStreamAnswer, firstTurnTitle, sessionStopReason, toAgentChatResponse } from './agentChatRun';
-import { createRunCheckpointer, settleInterruptedToolCalls, stampRunTurn, type CheckpointTurn, type DurableTurn, type LoadedCheckpoint } from './runCheckpoint';
+import { createRunCheckpointer, runLeaseHolds, settleInterruptedToolCalls, stampRunTurn, type CheckpointTurn, type DurableTurn, type LoadedCheckpoint } from './runCheckpoint';
 import { stepsOfTurnInProgress } from './agentRuntimeConfig';
 import { extractPlaygroundSteps, describeStructuredOutputError } from './agentPlaygroundSteps';
 import { createLogger } from '@/lib/core/logger';
@@ -492,6 +492,7 @@ async function runAgentResumeTurn(
             onFenced: () => {
                 if (request.cancellationCell) request.cancellationCell.cancelled = true;
             },
+            leaseHolds: () => runLeaseHolds(request.cancellationCell),
         })
         : undefined;
     if (checkpointer && request.cancellationCell) request.cancellationCell.checkpointer = checkpointer;

@@ -1947,6 +1947,8 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       progress.slot = slot.slot;
     }
 
+    // The hold on the run counts from before the claim was sent (`runLeaseHolds`).
+    const claimSentAt = performance.now();
     let claimed = await db.claimAgentRun(runId, tenantId, workerId, startedAt);
     if (!claimed) {
       logger.info('Agent run already claimed or not queued; skipping duplicate delivery', { runId });
@@ -2079,7 +2081,7 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       : Date.now() + maxDurationMs;
     // deadlineAt makes the turn itself stop at the ceiling (SDK timeout +
     // no conversation write), not just the run record.
-    const cancellationCell: AgentRunCancellationCell = { cancelled: false, deadlineAt };
+    const cancellationCell: AgentRunCancellationCell = { cancelled: false, deadlineAt, leaseRenewedAt: claimSentAt };
     checkpointOf.cell = cancellationCell;
 
     let resolveCancelObserved: (() => void) | undefined;
@@ -2090,6 +2092,8 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       resolveCancelObserved = () => resolve(CANCEL_SENTINEL);
     });
     const markSuperseded = () => {
+      // No tool with side effects starts for this execution any more (durable runs).
+      cancellationCell.checkpointer?.stop();
       if (cancellationCell.cancelled) return;
       cancellationCell.cancelled = true;
       resolveCancelObserved?.();
@@ -2107,8 +2111,13 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
     });
 
     const heartbeatTimer = setInterval(() => {
+      const sentAt = performance.now();
       void db.updateAgentRunHeartbeat(runId, workerId, new Date(), executionGuard)
         .then((updated) => {
+          if (updated) {
+            cancellationCell.leaseRenewedAt = Math.max(cancellationCell.leaseRenewedAt ?? 0, sentAt);
+            return;
+          }
           // Null = the row is no longer ours and running (the reconciler
           // failed it as worker_lost or queued it again, or it was finalized elsewhere). Stop
           // the turn instead of letting it write a result nobody will record.
