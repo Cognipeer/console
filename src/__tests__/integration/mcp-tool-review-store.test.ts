@@ -195,16 +195,18 @@ describe('a guardrail checking the tool definitions', () => {
       mode,
       hooks: {
         contractVersion: 2,
+        // A word list rather than a regex rule: the regex family scans within a
+        // wall-clock budget, and on a busy machine an overrun adds a fail-closed
+        // evaluation error next to the match (or holds the clean tool), which
+        // would make the counts below depend on load.
         policies: [
           {
             id: 'p-code-names',
-            family: 'regex',
+            family: 'word_filter',
             enabled: true,
             hooks: ['tool.post'],
             schedule: SYNC_BLOCK,
-            rules: [
-              { id: 'r-falcon', label: 'Falcon', pattern: 'Project Falcon', category: 'custom', severity: 'high', maxMatchChars: 32 },
-            ],
+            words: ['falcon'],
             message: 'Names an internal project.',
           },
         ],
