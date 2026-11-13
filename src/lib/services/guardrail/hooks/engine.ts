@@ -537,111 +537,6 @@ function withDefaultHooks(record: IGuardrailV2): IGuardrailV2 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MCP protection preset
-// ═══════════════════════════════════════════════════════════════════════════
-
-/** Pinned like `DEFAULT_TOOL_GUARDRAIL_KEY`: an MCP server binds the preset by this key. */
-export const MCP_PROTECTION_GUARDRAIL_KEY = 'mcp-protection';
-
-/**
- * The preset an MCP server can bind: limits and private-network URLs on both
- * hooks, credential redaction both ways, and the bundled prompt-shield
- * classifier on what the upstream returns. No PII family: personal data on an
- * MCP server is handled by the server's PII protection (a round trip), which a
- * one-way redaction here would destroy.
- */
-function mcpProtectionGuardrailHooks(): GuardrailHooksConfig {
-  return {
-    contractVersion: GUARDRAIL_CONTRACT_VERSION,
-    policies: [
-      {
-        id: 'mcp-limits',
-        family: 'tool_access',
-        enabled: true,
-        hooks: ['tool.pre', 'tool.post'],
-        schedule: SYNC_BLOCK,
-        label: 'Size limits and private-network URLs',
-        denyPrivateNetworks: true,
-        maxArgBytes: 512 * 1024,
-        maxResultBytes: 4 * 1024 * 1024,
-        maxArgDepth: 32,
-      },
-      {
-        id: 'mcp-secrets',
-        family: 'secrets',
-        enabled: true,
-        hooks: ['tool.pre', 'tool.post'],
-        schedule: SYNC_BLOCK,
-        action: 'redact',
-        label: 'Credential redaction',
-        known: true,
-        genericHighEntropy: false,
-      },
-      {
-        id: 'mcp-prompt-shield',
-        family: 'cognipeer_guardrail_prompt_shield',
-        enabled: true,
-        hooks: ['tool.post'],
-        schedule: SYNC_BLOCK,
-        action: 'block',
-        label: 'Instructions hidden in tool results',
-        categories: { prompt_injection: true, jailbreak: true, data_exfiltration: true },
-        profile: 'balanced',
-      },
-    ],
-    bindings: {
-      'tool.pre': { enabled: true, schedule: SYNC_BLOCK },
-      'tool.post': { enabled: true, schedule: SYNC_BLOCK },
-    },
-    stream: { enabled: false },
-    shortCircuit: false,
-  };
-}
-
-/**
- * Create the tenant's MCP protection preset if it does not exist yet, and
- * return it. Idempotent and race-safe in the same way as
- * `ensureDefaultToolGuardrail`; called when a server is bound to the preset.
- */
-export async function ensureMcpProtectionGuardrail(
-  tenantDbName: string,
-  tenantId: string,
-): Promise<IGuardrailV2> {
-  const existing = await getCachedGuardrail(tenantDbName, MCP_PROTECTION_GUARDRAIL_KEY, null);
-  if (existing) return existing;
-  try {
-    const created = await runWithTenantScope(tenantDbName, (db) =>
-      db.createGuardrail({
-        tenantId,
-        projectId: undefined,
-        key: MCP_PROTECTION_GUARDRAIL_KEY,
-        name: 'MCP protection',
-        description:
-          'Built-in preset for MCP servers: size limits, private-network URLs, credential redaction, and a prompt-shield check on tool results.',
-        type: 'preset',
-        target: 'input',
-        action: 'block',
-        enabled: true,
-        failMode: 'open',
-        // The server's binding mode (monitor / enforce) decides whether a finding blocks.
-        mode: 'enforce',
-        hooksVersion: 1,
-        hooks: mcpProtectionGuardrailHooks(),
-        metadata: { managed: 'guardrail-hook-plane', purpose: 'mcp-protection' },
-        createdBy: 'system',
-      }),
-    );
-    invalidateGuardrailCache(tenantDbName, MCP_PROTECTION_GUARDRAIL_KEY);
-    return created;
-  } catch (error) {
-    invalidateGuardrailCache(tenantDbName, MCP_PROTECTION_GUARDRAIL_KEY);
-    const raced = await getCachedGuardrail(tenantDbName, MCP_PROTECTION_GUARDRAIL_KEY, null);
-    if (raced) return raced;
-    throw error;
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // runHook
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1596,6 +1491,25 @@ function maskTextForLogging(text: string, findings: readonly GuardrailFinding[])
  * request's AsyncLocalStorage scope is still in place; `fireAndForget` then
  * reopens a snapshot of it for the write itself.
  */
+/** What the evaluation log keeps of a finding message whose call withholds its values (`logText`). */
+const WITHHELD_FINDING_MESSAGE = 'Not logged: PII protection is on for this call';
+
+/**
+ * A finding message as the evaluation log keeps it. A message can quote a value
+ * (a deny-listed path, a matched word, a model's explanation), so for a call
+ * logged with `logText` it goes through the caller's `logMask`, and is withheld
+ * when there is none or masking fails.
+ */
+async function loggedFindingMessage<S extends HookSubject>(call: HookCall<S>, message: string): Promise<string> {
+  if (call.logText === undefined || !message) return message;
+  if (!call.logMask) return WITHHELD_FINDING_MESSAGE;
+  try {
+    return await call.logMask(message);
+  } catch {
+    return WITHHELD_FINDING_MESSAGE;
+  }
+}
+
 function logHookEvaluation<S extends HookSubject>(params: {
   call: HookCall<S>;
   record: IGuardrailV2;
@@ -1625,6 +1539,17 @@ function logHookEvaluation<S extends HookSubject>(params: {
   const passed = !verdict.findings.some((finding) => finding.block);
 
   fireAndForget('guardrail-eval-log', async () => {
+    // Messages first, outside the tenant scope: masking one may scan it.
+    const messages = await Promise.all(verdict.findings.map((finding) => loggedFindingMessage(call, finding.message)));
+    const findings = verdict.findings.map((finding, index) => ({
+      ...finding,
+      message: messages[index],
+      // Never persist raw PII/banned values; keep a hint of the shape only —
+      // and not even that when the caller withholds the values (`logText`).
+      value: finding.value && call.logText === undefined
+        ? `${finding.value.slice(0, 2)}…(${finding.value.length} chars)`
+        : undefined,
+    }));
     // A fresh tenant scope: the runHook scope has usually exited by the time
     // this runs, and `switchToTenant` in a detached task is the cross-tenant
     // race in its purest form.
@@ -1642,18 +1567,12 @@ function logHookEvaluation<S extends HookSubject>(params: {
         target: hook,
         action: record.action,
         passed,
-        findings: verdict.findings.map((finding) => ({
-          ...finding,
-          // Never persist raw PII/banned values; keep a hint of the shape only.
-          value: finding.value
-            ? `${finding.value.slice(0, 2)}…(${finding.value.length} chars)`
-            : undefined,
-        })),
-        inputText: maskTextForLogging(subject.text, verdict.findings),
+        findings,
+        inputText: maskTextForLogging(call.logText ?? subject.text, verdict.findings),
         latencyMs: verdict.latencyMs,
         source: scope.source,
         requestId: scope.requestId,
-        message: passed ? null : (verdict.findings[0]?.message ?? null),
+        message: passed ? null : (findings[0]?.message ?? null),
         hook,
         decision: verdict.decision,
         riskScore: verdict.riskScore,

@@ -133,6 +133,10 @@ export interface ToolDefinitionReconcileInput {
   nextTools: IMcpTool[];
   /** The operator made this change (create, source edit): approved by that act, unless the scan rates it high. */
   operatorChange: boolean;
+  /** Findings of the server's definition guardrail per tool (definitionGuardrail.ts), shown with the scan's. */
+  guardrailFindings?: Record<string, McpDefinitionFinding[]>;
+  /** Tools whose approved definition the definition guardrail now blocks: they wait for review again. */
+  heldByGuardrail?: readonly string[];
   now?: Date;
 }
 
@@ -170,6 +174,11 @@ export function reconcileToolDefinitions(input: ToolDefinitionReconcileInput): T
   }
 
   const scan = scanToolDefinitions(input.nextTools);
+  for (const [name, findings] of Object.entries(input.guardrailFindings ?? {})) {
+    if (!findings.length || !nextNames.has(name)) continue;
+    scan[name] = [...(hasName(scan, name) ? scan[name] : []), ...findings];
+  }
+  const heldByGuardrail = new Set(input.heldByGuardrail ?? []);
   const policy = getToolChangePolicy(input.metadata);
   // A server stored before pinning existed: what it holds was in use, so it counts as approved.
   const pins: Record<string, string> = getToolPins(input.metadata)
@@ -182,9 +191,13 @@ export function reconcileToolDefinitions(input: ToolDefinitionReconcileInput): T
 
   for (const tool of input.nextTools) {
     const hash = toolDefinitionHash(tool);
-    const pinned = pins[tool.name];
-    const high = (scan[tool.name] ?? []).some((finding) => finding.severity === 'high');
+    const high = (hasName(scan, tool.name) ? scan[tool.name] : []).some((finding) => finding.severity === 'high');
     if (high) flagged.push(tool.name);
+    // An approved definition the definition guardrail now blocks loses its approval.
+    if (high && heldByGuardrail.has(tool.name) && hasName(pins, tool.name) && pins[tool.name] === hash) {
+      delete pins[tool.name];
+    }
+    const pinned = hasName(pins, tool.name) ? pins[tool.name] : undefined;
     if (pinned === hash) continue;
 
     const mustWait = high || (!input.operatorChange && policy === 'approve');

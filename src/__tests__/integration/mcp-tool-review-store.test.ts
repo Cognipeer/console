@@ -10,6 +10,8 @@
  *  - A tool whose name means something to JavaScript objects is stored, held
  *    and refused like any other name.
  *  - A stdio server saved before exact versions were required stays editable.
+ *  - A guardrail selected to check the definitions holds what it blocks, and
+ *    its own mode decides whether it blocks at all.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -42,7 +44,10 @@ vi.mock('@/lib/services/mcp/stdioRunner', async (importOriginal) => ({
 import { reloadConfig } from '@/lib/core/config';
 import { disconnectDatabase, getDatabase } from '@/lib/database';
 import type { IMcpServer, IMcpTool } from '@/lib/database';
+import { createGuardrail } from '@/lib/services/guardrail/guardrailService';
 import { listEnabledMcpTools, refreshMcpServerTools, updateMcpServer } from '@/lib/services/mcp';
+import { getDefinitionGuardrail } from '@/lib/services/mcp/definitionGuardrail';
+import type { McpDefinitionFinding } from '@/lib/services/mcp/definitionScan';
 import { executeMcpToolLocal } from '@/lib/services/mcp/mcpService';
 import { getToolPins, getToolReview, toolDefinitionHash } from '@/lib/services/mcp/toolSecurity';
 
@@ -173,5 +178,104 @@ describe('a stdio server saved before exact versions were required', () => {
     await expect(updateMcpServer(TENANT_DB_NAME, String(server._id), USER_ID, {
       stdioConfig: config('other-mcp@1.0.0'),
     })).resolves.toBeTruthy();
+  });
+});
+
+describe('a guardrail checking the tool definitions', () => {
+  const SYNC_BLOCK = { timing: 'sync', onFail: 'block' } as const;
+  /** A definition that names an internal project: nothing the scan looks for, only this workspace's rule. */
+  const leaky = tool('export', 'Exports a record for Project Falcon.');
+
+  async function codeNameRule(mode: 'enforce' | 'monitor') {
+    return createGuardrail(TENANT_DB_NAME, TENANT_ID, USER_ID, {
+      name: `Code names (${mode})`,
+      type: 'preset',
+      action: 'block',
+      projectId: PROJECT_ID,
+      mode,
+      hooks: {
+        contractVersion: 2,
+        policies: [
+          {
+            id: 'p-code-names',
+            family: 'regex',
+            enabled: true,
+            hooks: ['tool.post'],
+            schedule: SYNC_BLOCK,
+            rules: [
+              { id: 'r-falcon', label: 'Falcon', pattern: 'Project Falcon', category: 'custom', severity: 'high', maxMatchChars: 32 },
+            ],
+            message: 'Names an internal project.',
+          },
+        ],
+        bindings: { 'tool.post': { enabled: true, schedule: SYNC_BLOCK } },
+      },
+    } as never);
+  }
+
+  const scanOf = (server: IMcpServer) => (server.metadata?.toolScan ?? {}) as Record<string, McpDefinitionFinding[]>;
+  const enabled = (server: IMcpServer) => listEnabledMcpTools(server).map((t) => t.name).sort();
+
+  it('must exist, and applies only to servers whose tools come from outside Console', async () => {
+    const server = await insertServer({ key: 'check-missing', sourceType: 'remote', ...remote, tools: [tool('lookup')] });
+    await expect(updateMcpServer(TENANT_DB_NAME, String(server._id), USER_ID, {
+      definitionGuardrail: { guardrailKey: 'no-such-guardrail' },
+    })).rejects.toThrow(/definitionGuardrail.guardrailKey: guardrail "no-such-guardrail" was not found/);
+    await expect(updateMcpServer(TENANT_DB_NAME, String(server._id), USER_ID, {
+      guardrail: { guardrailKey: 'no-such-guardrail', mode: 'enforce' },
+    })).rejects.toThrow(/guardrail.guardrailKey: guardrail "no-such-guardrail" was not found/);
+
+    const rule = await codeNameRule('enforce');
+    const internal = await insertServer({ key: 'check-internal', sourceType: 'internal', tools: [tool('lookup')] });
+    await expect(updateMcpServer(TENANT_DB_NAME, String(internal._id), USER_ID, {
+      definitionGuardrail: { guardrailKey: rule.key },
+    })).rejects.toThrow(/outside Console/);
+  });
+
+  it('holds a definition it blocks, even an approved one, and keeps an approval given after', async () => {
+    const rule = await codeNameRule('enforce');
+    const server = await insertServer({ key: 'check-enforce', sourceType: 'remote', ...remote, tools: [tool('lookup'), leaky] });
+    const id = String(server._id);
+
+    await updateMcpServer(TENANT_DB_NAME, id, USER_ID, { definitionGuardrail: { guardrailKey: rule.key } });
+    let after = await stored(server);
+    expect(getToolReview(after.metadata).export?.reason).toBe('scan');
+    expect(enabled(after)).toEqual(['lookup']);
+    expect(scanOf(after).export.map((f) => f.severity)).toEqual(['high']);
+    expect(getDefinitionGuardrail(after.metadata)?.checked?.export?.blocked).toBe(true);
+
+    // The reviewer approves it anyway; checking again and refreshing find nothing new.
+    await updateMcpServer(TENANT_DB_NAME, id, USER_ID, {
+      toolReview: { approve: [{ name: 'export', hash: getToolReview(after.metadata).export.hash }] },
+    });
+    await updateMcpServer(TENANT_DB_NAME, id, USER_ID, { definitionGuardrail: { guardrailKey: rule.key } });
+    remoteDiscover.mockResolvedValueOnce(discovered([tool('lookup'), leaky]));
+    await refreshMcpServerTools(TENANT_DB_NAME, id, USER_ID);
+    after = await stored(server);
+    expect(getToolReview(after.metadata)).toEqual({});
+    expect(enabled(after)).toEqual(['export', 'lookup']);
+
+    // A changed definition it blocks waits again.
+    remoteDiscover.mockResolvedValueOnce(discovered([tool('lookup'), tool('export', 'Exports a record for Project Falcon, faster.')]));
+    await refreshMcpServerTools(TENANT_DB_NAME, id, USER_ID);
+    after = await stored(server);
+    expect(getToolReview(after.metadata).export?.reason).toBe('scan');
+
+    // Turning the check off drops its results and its findings.
+    await updateMcpServer(TENANT_DB_NAME, id, USER_ID, { definitionGuardrail: null });
+    after = await stored(server);
+    expect(after.metadata?.definitionGuardrail).toBeUndefined();
+    expect(scanOf(after).export).toBeUndefined();
+  });
+
+  it('in monitor mode only shows what it would block', async () => {
+    const rule = await codeNameRule('monitor');
+    const server = await insertServer({ key: 'check-monitor', sourceType: 'remote', ...remote, tools: [tool('lookup'), leaky] });
+
+    await updateMcpServer(TENANT_DB_NAME, String(server._id), USER_ID, { definitionGuardrail: { guardrailKey: rule.key } });
+    const after = await stored(server);
+    expect(getToolReview(after.metadata)).toEqual({});
+    expect(enabled(after)).toEqual(['export', 'lookup']);
+    expect(scanOf(after).export.map((f) => f.severity)).toEqual(['medium']);
   });
 });

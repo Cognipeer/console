@@ -59,6 +59,7 @@ import {
   piiLoggedPayloads,
   preparePiiLogView,
   type McpPiiLog,
+  type McpPiiRoundTrip,
 } from './mcpPii';
 import {
   applyToolReviewDecision,
@@ -68,6 +69,7 @@ import {
   reconcileToolDefinitions,
   type ToolDefinitionReconcileResult,
 } from './toolSecurity';
+import { checkToolDefinitionsWithGuardrail, getDefinitionGuardrail } from './definitionGuardrail';
 import { buildOpenApiRequest } from './openApiRequest';
 import { specDeclaredParameters } from './openApiSpecParameters';
 import {
@@ -97,8 +99,14 @@ import { isStdioRunnerEnabled, pinnedPackageSpecError, stdioCallTool, stdioDisco
 import { mcpSandboxRunner } from '@/enterprise/registry';
 import { toGuardrailMode } from '@/lib/services/guardrail/hooks/contract';
 import {
+  DEFAULT_TOOL_GUARDRAIL_KEY,
+  ensureDefaultToolGuardrail,
+  resolveGuardrail,
+} from '@/lib/services/guardrail/hooks/engine';
+import {
   ensureMcpGuardrailHook,
   invalidateMcpGuardrailBinding,
+  setMcpGuardrailLogView,
 } from '@/lib/services/guardrail/hooks/mcpHook';
 import { getInternalMcpProvider, requireInternalMcpProvider } from './internal/registry';
 import type { InternalMcpProvider } from './internal/types';
@@ -209,9 +217,14 @@ export function resolveExposure(server: IMcpServer): IMcpExposureConfig {
 const warnedStaleShields = new Set<string>();
 
 export interface McpGuardrailBinding {
-  /** Kept in the MCP vocabulary so it feeds `McpGuardrailContext.mode` directly. */
+  /**
+   * Kept in the MCP vocabulary so it feeds `McpGuardrailContext.mode` directly.
+   * 'off' = no guardrail. 'enforce' = a guardrail is selected and its own mode
+   * governs. 'monitor' = a binding saved before a guardrail could be selected,
+   * when the server carried a mode of its own: evaluated, never blocking.
+   */
   mode: 'off' | 'monitor' | 'enforce';
-  /** Absent = fall back to the tenant's default tool guardrail. */
+  /** Absent = fall back to the tenant's default tool guardrail (bindings saved without a key). */
   guardrailKey?: string;
 }
 
@@ -272,19 +285,38 @@ export function resolveMcpGuardrailBinding(server: IMcpServer): McpGuardrailBind
 }
 
 /**
- * Materialise a built-in guardrail preset a binding names: the MCP protection
- * preset is created the first time a server binds it. Imported lazily — this
- * module is loaded inside the guardrail registry's import phase.
+ * The guardrail a server's own binding evaluates on each of its tool calls, when
+ * that binding can block: the selected guardrail, or the tenant's default tool
+ * guardrail for a binding saved without a key. Undefined for a server with no
+ * binding or a monitor-only one. An agent's guard skips this key on the
+ * server's tools, so a guardrail bound on both layers runs once per call.
  */
-async function ensureBoundGuardrailPreset(
+export function mcpServerGuardrailKey(server: IMcpServer): string | undefined {
+  const { mode, guardrailKey } = resolveMcpGuardrailBinding(server);
+  if (mode !== 'enforce') return undefined;
+  return guardrailKey ?? DEFAULT_TOOL_GUARDRAIL_KEY;
+}
+
+/**
+ * A guardrail a server names must exist where the server's calls are evaluated:
+ * resolved exactly as the hook plane resolves it at call time (the server's
+ * project first, then tenant-wide), so a key that would evaluate nothing is
+ * refused when it is saved rather than ignored on every call. The tenant's
+ * default tool guardrail is created on first use, so naming it creates it.
+ */
+async function assertMcpGuardrailExists(
   tenantDbName: string,
-  tenantId: string,
-  guardrailKey: string | undefined,
+  scope: { tenantId: string; projectId?: string },
+  guardrailKey: string,
+  field: string,
 ): Promise<void> {
-  if (!guardrailKey) return;
-  const engine = await import('@/lib/services/guardrail/hooks/engine');
-  if (guardrailKey === engine.MCP_PROTECTION_GUARDRAIL_KEY) {
-    await engine.ensureMcpProtectionGuardrail(tenantDbName, tenantId);
+  if (guardrailKey === DEFAULT_TOOL_GUARDRAIL_KEY) {
+    await ensureDefaultToolGuardrail(tenantDbName, scope.tenantId);
+    return;
+  }
+  const record = await resolveGuardrail(tenantDbName, guardrailKey, scope.projectId);
+  if (!record) {
+    throw new McpServerConfigError(`${field}: guardrail "${guardrailKey.slice(0, 120)}" was not found`);
   }
 }
 
@@ -1162,7 +1194,9 @@ export async function createMcpServer(
 ): Promise<IMcpServer> {
   const sourceType = validateCreateInput(input);
   if (input.upstreamAuth?.type === CONSOLE_IDENTITY_AUTH_TYPE) await prepareConsoleIdentityKey(tenantDbName);
-  await ensureBoundGuardrailPreset(tenantDbName, tenantId, input.guardrail?.guardrailKey);
+  if (input.guardrail?.guardrailKey) {
+    await assertMcpGuardrailExists(tenantDbName, { tenantId, projectId }, input.guardrail.guardrailKey, 'guardrail.guardrailKey');
+  }
 
   const key = await generateUniqueKey(tenantDbName, projectId, input.key?.trim() || input.name);
   const endpointSlug = await resolveEndpointSlug(tenantDbName, input.endpointSlug);
@@ -1397,6 +1431,14 @@ function diffForAudit(before: IMcpServer, after: Partial<IMcpServer>): Record<st
     if (fromInstructions !== toInstructions) {
       changes.instructions = { from: `${fromInstructions.length} chars`, to: `${toInstructions.length} chars` };
     }
+    const fromDefinitionGuardrail = getDefinitionGuardrail(before.metadata as Record<string, unknown> | undefined);
+    const toDefinitionGuardrail = getDefinitionGuardrail(after.metadata as Record<string, unknown> | undefined);
+    if (fromDefinitionGuardrail?.guardrailKey !== toDefinitionGuardrail?.guardrailKey) {
+      changes.definitionGuardrail = {
+        from: fromDefinitionGuardrail?.guardrailKey ?? null,
+        to: toDefinitionGuardrail?.guardrailKey ?? null,
+      };
+    }
   }
   return changes;
 }
@@ -1449,6 +1491,25 @@ export async function updateMcpServer(
   const existing = await db.findMcpServerById(serverId);
   if (!existing) return null;
 
+  const nextGuardrailKey = input.guardrail?.guardrailKey;
+  if (nextGuardrailKey && nextGuardrailKey !== existing.guardrail?.guardrailKey) {
+    await assertMcpGuardrailExists(tenantDbName, existing, nextGuardrailKey, 'guardrail.guardrailKey');
+  }
+  if (input.definitionGuardrail) {
+    if (!isPinnedSource(resolveSourceType(existing))) {
+      throw new McpServerConfigError(
+        'definitionGuardrail applies to servers whose tools come from outside Console (remote, stdio, OpenAPI)',
+      );
+    }
+    await assertMcpGuardrailExists(
+      tenantDbName,
+      existing,
+      input.definitionGuardrail.guardrailKey,
+      'definitionGuardrail.guardrailKey',
+    );
+  }
+  await db.switchToTenant(tenantDbName);
+
   const updateData: Record<string, unknown> = { updatedBy: userId };
 
   if (input.key !== undefined && input.key.trim()) {
@@ -1473,7 +1534,6 @@ export async function updateMcpServer(
   // Either binding column sent → both written (two-way projection, one
   // release); a body that names neither leaves both untouched.
   Object.assign(updateData, projectMcpGuardrailBinding(input, existing));
-  await ensureBoundGuardrailPreset(tenantDbName, existing.tenantId, input.guardrail?.guardrailKey);
   if (input.remoteConfig !== undefined) updateData.remoteConfig = input.remoteConfig;
   if (input.stdioConfig !== undefined) {
     updateData.stdioConfig = mergeStdioConfigUpdate(existing.stdioConfig, input.stdioConfig);
@@ -1719,16 +1779,41 @@ export async function updateMcpServer(
   const currentMetadata = (): Record<string, unknown> =>
     ({ ...((updateData.metadata as Record<string, unknown> | undefined) ?? existing.metadata ?? {}) });
   const currentTools = (updateData.tools as IMcpTool[] | undefined) ?? existing.tools ?? [];
+  // The guardrail that checks tool definitions. Saving it checks every tool
+  // again; the same key keeps its earlier results, so a block an operator has
+  // already approved through is not raised again.
+  if (input.definitionGuardrail !== undefined) {
+    const next = currentMetadata();
+    if (!input.definitionGuardrail) {
+      delete next.definitionGuardrail;
+    } else if (getDefinitionGuardrail(next)?.guardrailKey !== input.definitionGuardrail.guardrailKey) {
+      next.definitionGuardrail = { guardrailKey: input.definitionGuardrail.guardrailKey };
+    }
+    updateData.metadata = next;
+  }
   let toolTrust: ToolDefinitionReconcileResult | undefined;
-  // A source the operator just changed is approved by that edit; a definition
-  // the scan rates high still waits for review.
-  if (updateData.tools !== undefined) {
-    toolTrust = reconcileToolDefinitions({
+  if (updateData.tools !== undefined || input.definitionGuardrail !== undefined) {
+    const check = await checkToolDefinitionsWithGuardrail({
+      tenantDbName,
+      tenantId: existing.tenantId,
+      projectId: existing.projectId,
+      serverKey: existing.key,
       sourceType,
       metadata: currentMetadata(),
+      tools: currentTools,
+      all: input.definitionGuardrail !== undefined,
+    });
+    await db.switchToTenant(tenantDbName);
+    // A source the operator just changed is approved by that edit; a definition
+    // the scan or the definition guardrail rates high still waits for review.
+    toolTrust = reconcileToolDefinitions({
+      sourceType,
+      metadata: check.metadata,
       previousTools: existing.tools ?? [],
       nextTools: currentTools,
-      operatorChange: true,
+      operatorChange: updateData.tools !== undefined,
+      guardrailFindings: check.findings,
+      heldByGuardrail: check.newlyBlocked,
     });
     updateData.metadata = toolTrust.metadata;
   }
@@ -1773,7 +1858,10 @@ export async function updateMcpServer(
   }
 
   if (updated) {
-    const changes = diffForAudit(existing, updateData as Partial<IMcpServer>);
+    const changes = {
+      ...diffForAudit(existing, updateData as Partial<IMcpServer>),
+      ...toolDefinitionAuditChanges(toolTrust),
+    };
     const isSecretsChange = 'upstreamAuth' in changes || 'stdioConfig' in changes;
     void logMcpAudit(tenantDbName, {
       tenantId: existing.tenantId,
@@ -1870,13 +1958,26 @@ export async function refreshMcpServerTools(
           instructions,
         );
       }
+      // New and changed definitions go to the definition guardrail, if one is selected.
+      const check = await checkToolDefinitionsWithGuardrail({
+        tenantDbName,
+        tenantId: server.tenantId,
+        projectId: server.projectId,
+        serverKey: server.key,
+        sourceType: resolveSourceType(server),
+        metadata: (refreshUpdate.metadata ?? server.metadata) as Record<string, unknown> | undefined,
+        tools,
+      });
+      await db.switchToTenant(tenantDbName);
       // What the upstream changed follows the server's change policy.
       definitionTrust = reconcileToolDefinitions({
         sourceType: resolveSourceType(server),
-        metadata: refreshUpdate.metadata ?? server.metadata,
+        metadata: check.metadata,
         previousTools: server.tools ?? [],
         nextTools: tools,
         operatorChange: false,
+        guardrailFindings: check.findings,
+        heldByGuardrail: check.newlyBlocked,
       });
       refreshUpdate.metadata = definitionTrust.metadata;
       updated = await db.updateMcpServer(serverId, refreshUpdate);
@@ -2767,6 +2868,17 @@ async function withConsoleIdentityScrubbed<T>(
   }
 }
 
+/**
+ * The reason a guardrail block gives, as the error carries it. For a call with
+ * PII protection the values in it (a deny-listed path, a quoted word) become the
+ * call's tokens: the error is kept by the request log and an agent's trace. A
+ * reason that cannot be masked is left out.
+ */
+async function blockReasonFor(reason: string | undefined, pii: McpPiiRoundTrip | null): Promise<string | undefined> {
+  if (!reason || !pii) return reason;
+  return pii.protectText(reason).catch(() => undefined);
+}
+
 export async function executeMcpToolLocal(
   server: IMcpServer,
   toolName: string,
@@ -2832,25 +2944,42 @@ export async function executeMcpToolLocal(
     guardrailKey,
     mode: guardrailMode,
   };
+
+  // PII protection: personal data in the arguments leaves for the upstream as
+  // tokens, and the caller gets the result with this call's tokens restored.
+  // The guardrail judges the real values on both sides; its evaluation log,
+  // like the request log, keeps the tokenized ones. Tokenized up front so that
+  // even a call the guardrail blocks is logged without the values.
+  const pii = await openMcpPiiRoundTrip(server, sourceType, realToolName);
+  const tokenizedArgs = pii ? await pii.protect(args) : undefined;
+  if (pii && tokenizedArgs) {
+    markPiiArgumentsView(args, tokenizedArgs);
+    // Finding messages can quote a value (a deny-listed path): logged with the same tokens.
+    setMcpGuardrailLogView(guardCtx, { args: tokenizedArgs, mask: (text) => pii.protectText(text) });
+  }
+
   let effectiveArgs = args;
   if (guardrailMode !== 'off') {
     const verdict = await guardrail.beforeToolCall(guardCtx, args);
     if (!verdict.allowed && guardrailMode === 'enforce') {
+      const reason = await blockReasonFor(verdict.reason, pii);
       // TODO(v1.3.0): rename to `Blocked by guardrail` once the operator
       // runbooks and log greps that match this exact sentence have been
       // updated. Both strings below are load-bearing OUTSIDE this repo — do
       // not "clean them up" with the rest of the Aegis removal.
-      throw new Error(`Blocked by Aegis shield${verdict.reason ? `: ${verdict.reason}` : ''}`);
+      throw new Error(`Blocked by Aegis shield${reason ? `: ${reason}` : ''}`);
     }
     if (verdict.args) effectiveArgs = verdict.args;
   }
 
-  // PII protection: after the guardrail (which judges the real values), personal data in the arguments is
-  // replaced by tokens for the upstream; the caller gets the result with this call's tokens restored.
-  const pii = await openMcpPiiRoundTrip(server, sourceType, realToolName);
-  const upstreamArgs = pii ? await pii.protect(effectiveArgs) : effectiveArgs;
-  if (pii) markPiiArgumentsView(args, upstreamArgs);
-  else preparePiiLogView(args, false);
+  // Tokenized again only when the guardrail rewrote the arguments.
+  let upstreamArgs = effectiveArgs;
+  if (pii && tokenizedArgs) {
+    upstreamArgs = effectiveArgs === args ? tokenizedArgs : await pii.protect(effectiveArgs);
+    markPiiArgumentsView(args, upstreamArgs);
+  } else {
+    preparePiiLogView(args, false);
+  }
 
   let result: unknown;
   let logSummary: Record<string, unknown> | undefined;
@@ -2921,22 +3050,32 @@ export async function executeMcpToolLocal(
     throw safeError;
   }
 
+  // The upstream's result, with tokens; the guardrail and the caller get the values back.
+  const upstreamResult = result;
+  const restored = pii ? pii.restore(upstreamResult) : upstreamResult;
+  result = restored;
+
   // Guardrail `tool.post` hook.
   if (guardrailMode !== 'off') {
+    if (pii) setMcpGuardrailLogView(guardCtx, { result: { value: upstreamResult } });
     const verdict = await guardrail.afterToolCall(guardCtx, result);
     if (!verdict.allowed && guardrailMode === 'enforce') {
+      const reason = await blockReasonFor(verdict.reason, pii);
       // TODO(v1.3.0): see the `tool.pre` throw above — same runbook contract.
-      throw new Error(`Response blocked by Aegis shield${verdict.reason ? `: ${verdict.reason}` : ''}`);
+      throw new Error(`Response blocked by Aegis shield${reason ? `: ${reason}` : ''}`);
     }
     if (verdict.result !== undefined) result = verdict.result;
   }
 
-  // The guardrail saw the tokenized result; the caller gets the values back. The log keeps what crossed
-  // (for a composite: what its protected member left on the arguments it was handed).
+  // The log keeps what crossed (for a composite: what its protected member left
+  // on the arguments it was handed). A result the guardrail rewrote is logged as
+  // the caller got it, tokenized again: a value gets the same token every time.
   let piiLog: McpPiiLog | undefined;
   if (pii) {
-    piiLog = { arguments: upstreamArgs, result };
-    result = pii.restore(result);
+    piiLog = {
+      arguments: upstreamArgs,
+      result: result === restored ? upstreamResult : await pii.protectValue(result),
+    };
   } else {
     piiLog = piiLogOf(upstreamArgs);
   }

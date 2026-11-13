@@ -129,6 +129,15 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   - In an agent run, MCP tools whose names clash with each other or with another tool are offered as
     `<serverKey>__<tool>`, and MCP tools come after the agent's other tools. Approval settings still use the tool's own
     name.
+  - A server's guardrail is chosen by key and the guardrail's own mode applies: `guardrail: { "guardrailKey": "..." }`
+    without a `mode` now binds it (it used to leave the server unguarded), and a key that does not exist is refused
+    (`400`). `{ "mode": "off" }` removes the guardrail. A server saved with `mode: "monitor"` keeps evaluating without
+    blocking until its guardrail is chosen again; one saved with a mode and no key keeps the default tool guardrail.
+  - The managed **MCP protection** guardrail (`mcp-protection`) of v1.34.0 is no longer created, offered or selected
+    for new servers. Where it was created it stays as an ordinary guardrail, and servers bound to it keep it; naming
+    it where it was never created is refused like any other missing key.
+  - An agent's tool guardrails also run on calls to MCP servers that have a guardrail of their own; they used to be
+    skipped there.
 
 ### Agent runs and run classes
 
@@ -704,9 +713,19 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - **Tool definition review.** New and changed definitions are scanned for text aimed at the model (hidden characters,
   instructions that override or conceal, requests for local files) and shown with a line diff against the approved
   definition. A decision applies to the definition shown: one that changed in the meantime waits for another look.
-- New servers bind the managed **MCP protection** guardrail (`mcp-protection`) in monitor mode: size limits and
-  private-network URLs on arguments and results, credential redaction both ways, and the prompt-shield classifier on
-  results.
+- **A guardrail of your own on the server.** The **Security** tab (and the create form) selects one of the
+  workspace's guardrails for the server's tool calls, and the guardrail's own mode (enforce, monitor, disabled)
+  applies. No guardrail is selected by default. An agent's tool guardrails run around it: on the way in the agent's
+  first, then the server's; on the way out the server's first, then the agent's. A guardrail both name in the same
+  project runs once.
+- With PII protection on, the guardrails judge the real values in both directions; their evaluation logs keep the
+  tokens, as the request log does, finding messages included. The reason of a block names the values by their tokens
+  too.
+- **Definition check guardrail.** A guardrail can also check the tool definitions of a remote, stdio or OpenAPI server
+  with its input and tool-result checks (*Tool definition changes* on the **Security** tab; API: `definitionGuardrail:
+  { "guardrailKey": "..." }` on the server update, `null` to turn it off). A definition it blocks waits for review,
+  an approved one too when the block is new; in monitor mode its findings are only shown. Saving the selection checks
+  every tool again; a tool refresh checks new and changed definitions, or every tool once the guardrail has changed.
 - API tokens can be limited to some MCP servers (`allowedMcpServerIds`; *MCP servers* on the token form).
 - MCP tool calls made by agent runs appear in the server's request log.
 

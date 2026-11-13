@@ -23048,6 +23048,22 @@ components:
             - monitor
             - enforce
           description: Aegis enforcement mode. Defaults to `off`.
+    McpGuardrailInput:
+      type: object
+      description: >-
+        The guardrail that evaluates the server's tool calls (arguments at `tool.pre`, results at `tool.post`). Send `guardrailKey`: the guardrail's own mode (enforce, monitor, disabled) applies. `{ "mode": "off" }` removes it. A key that does not exist is refused.
+      properties:
+        guardrailKey:
+          type: string
+          description: Key of a guardrail in the server's project or the workspace.
+        mode:
+          type: string
+          enum:
+            - off
+            - monitor
+            - enforce
+          description: >-
+            `off` removes the guardrail. `monitor` and `enforce` are kept for older clients: `monitor` evaluates without ever blocking, `enforce` lets the guardrail's mode apply, and either one without a key selects the default tool guardrail.
     McpConsoleExecuteRequest:
       type: object
       required:
@@ -23148,6 +23164,8 @@ components:
           $ref: "#/components/schemas/McpExposureInput"
         aegis:
           $ref: "#/components/schemas/McpAegisInput"
+        guardrail:
+          $ref: "#/components/schemas/McpGuardrailInput"
         access:
           $ref: "#/components/schemas/ResourceAccessList"
     McpExecuteRequest:
@@ -23632,6 +23650,18 @@ components:
           $ref: "#/components/schemas/McpExposureInput"
         aegis:
           $ref: "#/components/schemas/McpAegisInput"
+        guardrail:
+          $ref: "#/components/schemas/McpGuardrailInput"
+        definitionGuardrail:
+          type: object
+          nullable: true
+          description: >-
+            A guardrail that checks the tool definitions of a remote, stdio or OpenAPI server with its input and tool-result checks. A definition it blocks waits for review; in monitor mode its findings are only shown. Saving checks every tool again. `null` turns the check off.
+          required:
+            - guardrailKey
+          properties:
+            guardrailKey:
+              type: string
         runtimeHeaders:
           type: object
           nullable: true

@@ -27,6 +27,7 @@ import type { McpServerView } from '@/lib/services/mcp';
 import type { McpDefinitionFinding } from '@/lib/services/mcp/definitionScan';
 import type { McpToolReviewEntry } from '@/lib/services/mcp/toolSecurity';
 import { lineDiff } from './lineDiff';
+import { mcpGuardrailSelectData, type McpGuardrailOption } from './mcpGuardrailOptions';
 
 /** Sources whose upstream is outside Console: their tool definitions are pinned and their calls can be PII-protected. */
 const OUTSIDE_SOURCES = new Set(['remote', 'stdio', 'openapi']);
@@ -36,7 +37,7 @@ const SEVERITY_COLORS: Record<McpDefinitionFinding['severity'], string> = { high
 const REASON_LABELS: Record<McpToolReviewEntry['reason'], { label: string; color: string }> = {
   new: { label: 'New tool', color: 'blue' },
   changed: { label: 'Definition changed', color: 'orange' },
-  scan: { label: 'Flagged by the scan', color: 'red' },
+  scan: { label: 'Flagged by a check', color: 'red' },
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -71,6 +72,8 @@ export interface McpSecurityPanelProps {
   onServerUpdated: (server: McpServerView) => void;
   /** The guardrail binding card, kept by the detail view (it owns the guardrail list and the binding save). */
   guardrailSection: ReactNode;
+  /** The workspace's guardrails, for the definition check. */
+  guardrails: McpGuardrailOption[];
 }
 
 /**
@@ -79,7 +82,7 @@ export interface McpSecurityPanelProps {
  * of tool definitions that changed. The same panel serves the MCP hub page and
  * an agent's own server (the drawer on the agent screen).
  */
-export default function McpSecurityPanel({ server, onServerUpdated, guardrailSection }: McpSecurityPanelProps) {
+export default function McpSecurityPanel({ server, onServerUpdated, guardrailSection, guardrails }: McpSecurityPanelProps) {
   const tPii = useTranslations('piiProtection');
   const metadata = (server.metadata ?? {}) as Record<string, unknown>;
   const outside = OUTSIDE_SOURCES.has(server.sourceType);
@@ -150,6 +153,16 @@ export default function McpSecurityPanel({ server, onServerUpdated, guardrailSec
   const hasHigh = (name: string) => (scan[name] ?? []).some((finding) => finding.severity === 'high');
   const bulkApprovable = pending.filter((name) => !hasHigh(name));
   const flaggedApproved = Object.keys(scan).filter((name) => !review[name]).sort();
+  const definitionGuardrailKey = isRecord(metadata.definitionGuardrail)
+    && typeof metadata.definitionGuardrail.guardrailKey === 'string'
+    ? metadata.definitionGuardrail.guardrailKey
+    : null;
+  const definitionGuardrail = guardrails.find((option) => option.key === definitionGuardrailKey);
+  const saveDefinitionGuardrail = (guardrailKey: string | null, done: string) => void save(
+    'definition',
+    { definitionGuardrail: guardrailKey ? { guardrailKey } : null },
+    done,
+  );
 
   return (
     <Stack gap="md">
@@ -241,7 +254,7 @@ export default function McpSecurityPanel({ server, onServerUpdated, guardrailSec
               <Text size="xs" c="dimmed" mt={4} maw={640}>
                 Each tool’s definition (name, description, input schema) is pinned when it is approved. A new tool or
                 a changed definition found by Update tools or a background refresh waits here and cannot be called
-                until it is approved. A definition the scan rates high risk always waits.
+                until it is approved. A definition the scan or the definition check rates high risk always waits.
               </Text>
             </Box>
             <Select
@@ -260,6 +273,49 @@ export default function McpSecurityPanel({ server, onServerUpdated, guardrailSec
               }}
             />
           </Group>
+
+          <Box mt="md">
+            <Text size="sm" fw={600}>Definition check guardrail</Text>
+            <Text size="xs" c="dimmed" mt={2} maw={640}>
+              Optionally check each definition with one of your guardrails too, with its input and tool-result
+              checks. Its own mode applies: a definition it blocks waits for review, even an approved one; in
+              monitor mode its findings are only shown. Saving checks every tool again; Update tools checks new
+              and changed definitions, or every tool once the guardrail has changed.
+            </Text>
+            <Group gap="xs" mt="xs" align="center">
+              <Select
+                size="xs"
+                w={320}
+                aria-label="Definition check guardrail"
+                clearable
+                searchable
+                placeholder="No guardrail"
+                nothingFoundMessage="No guardrail found"
+                data={mcpGuardrailSelectData(guardrails, definitionGuardrailKey)}
+                value={definitionGuardrailKey}
+                disabled={saving === 'definition'}
+                onChange={(next) => {
+                  if ((next ?? null) === definitionGuardrailKey) return;
+                  saveDefinitionGuardrail(next ?? null, next ? 'Tool definitions checked' : 'Definition check turned off');
+                }}
+              />
+              {definitionGuardrailKey ? (
+                <Button
+                  size="xs"
+                  variant="default"
+                  loading={saving === 'definition'}
+                  onClick={() => saveDefinitionGuardrail(definitionGuardrailKey, 'Tool definitions checked again')}
+                >
+                  Check again
+                </Button>
+              ) : null}
+            </Group>
+            {definitionGuardrail && !definitionGuardrail.definitionBound ? (
+              <Text size="xs" c="orange" mt={4}>
+                “{definitionGuardrail.name}” has no input.pre or tool.post hook enabled, so it checks nothing here.
+              </Text>
+            ) : null}
+          </Box>
 
           {pending.length === 0 ? (
             <Text size="sm" c="dimmed" mt="sm">No tool is waiting for approval.</Text>
@@ -302,7 +358,7 @@ export default function McpSecurityPanel({ server, onServerUpdated, guardrailSec
 
           {flaggedApproved.length ? (
             <Box mt="md">
-              <Text size="sm" fw={600}>Scan findings on approved tools</Text>
+              <Text size="sm" fw={600}>Findings on approved tools</Text>
               <Stack gap={6} mt={6}>
                 {flaggedApproved.map((name) => (
                   <Box key={name}>
@@ -391,7 +447,8 @@ function PendingTool({
       {high ? (
         <Alert color="red" variant="light" mt="xs" p="xs" icon={<IconAlertTriangle size={14} />}>
           <Text size="xs">
-            The scan found text in this definition that tries to steer the model. Approve only if you trust it.
+            A check rated this definition high risk, such as text that tries to steer the model. Approve only if you
+            trust it.
           </Text>
         </Alert>
       ) : null}

@@ -147,3 +147,77 @@ describe('Customer PII Redaction preset on input.pre', () => {
     expect(log.inputText).not.toContain(PHONE);
   });
 });
+
+describe('the text an evaluation log keeps', () => {
+  it('is the log text the caller gives, with no hint of the values', async () => {
+    const LOGGED = 'Do I need to tell my manager first or HR? My email is [EMAIL_kqzvtmwb] and phone [PHONE_abcdefgh].';
+    await runHook({
+      contractVersion: 2,
+      hook: 'input.pre',
+      subject: { kind: 'text', text: USER_TURN, segments: [{ text: USER_TURN, path: '/text', offset: 0 }] },
+      scope,
+      guardrailKeys: ['customer-pii-redaction'],
+      logText: LOGGED,
+    });
+
+    await vi.waitFor(() => expect(hoisted.createGuardrailEvaluationLog).toHaveBeenCalledTimes(1));
+    const log = hoisted.createGuardrailEvaluationLog.mock.calls[0][0] as {
+      findings: Array<{ category: string; value?: string }>;
+      inputText: string;
+    };
+    expect(log.inputText).toBe(LOGGED);
+    expect(log.findings.map((f) => f.category).sort()).toEqual(['email', 'phone']);
+    expect(log.findings.every((f) => f.value === undefined)).toBe(true);
+  });
+
+  it('keeps finding messages only as the caller’s masker gives them, and withholds them otherwise', async () => {
+    const LOGGED = 'My email is [EMAIL_kqzvtmwb].';
+    const masks: Array<((text: string) => Promise<string>) | undefined> = [
+      async (text) => `masked: ${text}`,
+      undefined,
+      async () => {
+        throw new Error('scan failed');
+      },
+    ];
+    for (const logMask of masks) {
+      await runHook({
+        contractVersion: 2,
+        hook: 'input.pre',
+        subject: { kind: 'text', text: USER_TURN, segments: [{ text: USER_TURN, path: '/text', offset: 0 }] },
+        scope,
+        guardrailKeys: ['customer-pii-redaction'],
+        logText: LOGGED,
+        ...(logMask ? { logMask } : {}),
+      });
+    }
+
+    await vi.waitFor(() => expect(hoisted.createGuardrailEvaluationLog).toHaveBeenCalledTimes(3));
+    const messages = hoisted.createGuardrailEvaluationLog.mock.calls.map(
+      ([log]) => (log as { findings: Array<{ message: string }> }).findings.map((f) => f.message),
+    );
+    expect(messages[0].length).toBeGreaterThan(0);
+    expect(messages[0].every((message) => message.startsWith('masked: '))).toBe(true);
+    for (const withheld of [messages[1], messages[2]]) {
+      expect(withheld.every((message) => message === 'Not logged: PII protection is on for this call')).toBe(true);
+    }
+  });
+
+  it('is the subject itself, masked, when the caller gives none', async () => {
+    await runHook({
+      contractVersion: 2,
+      hook: 'input.pre',
+      subject: { kind: 'text', text: USER_TURN, segments: [{ text: USER_TURN, path: '/text', offset: 0 }] },
+      scope,
+      guardrailKeys: ['customer-pii-redaction'],
+    });
+
+    await vi.waitFor(() => expect(hoisted.createGuardrailEvaluationLog).toHaveBeenCalledTimes(1));
+    const log = hoisted.createGuardrailEvaluationLog.mock.calls[0][0] as {
+      findings: Array<{ value?: string }>;
+      inputText: string;
+    };
+    expect(log.inputText).toContain('Do I need to tell my manager first or HR?');
+    // A short hint of each value, never the value itself.
+    expect(log.findings.every((f) => typeof f.value === 'string' && !f.value.includes(EMAIL))).toBe(true);
+  });
+});

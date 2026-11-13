@@ -60,7 +60,14 @@ import McpToolArgsEditor from '@/components/mcp/McpToolArgsEditor';
 import McpToolsPanel from '@/components/mcp/McpToolsPanel';
 import McpMembersPanel from '@/components/mcp/McpMembersPanel';
 import McpSecurityPanel from '@/components/mcp/McpSecurityPanel';
-import { withMcpProtectionOption } from '@/components/mcp/mcpProtectionOption';
+import {
+  DEFAULT_TOOL_GUARDRAIL_KEY,
+  MCP_GUARDRAIL_MODE_HINTS,
+  mcpGuardrailSelectData,
+  readMcpGuardrailOptions,
+  type McpGuardrailOption,
+  type McpGuardrailOptionMode,
+} from '@/components/mcp/mcpGuardrailOptions';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
 import ConsoleIdentityNote, { type ConsoleIdentityIssuerInfo } from '@/components/iam/ConsoleIdentityNote';
@@ -234,32 +241,12 @@ const auditColumns: DataGridColumn<McpAuditEntry>[] = [
   },
 ];
 
-/** Wire shape of `IMcpGuardrailConfig.mode` — 'off', not GuardrailMode's 'disabled'. */
-type GuardrailBindingMode = 'off' | 'monitor' | 'enforce';
-
-const GUARDRAIL_MODE_COLORS: Record<GuardrailBindingMode, string> = {
-  off: 'gray',
-  monitor: 'yellow',
+/** Colours of the selected guardrail's own mode. */
+const GUARDRAIL_MODE_COLORS: Record<McpGuardrailOptionMode, string> = {
   enforce: 'red',
+  monitor: 'yellow',
+  disabled: 'gray',
 };
-
-// An ABSENT guardrailKey means "use the tenant's default tool guardrail", which
-// is a real choice — so it needs an option value of its own rather than the
-// empty string, which Mantine's Select reads as "nothing selected".
-const DEFAULT_GUARDRAIL_VALUE = '__default__';
-
-/**
- * A guardrail bindable to this server's tool calls. `toolBound` is reported
- * because a guardrail only touches an MCP call through its `tool.pre` /
- * `tool.post` bindings, and a legacy record lifts onto `input.pre`/`output.pre`
- * only — binding one of those here enforces nothing.
- */
-interface GuardrailOption {
-  key: string;
-  name: string;
-  enabled: boolean;
-  toolBound: boolean;
-}
 
 interface McpAggregateView {
   totalRequests: number;
@@ -333,7 +320,7 @@ export default function McpDetailView({ serverId, embedded }: McpDetailViewProps
     aegis?: { hookAvailable: boolean };
     consoleIdentity?: ConsoleIdentityIssuerInfo;
   } | null>(null);
-  const [guardrails, setGuardrails] = useState<GuardrailOption[]>([]);
+  const [guardrails, setGuardrails] = useState<McpGuardrailOption[]>([]);
   const [savingGuardrail, setSavingGuardrail] = useState(false);
 
   // ── Playground state ──
@@ -520,30 +507,13 @@ export default function McpDetailView({ serverId, embedded }: McpDetailViewProps
       .catch(() => setCaps(null));
   }, []);
 
-  // Guardrails bindable to this server's tool calls (Overview → Guardrail card).
-  // Every guardrail is listed, not just the tool-bound ones: binding one that
-  // has no tool hook yet is a legitimate half-finished setup, so it is flagged
-  // in the option label rather than hidden.
+  // Guardrails the server can select (Security tab). Every guardrail is listed,
+  // not just the tool-bound ones: one with no tool hook yet is a legitimate
+  // half-finished setup, so it is flagged rather than hidden.
   useEffect(() => {
     fetch('/api/guardrails', { cache: 'no-store' })
       .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        const list = Array.isArray(data?.guardrails) ? data.guardrails : [];
-        setGuardrails(list.map((g: {
-          key?: string;
-          name?: string;
-          enabled?: boolean;
-          hooks?: { bindings?: Record<string, { enabled?: boolean } | undefined> };
-        }) => ({
-          key: String(g.key ?? ''),
-          name: String(g.name ?? g.key ?? ''),
-          enabled: g.enabled !== false,
-          toolBound: Boolean(
-            g.hooks?.bindings?.['tool.pre']?.enabled
-            || g.hooks?.bindings?.['tool.post']?.enabled,
-          ),
-        })).filter((g: GuardrailOption) => g.key));
-      })
+      .then((data) => setGuardrails(readMcpGuardrailOptions(data)))
       .catch(() => setGuardrails([]));
   }, []);
 
@@ -651,11 +621,9 @@ export default function McpDetailView({ serverId, embedded }: McpDetailViewProps
     }
   };
 
-  /**
-   * Writes the whole binding every time: `guardrail` is one persisted object,
-   * so PATCHing only the mode would drop the bound key.
-   */
-  const handleSaveGuardrail = async (next: { mode: GuardrailBindingMode; guardrailKey?: string }) => {
+  /** Selects the guardrail on the server's tool calls (`null` = none); its own mode applies. */
+  const handleSaveGuardrail = async (guardrailKey: string | null) => {
+    const next = guardrailKey ? { guardrailKey } : { mode: 'off' as const };
     setSavingGuardrail(true);
     try {
       const res = await fetch(`/api/mcp/${serverId}`, {
@@ -915,15 +883,17 @@ export default function McpDetailView({ serverId, embedded }: McpDetailViewProps
   // once it's exposed on a public, unauthenticated URL.
   const readsInternalData = server.sourceType === 'internal'
     || (server.sourceType === 'composite' && (server.members ?? []).some((m) => m.sourceType === 'internal'));
-  // What actually runs, resolved the way mcpService does it: the new binding
-  // when there is one, otherwise the legacy `aegis` mode. The legacy shieldId
-  // is deliberately dropped — those are dead references, and an unbound mode
-  // falls back to the tenant's default tool guardrail.
-  const guardrailMode: GuardrailBindingMode = server.guardrail?.mode
-    ?? server.aegis?.mode
-    ?? 'off';
-  const guardrailKeyValue = server.guardrail?.guardrailKey ?? DEFAULT_GUARDRAIL_VALUE;
-  const boundGuardrail = guardrails.find((g) => g.key === server.guardrail?.guardrailKey);
+  // What runs, resolved the way mcpService does it (`resolveMcpGuardrailBinding`):
+  // the new binding when there is one, otherwise the legacy `aegis` mode. A
+  // binding saved without a key runs the tenant's default tool guardrail; one
+  // saved in 'monitor' (before a guardrail could be selected, when the server
+  // had a mode of its own) is evaluated but never blocks.
+  const bindingMode = server.guardrail?.mode ?? server.aegis?.mode ?? 'off';
+  const guardrailKeyValue = bindingMode === 'off'
+    ? null
+    : server.guardrail?.guardrailKey ?? DEFAULT_TOOL_GUARDRAIL_KEY;
+  const legacyMonitorOnly = bindingMode === 'monitor';
+  const boundGuardrail = guardrails.find((g) => g.key === guardrailKeyValue);
   const securityMetadata = (server.metadata ?? {}) as Record<string, unknown>;
   const piiProtected = Boolean((securityMetadata.piiProtection as { policyKey?: unknown } | undefined)?.policyKey);
   const pendingReview = securityMetadata.toolReview && typeof securityMetadata.toolReview === 'object'
@@ -1116,16 +1086,16 @@ export default function McpDetailView({ serverId, embedded }: McpDetailViewProps
             </Alert>
           ) : null}
 
-          {caps && guardrailMode !== 'off' && !guardrailHookAvailable ? (
+          {caps && guardrailKeyValue && !guardrailHookAvailable ? (
             <Alert
               color="yellow"
               icon={<IconAlertTriangle size={16} />}
-              title="Guardrail enforcement inactive"
+              title="Guardrail checks inactive"
               mb="md"
             >
               <Text size="sm">
-                A guardrail is bound in <b>{guardrailMode}</b> mode, but tool-call enforcement is not
-                wired on this deployment. The binding is stored and starts enforcing as soon as it is.
+                A guardrail is selected, but tool-call checks are not wired on this deployment. The
+                selection is stored and applies as soon as they are.
               </Text>
             </Alert>
           ) : null}
@@ -1219,8 +1189,14 @@ export default function McpDetailView({ serverId, embedded }: McpDetailViewProps
             <Paper withBorder p="md" radius="md">
               <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Security</Text>
               <Group gap="xs" mt="xs">
-                <Badge size="sm" variant="light" color={GUARDRAIL_MODE_COLORS[guardrailMode]}>
-                  guardrail: {guardrailMode}
+                <Badge
+                  size="sm"
+                  variant="light"
+                  color={boundGuardrail ? GUARDRAIL_MODE_COLORS[boundGuardrail.mode] : 'gray'}
+                >
+                  guardrail: {guardrailKeyValue
+                    ? `${boundGuardrail?.name ?? guardrailKeyValue}${legacyMonitorOnly ? ' · monitor only' : ''}`
+                    : 'none'}
                 </Badge>
                 {piiProtected ? <Badge size="sm" variant="light" color="teal">PII protected</Badge> : null}
                 {pendingReview > 0 ? (
@@ -1774,68 +1750,54 @@ async with sse_client(
         <Tabs.Panel value="security">
           <McpSecurityPanel
             server={server}
+            guardrails={guardrails}
             onServerUpdated={(s) => setServer(s as McpServerView & { openApiSpec?: string })}
             guardrailSection={(
                 <Paper withBorder p="md" radius="md">
                   <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Guardrail</Text>
-                  <Group gap="xs" mt="xs">
-                    <Badge size="sm" variant="light" color={GUARDRAIL_MODE_COLORS[guardrailMode]}>
-                      {guardrailMode}
-                    </Badge>
-                    {guardrailMode !== 'off' ? (
-                      <Text size="xs" c="dimmed">
-                        {server.guardrail?.guardrailKey
-                          ? boundGuardrail?.name ?? server.guardrail.guardrailKey
-                          : 'Default tool guardrail'}
+                  <Text size="xs" c="dimmed" mt={4}>
+                    Checks this server’s tool calls (tool.pre and tool.post). The guardrail’s own mode applies.
+                  </Text>
+                  <Select
+                    mt="sm"
+                    size="xs"
+                    aria-label="Guardrail"
+                    clearable
+                    searchable
+                    placeholder="No guardrail"
+                    nothingFoundMessage="No guardrail found"
+                    data={mcpGuardrailSelectData(guardrails, guardrailKeyValue)}
+                    value={guardrailKeyValue}
+                    disabled={savingGuardrail}
+                    onChange={(val) => {
+                      if ((val ?? null) === guardrailKeyValue && !legacyMonitorOnly) return;
+                      void handleSaveGuardrail(val ?? null);
+                    }}
+                  />
+                  {boundGuardrail && !legacyMonitorOnly ? (
+                    <Text size="xs" c="dimmed" mt={6}>{MCP_GUARDRAIL_MODE_HINTS[boundGuardrail.mode]}</Text>
+                  ) : null}
+                  {legacyMonitorOnly ? (
+                    <Alert color="yellow" variant="light" mt="sm" p="xs" icon={<IconAlertTriangle size={14} />}>
+                      <Text size="xs">
+                        Monitor only: this server was saved with a mode of its own, so its calls are checked but
+                        never blocked, whatever the guardrail’s mode.
                       </Text>
-                    ) : null}
-                  </Group>
-                  <Stack gap={6} mt="sm">
-                    <Select
-                      size="xs"
-                      aria-label="Guardrail mode"
-                      data={[
-                        { value: 'off', label: 'Off' },
-                        { value: 'monitor', label: 'Monitor — log only' },
-                        { value: 'enforce', label: 'Enforce — block tool calls' },
-                      ]}
-                      value={guardrailMode}
-                      disabled={savingGuardrail}
-                      allowDeselect={false}
-                      onChange={(val) => {
-                        if (!val || val === guardrailMode) return;
-                        void handleSaveGuardrail({
-                          mode: val as GuardrailBindingMode,
-                          guardrailKey: server.guardrail?.guardrailKey,
-                        });
-                      }}
-                    />
-                    <Select
-                      size="xs"
-                      aria-label="Bound guardrail"
-                      data={withMcpProtectionOption([
-                        { value: DEFAULT_GUARDRAIL_VALUE, label: 'Default tool guardrail' },
-                        ...guardrails.map((g) => ({
-                          value: g.key,
-                          label: `${g.name}${g.enabled ? '' : ' · disabled'}${g.toolBound ? ' · tool hooks' : ''}`,
-                        })),
-                      ])}
-                      value={guardrailKeyValue}
-                      disabled={guardrailMode === 'off' || savingGuardrail}
-                      allowDeselect={false}
-                      onChange={(val) => {
-                        if (!val || val === guardrailKeyValue) return;
-                        void handleSaveGuardrail({
-                          mode: guardrailMode,
-                          guardrailKey: val === DEFAULT_GUARDRAIL_VALUE ? undefined : val,
-                        });
-                      }}
-                    />
-                  </Stack>
-                  {guardrailMode !== 'off' && boundGuardrail && !boundGuardrail.toolBound ? (
+                      <Button
+                        mt={6}
+                        size="compact-xs"
+                        variant="default"
+                        loading={savingGuardrail}
+                        onClick={() => void handleSaveGuardrail(guardrailKeyValue)}
+                      >
+                        Use the guardrail’s mode
+                      </Button>
+                    </Alert>
+                  ) : null}
+                  {boundGuardrail && !boundGuardrail.toolBound ? (
                     <Text size="xs" c="orange" mt={6}>
-                      “{boundGuardrail.name}” has no tool.pre or tool.post hook enabled, so this binding
-                      enforces nothing yet.
+                      “{boundGuardrail.name}” has no tool.pre or tool.post hook enabled, so it checks nothing on
+                      this server’s calls yet.
                     </Text>
                   ) : null}
                   {legacyAegis ? (
@@ -1853,20 +1815,9 @@ async with sse_client(
                       </Group>
                       <Text size="xs" c="dimmed" mt={4}>
                         {server.guardrail
-                          ? 'Kept read-only for one release — the guardrail above is what enforces.'
-                          : 'This is what still enforces this server, through the default tool guardrail: shield IDs are dead references. Migrating keeps the mode and makes the binding explicit.'}
+                          ? 'Kept read-only for one release — the guardrail above is what applies.'
+                          : 'Saved before guardrails could be selected; shield IDs are dead references, so the default tool guardrail applies. Choosing a guardrail above replaces it.'}
                       </Text>
-                      {!server.guardrail ? (
-                        <Button
-                          mt={6}
-                          size="compact-xs"
-                          variant="default"
-                          loading={savingGuardrail}
-                          onClick={() => void handleSaveGuardrail({ mode: legacyAegis.mode })}
-                        >
-                          Migrate
-                        </Button>
-                      ) : null}
                     </Box>
                   ) : null}
                 </Paper>

@@ -313,11 +313,15 @@ export interface IMcpAegisConfig {
 /**
  * Guardrail binding for an MCP server's tool calls. Replaces IMcpAegisConfig.
  *
- * `mode` keeps the MCP vocabulary ('off' rather than 'disabled') so the two
- * fields are drop-in interchangeable during the release where both are
- * written; the read-time normaliser folds 'off' onto GuardrailMode.
- * An absent `guardrailKey` means "use the tenant's default tool guardrail",
- * which is what keeps the sandbox toolbox armed without per-server setup.
+ * The server selects a guardrail and the guardrail's own mode (enforce /
+ * monitor / disabled) governs; such a binding is written as `mode: 'enforce'`
+ * with the key, and 'off' means no guardrail. `mode` keeps the MCP vocabulary
+ * ('off' rather than 'disabled') so the two fields are drop-in interchangeable
+ * during the release where both are written.
+ *
+ * Bindings saved before a guardrail could be selected may still hold:
+ *   · 'monitor': the server's calls are evaluated, never blocked;
+ *   · a mode without `guardrailKey`: the tenant's default tool guardrail.
  */
 export interface IMcpGuardrailConfig {
   guardrailKey?: string;

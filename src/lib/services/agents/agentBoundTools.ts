@@ -3,7 +3,7 @@
  * turned into agent-sdk tools, and the cleanup of what they open.
  */
 
-import { type AgentToolGuard, agentToolPolicyName, protectBuiltTool } from './agentToolGuard';
+import { type AgentToolGuard, type AgentToolLogView, agentToolPolicyName, protectBuiltTool } from './agentToolGuard';
 import { type AgentRuntimeContext, resolveRuntimeHeaders, runtimeHeaderPolicyFromMetadata, describeRuntimeAuth } from '@/lib/services/runtimeContext';
 import { type ConsoleIdentityCaller, consoleIdentityCallerOf } from '@/lib/iam/consoleIdentity';
 import type { ToolInterface as AgentSdkToolInterface } from '@cognipeer/agent-sdk';
@@ -19,9 +19,11 @@ import {
     getToolAnnotationOverrides,
     logMcpRequest,
     mcpRequestSecretValues,
-    resolveMcpGuardrailBinding,
+    mcpServerGuardrailKey,
     resolveSourceType,
 } from '@/lib/services/mcp/mcpService';
+import { isMcpPiiProtected, openMcpPiiRoundTrip, piiLogOf } from '@/lib/services/mcp/mcpPii';
+import type { IMcpServer, McpSourceType } from '@/lib/database';
 import { exposedMcpToolNames } from './boundToolNames';
 import { defaultAnnotationsForSource } from '@/lib/services/mcp/toolAnnotations';
 import { isMcpToolEnabled, executeMcpTool } from '@/lib/services/mcp';
@@ -34,6 +36,29 @@ import { getFlowsHost } from '@/enterprise/flows';
 import { createLogger } from '@/lib/core/logger';
 
 const logger = createLogger('agents');
+
+/**
+ * What the agent's guard logs for a tool of an MCP server with PII protection:
+ * the arguments tokenized with the server's round trip (the same tokens the
+ * upstream gets), and the result as the upstream returned it, which
+ * `executeMcpTool` leaves on the call's arguments, in the form the model gets.
+ */
+function mcpPiiGuardLogView(server: IMcpServer, sourceType: McpSourceType, toolName: string) {
+    return {
+        open: async (args: Record<string, unknown>): Promise<AgentToolLogView> => {
+            const roundTrip = await openMcpPiiRoundTrip(server, sourceType, toolName);
+            // No round trip (the policy is turned off): the values go to the upstream as they are.
+            if (!roundTrip) return { args, mask: async (text) => text };
+            return { args: await roundTrip.protect(args), mask: (text) => roundTrip.protectText(text) };
+        },
+        result: (args: Record<string, unknown>) => {
+            const logged = piiLogOf(args);
+            if (!logged) return undefined;
+            const value = logged.result;
+            return isToolOutput(value) || typeof value === 'string' ? value : JSON.stringify(value);
+        },
+    };
+}
 
 // ── Tool Bridge ─────────────────────────────────────────────────────
 
@@ -49,26 +74,17 @@ const logger = createLogger('agents');
  * from that same schema (`toolInputSchemaToZod`), so the trace and the model
  * see one contract.
  *
- * ── WHERE `tool.pre` / `tool.post` FIRE, AND WHERE THEY MUST NOT ───────────
- * `guard` wraps the 'tool' and 'system' branches. It deliberately does NOT
- * wrap the 'mcp' branch: `executeMcpTool` routes to `executeMcpToolLocal`,
- * which fires both hooks itself around the dispatch
- * (`mcpService.ts` — `guardrail.beforeToolCall` / `guardrail.afterToolCall`,
- * bound to the SERVER's own guardrail via `resolveMcpGuardrailBinding`).
- * Wrapping here as well would evaluate every MCP call twice, write two
- * evaluation-log rows per hook, and bill the model-backed families twice — and
- * the second evaluation would carry a DIFFERENT tool name, since the MCP layer
- * names the call `<serverKey>/<toolName>` after resolving any rename override.
- * One call, one name, one evaluation.
- *
- * THE EXCEPTION is a server with NO binding at all (`resolveMcpGuardrailBinding`
- * answers `mode: 'off'`, the default for a server nobody configured): the MCP
- * layer then evaluates nothing, so the agent's own `tool.pre`/`tool.post`
- * bindings would be bypassed by the simple act of attaching such a server. For
- * that case — and only that case — the 'mcp' branch wraps the tool with `guard`
- * under the SAME canonical name the MCP layer would have used, so it is still
- * one call, one name, one evaluation. Which layer evaluates is decided per
- * server, never both.
+ * ── WHERE `tool.pre` / `tool.post` FIRE ────────────────────────────────────
+ * `guard` wraps every branch, the 'mcp' one included. An MCP tool has two
+ * layers: the agent's guardrails (`guard`, outside) and the server's own
+ * guardrail (`executeMcpToolLocal`, inside, via `resolveMcpGuardrailBinding`).
+ * Both run, in order: `tool.pre` agent then server, `tool.post` server then
+ * agent. The agent layer names the call as the MCP layer does,
+ * `<serverKey>/<toolName>`, so one policy matches on either layer, and it skips
+ * the guardrail the server itself evaluates (`mcpServerGuardrailKey`), so a
+ * guardrail bound on both layers runs once per call. For a server with PII
+ * protection the agent layer's evaluation log keeps the tokenized values, as
+ * the server's does.
  *
  * EXPORTED FOR TESTS — see `createAgentToolGuard`.
  */
@@ -223,23 +239,18 @@ export async function buildBoundTools(
                 runtimeHeaderPolicyFromMetadata(server.metadata),
             );
 
-            // WHO GUARDS THIS SERVER'S TOOLS. A server with its own binding is
-            // guarded one layer down by `executeMcpToolLocal` (see the note on
-            // this function), and wrapping it here too would double-evaluate.
-            // A server with NO binding (`mode: 'off'` — the default for a server
-            // an operator never configured) evaluates NOTHING down there, so the
-            // agent's own `tool.pre`/`tool.post` bindings would be walked around
-            // simply by attaching an MCP server: the model calls
-            // `<server>/delete_records`, no hook fires, the allow-list is
-            // bypassed and the log shows nothing. For that case the agent's
-            // guard wraps the tool under the MCP CANONICAL spelling
-            // `<serverKey>/<toolName>` — the name `mcpHook` would have used —
-            // so a stored `tool_access` policy matches it the same way on
-            // either layer. `guard` is the no-op when the agent binds nothing.
-            const mcpBinding = resolveMcpGuardrailBinding(server);
-            const guardAtAgent = mcpBinding.mode === 'off';
+            // WHO GUARDS THIS SERVER'S TOOLS: the agent's guardrails here, and
+            // the server's own one layer down (see the note on this function).
+            // The agent layer skips the guardrail the server evaluates. Only when
+            // both resolve keys in the same project: a key names a guardrail per
+            // project, so in another project the same key may be another record.
+            const serverGuardrailKey = (server.projectId ?? undefined) === (projectId || undefined)
+                ? mcpServerGuardrailKey(server)
+                : undefined;
+            const skipGuardrailKeys = serverGuardrailKey ? [serverGuardrailKey] : [];
+            const serverSourceType = resolveSourceType(server);
             const annotationOverrides = getToolAnnotationOverrides(server);
-            const sourceAnnotations = defaultAnnotationsForSource(resolveSourceType(server));
+            const sourceAnnotations = defaultAnnotationsForSource(serverSourceType);
 
             for (const toolName of binding.toolNames) {
                 const mcpToolDef = server.tools.find((t) => t.name === toolName);
@@ -335,16 +346,19 @@ export async function buildBoundTools(
                             name: exposedName,
                             description: exposedDescription,
                             schema: toolInputSchemaToZod(mcpToolDef.inputSchema),
-                            // Wrapped in `guard` ONLY when the server has no binding of
-                            // its own; otherwise `executeMcpTool` -> `executeMcpToolLocal`
-                            // already fires `tool.pre` and `tool.post` around the dispatch
-                            // and a second wrap would double-evaluate. See `guardAtAgent`.
-                            func: guardAtAgent
-                                ? guard.protect(
-                                    { name: `${server.key}/${toolName}`, requestedName: exposedName },
-                                    dispatch,
-                                )
-                                : dispatch,
+                            // The agent's guardrails around the call; the server's own
+                            // run inside `executeMcpTool`. See `skipGuardrailKeys`.
+                            func: guard.protect(
+                                {
+                                    name: `${server.key}/${toolName}`,
+                                    requestedName: exposedName,
+                                    skipGuardrailKeys,
+                                    ...(isMcpPiiProtected(server, serverSourceType, toolName)
+                                        ? { logView: mcpPiiGuardLogView(server, serverSourceType, toolName) }
+                                        : {}),
+                                },
+                                dispatch,
+                            ),
                         });
                         return {
                             tool: Object.assign(tool, {

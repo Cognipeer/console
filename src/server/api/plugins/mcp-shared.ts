@@ -53,7 +53,7 @@ export function publishesPublicly(
 
 type McpSecurityUpdateFields = Pick<
   UpdateMcpServerInput,
-  'runtimeHeaders' | 'piiProtection' | 'piiPassthroughTools' | 'toolChangePolicy' | 'toolReview'
+  'runtimeHeaders' | 'piiProtection' | 'piiPassthroughTools' | 'toolChangePolicy' | 'toolReview' | 'definitionGuardrail'
 >;
 
 function isNameList(value: unknown): value is string[] {
@@ -126,6 +126,19 @@ export async function readMcpSecurityUpdate(
       ...(reject ? { reject } : {}),
     };
   }
+  if (body.definitionGuardrail !== undefined) {
+    const raw = body.definitionGuardrail as { guardrailKey?: unknown } | null;
+    if (raw === null) {
+      fields.definitionGuardrail = null;
+    } else if (
+      typeof raw === 'object' && !Array.isArray(raw)
+      && typeof raw.guardrailKey === 'string' && raw.guardrailKey.trim()
+    ) {
+      fields.definitionGuardrail = { guardrailKey: raw.guardrailKey.trim() };
+    } else {
+      return { error: 'definitionGuardrail must be { "guardrailKey": "..." }, or null to turn it off' };
+    }
+  }
   return { fields };
 }
 
@@ -180,21 +193,26 @@ export function parseAegis(raw: unknown): { mode: 'off' | 'monitor' | 'enforce' 
 }
 
 /**
- * The guardrail binding that replaces `aegis`. Same shape of parse, one real
- * difference: `guardrailKey` is a guardrail KEY (the tenant-scoped slug), not
- * an id, and omitting it is meaningful — it selects the tenant's default tool
- * guardrail rather than leaving the server unguarded.
+ * The guardrail binding that replaces `aegis`: the server selects a guardrail by
+ * KEY (the tenant-scoped slug, not an id) and the guardrail's own mode governs,
+ * stored as `mode: 'enforce'`. `{ mode: 'off' }`, or a body with neither a key
+ * nor a mode, clears the binding.
+ *
+ * A mode sent by an older client is still honoured:
+ *   · 'enforce' or 'monitor' without a key — the tenant's default tool guardrail;
+ *   · 'monitor' with a key — the server's calls are evaluated, never blocked.
  */
 export function parseGuardrail(raw: unknown): IMcpGuardrailConfig | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const value = raw as { guardrailKey?: unknown; mode?: unknown };
-  const mode = value.mode === 'monitor' || value.mode === 'enforce' ? value.mode : 'off';
-  return {
-    guardrailKey: typeof value.guardrailKey === 'string' && value.guardrailKey.trim()
-      ? value.guardrailKey.trim()
-      : undefined,
-    mode,
-  };
+  const guardrailKey = typeof value.guardrailKey === 'string' && value.guardrailKey.trim()
+    ? value.guardrailKey.trim()
+    : undefined;
+  if (value.mode === 'off') return { mode: 'off' };
+  if (value.mode === 'monitor' || value.mode === 'enforce') {
+    return { ...(guardrailKey ? { guardrailKey } : {}), mode: value.mode };
+  }
+  return guardrailKey ? { guardrailKey, mode: 'enforce' } : { mode: 'off' };
 }
 
 export function parseRemoteConfig(raw: unknown): IMcpRemoteConfig | undefined {

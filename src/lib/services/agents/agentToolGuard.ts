@@ -46,8 +46,9 @@ const logger = createLogger('agents');
  * `tool_access` matches a DENY against either spelling and an ALLOW against the
  * canonical one only, so both directions of that pair fail safe.
  *
- * MCP tools are deliberately absent: they are named `<serverKey>/<toolName>` by
- * `mcpHook`, one layer down, and must not be renamed or re-evaluated here.
+ * MCP tools keep the MCP layer's spelling, `<serverKey>/<toolName>` (as
+ * `mcpHook` names them one layer down), so a policy written for a server's tool
+ * matches on both layers.
  */
 export function agentToolPolicyName(...segments: readonly string[]): string {
     return ['agent', ...segments].join('.');
@@ -59,7 +60,35 @@ interface AgentToolSpec {
     name: string;
     /** The name the model actually called, before any canonicalisation. */
     requestedName: string;
+    /**
+     * Guardrails a lower layer evaluates on every call of this tool (an MCP
+     * server's own guardrail): skipped here, so a guardrail bound on both
+     * layers runs once per call.
+     */
+    skipGuardrailKeys?: readonly string[];
+    /**
+     * For a tool whose values must not be stored (a tool of an MCP server with
+     * PII protection): what the evaluation log keeps instead, the arguments and
+     * the result as they crossed to the upstream, and finding messages masked
+     * the same way. The hooks still judge the real values. A side the view cannot
+     * give is withheld from the log.
+     */
+    logView?: {
+        /** Once per call, before the hooks run: the arguments as they leave, and the masker for finding messages. */
+        open(args: Record<string, unknown>): Promise<AgentToolLogView>;
+        /** Called after the call returned, with the arguments it was made with. */
+        result(args: Record<string, unknown>): unknown;
+    };
 }
+
+/** What the evaluation log of one protected call may keep. */
+export interface AgentToolLogView {
+    args?: Record<string, unknown>;
+    mask?: (text: string) => Promise<string>;
+}
+
+/** What the evaluation log keeps for a side of a protected call that has no tokenized view. */
+const WITHHELD_LOG_TEXT = 'Not logged: PII protection is on for this tool';
 
 /**
  * Wraps a tool's executor with `tool.pre` / `tool.post`.
@@ -201,12 +230,23 @@ export function createAgentToolGuard(input: {
             spec: AgentToolSpec,
             execute: (safeArgs: A, ...rest: unknown[]) => Promise<R>,
         ): (args: A, ...rest: unknown[]) => Promise<R | string> {
+            const skipped = new Set(spec.skipGuardrailKeys ?? []);
+            const callPreKeys = preKeys.filter((key) => !skipped.has(key));
+            const callPostKeys = postKeys.filter((key) => !skipped.has(key));
+            if (callPreKeys.length === 0 && callPostKeys.length === 0) return execute;
+            const { logView } = spec;
+
             return async (args: A, ...rest: unknown[]) => {
                 const scope = scopeForCall();
+                // Made before the hooks run: a call they block is logged without the values too.
+                const view: AgentToolLogView | undefined = logView
+                    ? await logView.open(args).catch((): AgentToolLogView => ({}))
+                    : undefined;
+                const logMask = view?.mask ? { logMask: view.mask } : {};
                 try {
                     let safeArgs = args;
 
-                    if (preKeys.length > 0) {
+                    if (callPreKeys.length > 0) {
                         const pre = await runHook({
                             contractVersion: GUARDRAIL_CONTRACT_VERSION,
                             hook: 'tool.pre',
@@ -217,7 +257,15 @@ export function createAgentToolGuard(input: {
                                 providerRef,
                             }),
                             scope,
-                            guardrailKeys: preKeys,
+                            guardrailKeys: callPreKeys,
+                            ...(view
+                                ? {
+                                    logText: view.args
+                                        ? toolCallSubject({ toolName: spec.name, args: view.args, providerRef }).text
+                                        : WITHHELD_LOG_TEXT,
+                                    ...logMask,
+                                }
+                                : {}),
                         });
                         // `decision` is ALREADY the effective decision — the
                         // engine neutralises it to 'allow' outside enforce mode
@@ -236,8 +284,15 @@ export function createAgentToolGuard(input: {
                     }
 
                     const result = await execute(safeArgs, ...rest);
-                    if (postKeys.length === 0) return result;
+                    if (callPostKeys.length === 0) return result;
 
+                    let logText: string | undefined;
+                    if (logView && view) {
+                        const loggedResult = logView.result(safeArgs);
+                        logText = loggedResult === undefined
+                            ? WITHHELD_LOG_TEXT
+                            : toolResultSubject({ toolName: spec.name, args: {}, result: loggedResult, providerRef }).text;
+                    }
                     const post = await runHook({
                         contractVersion: GUARDRAIL_CONTRACT_VERSION,
                         hook: 'tool.post',
@@ -248,7 +303,8 @@ export function createAgentToolGuard(input: {
                             providerRef,
                         }),
                         scope,
-                        guardrailKeys: postKeys,
+                        guardrailKeys: callPostKeys,
+                        ...(logText !== undefined ? { logText, ...logMask } : {}),
                     });
                     if (post.decision === 'block') throw new GuardrailEnforcementError('blocked', post);
                     return post.subject?.kind === 'tool_result' ? (post.subject.result as R) : result;

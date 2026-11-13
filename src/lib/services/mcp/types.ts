@@ -120,7 +120,7 @@ export interface CreateMcpServerInput {
   endpointSlug?: string;
   /** @deprecated Legacy shield binding. Accepted for one release; `guardrail` wins. */
   aegis?: IMcpAegisConfig;
-  /** Guardrail binding for this server's tool calls (omit = unguarded). */
+  /** The guardrail that evaluates this server's tool calls; its own mode applies (omit = unguarded). */
   guardrail?: IMcpGuardrailConfig;
   /** Who may use the server's tools in an agent run (omit = everyone who can run the agent). */
   access?: IResourceAccessList;
@@ -173,7 +173,7 @@ export interface UpdateMcpServerInput {
   endpointSlug?: string;
   /** @deprecated Legacy shield binding. Accepted for one release; `guardrail` wins. */
   aegis?: IMcpAegisConfig;
-  /** Guardrail binding for this server's tool calls. */
+  /** The guardrail that evaluates this server's tool calls; its own mode applies (`{ mode: 'off' }` clears it). */
   guardrail?: IMcpGuardrailConfig;
   /** Full replacement of who may use the server's tools in an agent run. */
   access?: IResourceAccessList;
@@ -194,6 +194,11 @@ export interface UpdateMcpServerInput {
   piiPassthroughTools?: string[];
   /** What an upstream change to a tool definition does: wait for approval, or only notify. */
   toolChangePolicy?: 'approve' | 'notify';
+  /**
+   * The guardrail that checks this server's tool definitions (null turns it off). Saving it,
+   * even unchanged, checks every tool definition again.
+   */
+  definitionGuardrail?: { guardrailKey: string } | null;
   /**
    * Approve or reject tool definitions waiting for review (real tool names). An entry with `hash` holds only for the
    * definition with that hash (the `hash` of its review entry).

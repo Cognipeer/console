@@ -104,6 +104,9 @@ gets the values back in the result. Tokens are keyed per server, so a value gets
 server (and a different one on another server). Tools listed under *Tools that receive the real values* (for example a
 tool that sends mail) get the values. The request log keeps the tokens, never the values.
 
+A guardrail on the server, or on an agent that calls it, judges the real values in both directions; its evaluation log
+keeps the tokens, as the request log does.
+
 ## Relationship to Guardrails
 
 The [Guardrails](./guardrails.md) PII type wraps this service. When a guardrail of type `pii` is attached to a model:

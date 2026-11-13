@@ -46,6 +46,10 @@ export function getPiiPassthroughTools(metadata: Metadata): string[] {
 export interface McpPiiRoundTrip {
   /** The arguments with personal data in their string values replaced by tokens. */
   protect(args: Record<string, unknown>): Promise<Record<string, unknown>>;
+  /** Any value (a result for the log) with personal data in its string values replaced by tokens. */
+  protectValue(value: unknown): Promise<unknown>;
+  /** Text about the call (a guardrail's finding message, an error) with personal data replaced by tokens. */
+  protectText(text: string): Promise<string>;
   /** The result with this call's tokens turned back into their values. */
   restore<T>(result: T): T;
 }
@@ -124,6 +128,8 @@ export async function openMcpPiiRoundTrip(
   });
   return {
     protect: async (args) => (await protectValue(roundTrip, args, 0)) as Record<string, unknown>,
+    protectValue: (value) => protectValue(roundTrip, value, 0),
+    protectText: (text) => roundTrip.protectText(text),
     restore: (result) => restoreValue(roundTrip, result, 0) as typeof result,
   };
 }

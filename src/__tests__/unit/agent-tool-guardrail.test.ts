@@ -54,7 +54,10 @@ const hoisted = vi.hoisted(() => ({
   logToolRequest: vi.fn(),
   getMcpServerByKey: vi.fn(),
   executeMcpTool: vi.fn(),
-  resolveMcpGuardrailBinding: vi.fn(),
+  mcpServerGuardrailKey: vi.fn(),
+  isMcpPiiProtected: vi.fn((): boolean => false),
+  openMcpPiiRoundTrip: vi.fn(async (): Promise<unknown> => null),
+  piiLogOf: vi.fn((): unknown => undefined),
   buildBrowserAgentTools: vi.fn(),
   resolveBrowser: vi.fn(),
   createBrowserSession: vi.fn(),
@@ -89,13 +92,19 @@ vi.mock('@/lib/services/mcp', () => ({
   isMcpToolEnabled: () => true,
 }));
 
-// The ONE reader of a server's guardrail binding, imported by path in
-// `agentService`. Scripted per case: `mode: 'off'` is a server nobody
-// configured, `enforce` one with its own binding.
+// The guardrail a server evaluates itself, imported by path in `agentService`.
+// Scripted per case: undefined is a server with no guardrail of its own.
 vi.mock('@/lib/services/mcp/mcpService', () => ({
-  resolveMcpGuardrailBinding: hoisted.resolveMcpGuardrailBinding,
+  mcpServerGuardrailKey: hoisted.mcpServerGuardrailKey,
   getToolAnnotationOverrides: () => ({}),
   resolveSourceType: (server: { sourceType?: string }) => server.sourceType ?? 'openapi',
+}));
+
+// PII protection of a server's calls: off unless a case turns it on.
+vi.mock('@/lib/services/mcp/mcpPii', () => ({
+  isMcpPiiProtected: hoisted.isMcpPiiProtected,
+  openMcpPiiRoundTrip: hoisted.openMcpPiiRoundTrip,
+  piiLogOf: hoisted.piiLogOf,
 }));
 
 vi.mock('@/lib/services/browser', () => ({
@@ -284,9 +293,11 @@ beforeEach(() => {
   hoisted.runHook.mockImplementation(async ({ hook }: HookCall) => pass(hook));
   hoisted.getToolByKey.mockResolvedValue(toolRecord());
   hoisted.getMcpServerByKey.mockResolvedValue(mcpServer());
-  // Default: a server WITH its own binding, i.e. the MCP layer evaluates it and
-  // the agent must add nothing. The unbound case is opted into per test.
-  hoisted.resolveMcpGuardrailBinding.mockReturnValue({ mode: 'enforce', guardrailKey: 'gr-mcp' });
+  // Default: a server WITH its own guardrail, which the MCP layer evaluates.
+  hoisted.mcpServerGuardrailKey.mockReturnValue('gr-mcp');
+  hoisted.isMcpPiiProtected.mockReturnValue(false);
+  hoisted.openMcpPiiRoundTrip.mockResolvedValue(null);
+  hoisted.piiLogOf.mockReturnValue(undefined);
   hoisted.executeToolAction.mockResolvedValue({ result: { ticket: 'T-1' }, latencyMs: 4 });
   hoisted.executeMcpTool.mockResolvedValue({ result: 'ok', latencyMs: 3 });
 });
@@ -445,36 +456,92 @@ describe('policy-visible names and mutations', () => {
   });
 });
 
-// ── 3. MCP is guarded exactly once — downstream when the server has a binding,
-//       by the agent when it has none ─────────────────────────────────────────
+// ── 3. MCP tools: the agent's guardrails and the server's own both run ──────
 
-describe('MCP tools are evaluated exactly once', () => {
-  /** A server with its OWN guardrail binding: the MCP layer evaluates it. */
-  const BOUND_SERVER = { mode: 'enforce' as const, guardrailKey: 'gr-mcp' };
-  /** A server nobody configured: the MCP layer evaluates NOTHING. */
-  const UNBOUND_SERVER = { mode: 'off' as const };
+describe('MCP tools run the agent guardrails and the server guardrail in turn', () => {
+  /** Every `runHook` call as (hook, guardrail keys). */
+  function evaluatedKeys(): Array<[HookId, string[]]> {
+    return hoisted.runHook.mock.calls.map(([call]) => [(call as HookCall).hook, (call as HookCall).guardrailKeys]);
+  }
 
-  it('adds no evaluation of its own when the server carries a binding', async () => {
-    hoisted.resolveMcpGuardrailBinding.mockReturnValue(BOUND_SERVER);
+  /** Stands in for `executeMcpToolLocal`, which runs the server's own guardrail around its dispatch. */
+  function serverEvaluates(key: string) {
+    hoisted.executeMcpTool.mockImplementation(async (_server, toolName: string, args) => {
+      const providerRef = 'mcp:acme-api';
+      const name = `acme-api/${toolName}`;
+      await hoisted.runHook({
+        contractVersion: GUARDRAIL_CONTRACT_VERSION,
+        hook: 'tool.pre',
+        subject: toolCallSubject({ toolName: name, args, providerRef }),
+        scope: { traceId: 'mcp-trace' },
+        guardrailKeys: [key],
+      });
+      const result = 'ok';
+      await hoisted.runHook({
+        contractVersion: GUARDRAIL_CONTRACT_VERSION,
+        hook: 'tool.post',
+        subject: toolResultSubject({ toolName: name, args, result, providerRef }),
+        scope: { traceId: 'mcp-trace' },
+        guardrailKeys: [key],
+      });
+      return { result, latencyMs: 3 };
+    });
+  }
+
+  it('runs the agent guardrails around a server that has its own: agent, server, server, agent', async () => {
+    serverEvaluates('gr-mcp');
     const { tools } = await build([MCP_BINDING], ARMED);
     await invoke(tools[0], { q: 'orders' });
 
-    // The guard IS armed (the action-tool cases above prove it fires), so zero
-    // calls here can only mean the MCP branch was deliberately left alone.
+    expect(evaluatedKeys()).toEqual([
+      ['tool.pre', ['gr-tools']],
+      ['tool.pre', ['gr-mcp']],
+      ['tool.post', ['gr-mcp']],
+      ['tool.post', ['gr-tools']],
+    ]);
+    // Both layers name the call the same way, so one policy matches on either.
+    expect(new Set(evaluations().map(([, name]) => name))).toEqual(new Set(['acme-api/search_orders']));
+  });
+
+  it('skips the guardrail the server evaluates itself, so it runs once per call', async () => {
+    serverEvaluates('gr-mcp');
+    const { tools } = await build([MCP_BINDING], {
+      guardrails: [{ key: 'gr-mcp', hooks: ['tool.pre', 'tool.post'] }, { key: 'gr-tools', hooks: ['tool.pre', 'tool.post'] }],
+    });
+    await invoke(tools[0], { q: 'orders' });
+
+    expect(evaluatedKeys()).toEqual([
+      ['tool.pre', ['gr-tools']],
+      ['tool.pre', ['gr-mcp']],
+      ['tool.post', ['gr-mcp']],
+      ['tool.post', ['gr-tools']],
+    ]);
+  });
+
+  it('adds nothing when the agent binds only the server’s own guardrail', async () => {
+    const { tools } = await build([MCP_BINDING], { guardrails: [{ key: 'gr-mcp', hooks: ['tool.pre', 'tool.post'] }] });
+    await invoke(tools[0], { q: 'orders' });
+
     expect(evaluations()).toEqual([]);
     expect(hoisted.executeMcpTool).toHaveBeenCalledOnce();
   });
 
-  it('wraps an UNBOUND server under the MCP canonical name, so the agent policy still applies', async () => {
-    // The bypass this closes: bind `tool_access { allow: ['agent.knowledge.*'] }`
-    // to the agent, attach an MCP server with no guardrail (the default), and
-    // every `<server>/<tool>` call ran with no hook firing anywhere.
-    hoisted.resolveMcpGuardrailBinding.mockReturnValue(UNBOUND_SERVER);
+  it('does not skip a key of a server in another scope, where it may name another guardrail', async () => {
+    hoisted.getMcpServerByKey.mockResolvedValue({ ...mcpServer(), projectId: undefined });
+    const { tools } = await build([MCP_BINDING], { guardrails: [{ key: 'gr-mcp', hooks: ['tool.pre', 'tool.post'] }] });
+    await invoke(tools[0], { q: 'orders' });
+
+    expect(evaluatedKeys()).toEqual([
+      ['tool.pre', ['gr-mcp']],
+      ['tool.post', ['gr-mcp']],
+    ]);
+  });
+
+  it('guards a server with no guardrail of its own under the MCP canonical name', async () => {
+    hoisted.mcpServerGuardrailKey.mockReturnValue(undefined);
     const { tools } = await build([MCP_BINDING], ARMED);
     await invoke(tools[0], { q: 'orders' });
 
-    // Under the spelling `mcpHook` would have used, so a stored `tool_access`
-    // policy matches identically whichever layer evaluates.
     expect(evaluations()).toEqual([
       ['tool.pre', 'acme-api/search_orders'],
       ['tool.post', 'acme-api/search_orders'],
@@ -482,8 +549,7 @@ describe('MCP tools are evaluated exactly once', () => {
     expect(hoisted.executeMcpTool).toHaveBeenCalledOnce();
   });
 
-  it('blocks an UNBOUND server call at tool.pre before the MCP dispatch runs', async () => {
-    hoisted.resolveMcpGuardrailBinding.mockReturnValue(UNBOUND_SERVER);
+  it('blocks at tool.pre before the MCP dispatch runs', async () => {
     hoisted.runHook.mockImplementation(async ({ hook }: HookCall) =>
       hook === 'tool.pre' ? blockVerdict('tool.pre', 'MCP writes are not permitted.') : pass(hook),
     );
@@ -495,10 +561,8 @@ describe('MCP tools are evaluated exactly once', () => {
     expect(hoisted.executeMcpTool).not.toHaveBeenCalled();
   });
 
-  it('leaves an UNBOUND server alone when the agent binds nothing to the tool hooks', async () => {
-    // Compatibility: a legacy config arms no tool hook, so an unconfigured
-    // server keeps working exactly as it did yesterday — unguarded, as before.
-    hoisted.resolveMcpGuardrailBinding.mockReturnValue(UNBOUND_SERVER);
+  it('leaves the tool alone when the agent binds nothing to the tool hooks', async () => {
+    hoisted.mcpServerGuardrailKey.mockReturnValue(undefined);
     const { tools } = await build([MCP_BINDING], LEGACY);
     await invoke(tools[0], { q: 'orders' });
 
@@ -506,42 +570,51 @@ describe('MCP tools are evaluated exactly once', () => {
     expect(hoisted.executeMcpTool).toHaveBeenCalledOnce();
   });
 
-  it('totals ONE tool.pre and ONE tool.post once the MCP layer does its own', async () => {
-    hoisted.resolveMcpGuardrailBinding.mockReturnValue(BOUND_SERVER);
-    // Stands in for `executeMcpToolLocal`, which fires both hooks around its
-    // dispatch under the SERVER's guardrail binding and the MCP layer's own
-    // `<serverKey>/<toolName>` policy name.
-    hoisted.executeMcpTool.mockImplementation(async (_server, toolName: string, args) => {
-      const providerRef = 'mcp:acme-api';
-      const name = `acme-api/${toolName}`;
-      await hoisted.runHook({
-        contractVersion: GUARDRAIL_CONTRACT_VERSION,
-        hook: 'tool.pre',
-        subject: toolCallSubject({ toolName: name, args, providerRef }),
-        scope: { traceId: 'mcp-trace' },
-        guardrailKeys: ['gr-mcp'],
-      });
-      const result = 'ok';
-      await hoisted.runHook({
-        contractVersion: GUARDRAIL_CONTRACT_VERSION,
-        hook: 'tool.post',
-        subject: toolResultSubject({ toolName: name, args, result, providerRef }),
-        scope: { traceId: 'mcp-trace' },
-        guardrailKeys: ['gr-mcp'],
-      });
-      return { result, latencyMs: 3 };
+  it('judges the real values of a PII-protected server’s call and logs its tokens', async () => {
+    hoisted.isMcpPiiProtected.mockReturnValue(true);
+    hoisted.openMcpPiiRoundTrip.mockResolvedValue({
+      protect: async (args: Record<string, unknown>) => ({ ...args, email: '[EMAIL_kqzvtmwb]' }),
+      protectText: async (text: string) => text.replaceAll('ada@example.com', '[EMAIL_kqzvtmwb]'),
     });
-
+    hoisted.piiLogOf.mockReturnValue({ arguments: { email: '[EMAIL_kqzvtmwb]' }, result: { owner: '[EMAIL_kqzvtmwb]' } });
+    hoisted.executeMcpTool.mockResolvedValue({ result: { owner: 'ada@example.com' }, latencyMs: 3 });
     const { tools } = await build([MCP_BINDING], ARMED);
-    await invoke(tools[0], { q: 'orders' });
+    await invoke(tools[0], { email: 'ada@example.com' });
 
-    // Exactly one evaluation per hook, under ONE name. A second agent-side
-    // wrap would show up here as four calls under two different names —
-    // double-logged, double-billed, and unreadable in the evaluation log.
-    expect(evaluations()).toEqual([
-      ['tool.pre', 'acme-api/search_orders'],
-      ['tool.post', 'acme-api/search_orders'],
-    ]);
+    const [pre, post] = hoisted.runHook.mock.calls.map(([call]) => call as HookCall);
+    expect(pre.subject.text).toContain('ada@example.com');
+    expect(pre.logText).toBe('[EMAIL_kqzvtmwb]');
+    expect(post.subject.text).toContain('ada@example.com');
+    expect(post.logText).toBe(JSON.stringify({ owner: '[EMAIL_kqzvtmwb]' }));
+    // Finding messages can quote a value: both hooks log them with the call's tokens.
+    expect(await pre.logMask?.('Path /home/ada@example.com is deny-listed')).toBe('Path /home/[EMAIL_kqzvtmwb] is deny-listed');
+    expect(post.logMask).toBe(pre.logMask);
+    // One round trip per call, for both hooks.
+    expect(hoisted.openMcpPiiRoundTrip).toHaveBeenCalledTimes(1);
+  });
+
+  it('withholds a side of a PII-protected call it has no tokenized view of', async () => {
+    hoisted.isMcpPiiProtected.mockReturnValue(true);
+    hoisted.openMcpPiiRoundTrip.mockRejectedValue(new Error('PII policy not found'));
+    const { tools } = await build([MCP_BINDING], ARMED);
+    await invoke(tools[0], { email: 'ada@example.com' });
+
+    const [pre, post] = hoisted.runHook.mock.calls.map(([call]) => call as HookCall);
+    expect(pre.logText).toBe('Not logged: PII protection is on for this tool');
+    expect(post.logText).toBe('Not logged: PII protection is on for this tool');
+    // No masker: the engine withholds the finding messages too.
+    expect(pre.logMask).toBeUndefined();
+    expect(post.logMask).toBeUndefined();
+  });
+
+  it('logs the values themselves for a server without PII protection', async () => {
+    const { tools } = await build([MCP_BINDING], ARMED);
+    await invoke(tools[0], { email: 'ada@example.com' });
+
+    for (const [call] of hoisted.runHook.mock.calls) {
+      expect((call as HookCall).logText).toBeUndefined();
+      expect((call as HookCall).logMask).toBeUndefined();
+    }
   });
 });
 

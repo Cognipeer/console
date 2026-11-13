@@ -16,7 +16,11 @@ vi.mock('@/lib/core/logger', async (importOriginal) => {
 
 import { mcpGuardrailHook } from '@/enterprise/registry';
 import { consoleMcpGuardrailHook, ensureMcpGuardrailHook } from '@/lib/services/guardrail/hooks/mcpHook';
-import { projectMcpGuardrailBinding, resolveMcpGuardrailBinding } from '@/lib/services/mcp/mcpService';
+import {
+  mcpServerGuardrailKey,
+  projectMcpGuardrailBinding,
+  resolveMcpGuardrailBinding,
+} from '@/lib/services/mcp/mcpService';
 
 /**
  * Captured at THIS module's load, after the whole graph above has been
@@ -200,5 +204,19 @@ describe('projectMcpGuardrailBinding', () => {
     // What the OLDER binary reads after a rollback: the legacy column alone.
     expect(resolveMcpGuardrailBinding(server({ key: 'k', aegis: fromGuardrail.aegis })).mode).toBe('monitor');
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('mcpServerGuardrailKey', () => {
+  it('names the guardrail a server evaluates itself, when that binding can block', () => {
+    expect(mcpServerGuardrailKey(server({ guardrail: { guardrailKey: 'checks', mode: 'enforce' } }))).toBe('checks');
+    // Saved without a key: the tenant's default tool guardrail.
+    expect(mcpServerGuardrailKey(server({ guardrail: { mode: 'enforce' } }))).toBe('tool-safety-default');
+  });
+
+  it('names none for a server with no binding or a monitor-only one', () => {
+    expect(mcpServerGuardrailKey(server({}))).toBeUndefined();
+    expect(mcpServerGuardrailKey(server({ guardrail: { mode: 'off' } }))).toBeUndefined();
+    expect(mcpServerGuardrailKey(server({ guardrail: { guardrailKey: 'checks', mode: 'monitor' } }))).toBeUndefined();
   });
 });
