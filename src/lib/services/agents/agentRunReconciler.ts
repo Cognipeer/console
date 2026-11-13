@@ -51,6 +51,7 @@ import { AgentRunConflictError } from '@/lib/database';
 import type { DatabaseProvider, IAgentRun } from '@/lib/database';
 import {
   AGENT_RUN_CALLBACK_MAX_ATTEMPTS,
+  agentRunCeilingMs,
   agentRunRetainedUntil,
   dispatchDeferredRuns,
   fireAgentRunCallback,
@@ -93,6 +94,8 @@ const EXPIRED_RUN_MESSAGE = 'The run did not start in time (it waited longer tha
 interface SweepResult {
   tenantsScanned: number;
   failedRunningRuns: number;
+  /** Durable runs: orphaned runs queued to continue on another node. */
+  recoveredRuns: number;
   deletedSyncRuns: number;
   requeuedRuns: number;
   /** Scheduled runs that came due and were queued. */
@@ -111,7 +114,7 @@ interface SweepResult {
 }
 
 const EMPTY_SWEEP: SweepResult = {
-  tenantsScanned: 0, failedRunningRuns: 0, deletedSyncRuns: 0, requeuedRuns: 0, promotedRuns: 0, expiredRuns: 0,
+  tenantsScanned: 0, failedRunningRuns: 0, recoveredRuns: 0, deletedSyncRuns: 0, requeuedRuns: 0, promotedRuns: 0, expiredRuns: 0,
   dispatchedDeferredRuns: 0, retentionDeleted: 0, expiredActions: 0, requeuedWebhookDeliveries: 0, redeliveredCallbacks: 0,
 };
 
@@ -201,6 +204,7 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
 
   let tenantsScanned = 0;
   let failedRunningRuns = 0;
+  let recoveredRuns = 0;
   let deletedSyncRuns = 0;
   let requeuedRuns = 0;
   let promotedRuns = 0;
@@ -233,6 +237,35 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
             continue;
           }
 
+          // Durable runs: the turn goes on on another node, from its checkpoint (or from the
+          // start when it never reached a side effect) — up to AGENT_RUN_MAX_RECOVERIES times,
+          // so a run that kills every node it lands on does not take them all down. Only a run
+          // whose execution checkpointed: for any other (an inline turn, a node without durable
+          // runs) no checkpoint does not mean no side effect, so it ends worker_lost as before.
+          if (cfg.agent.durableRuns && run.durable === true && (run.recoveryCount ?? 0) < cfg.agent.runMaxRecoveries) {
+            // The turn's ceiling stays where it was when the turn started (or was first recovered).
+            const startedAtMs = run.startedAt ? new Date(run.startedAt).getTime() : Date.now();
+            const deadlineAt = run.recoveryDeadlineAt ?? new Date(startedAtMs + agentRunCeilingMs(run));
+            const requeued = await tenantDb.requeueAgentRunForRecovery(
+              runId, tenantId, { staleBefore }, { reason: 'orphaned', deadlineAt },
+            );
+            if (requeued) {
+              recoveredRuns += 1;
+              logger.info('Orphaned agent run queued to continue on another node', {
+                runId,
+                recoveryCount: requeued.recoveryCount,
+              });
+              await publishAgentRunJob(requeued).catch((error) => {
+                // Still queued: the requeue sweep below publishes it again.
+                logger.warn('Could not publish a recovered agent run', {
+                  runId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              });
+              continue;
+            }
+          }
+
           const completedAt = new Date();
           const finalized = await tenantDb.finalizeAgentRun(runId, tenantId, {
             status: 'failed',
@@ -245,6 +278,8 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
           });
           if (finalized) {
             failedRunningRuns += 1;
+            // A checkpoint is only kept for a run that can still go on.
+            await tenantDb.deleteAgentRunCheckpoint(runId, tenantId).catch(() => undefined);
             await fireAgentRunCallback(finalized, 'failed', { errorReason: 'worker_lost' }).catch((error) => {
               logger.warn('Failed to deliver worker_lost callback', {
                 runId,
@@ -428,7 +463,7 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
   }
 
   return {
-    tenantsScanned, failedRunningRuns, deletedSyncRuns, requeuedRuns, promotedRuns, expiredRuns, dispatchedDeferredRuns,
+    tenantsScanned, failedRunningRuns, recoveredRuns, deletedSyncRuns, requeuedRuns, promotedRuns, expiredRuns, dispatchedDeferredRuns,
     retentionDeleted, expiredActions, requeuedWebhookDeliveries, redeliveredCallbacks,
   };
 }

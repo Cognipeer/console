@@ -956,23 +956,239 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
   });
 
   it('the shutdown drain waits for local runs, then fails the ones still going as interrupted', async () => {
-    hoisted.executeAgentChatLocal.mockImplementation(() => new Promise(() => undefined));
-    const run = await startQueued('conv-drain');
-    const job = runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
-    // Executing: claimed, preconditions passed, the turn invoked.
-    await vi.waitFor(() => {
-      expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
-    });
+    process.env.AGENT_DURABLE_RUNS = 'false';
+    reloadConfig();
+    try {
+      hoisted.executeAgentChatLocal.mockImplementation(() => new Promise(() => undefined));
+      const run = await startQueued('conv-drain');
+      const job = runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+      // Executing: claimed, preconditions passed, the turn invoked.
+      await vi.waitFor(() => {
+        expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
+      });
 
-    const drained = await drainLocalAgentRuns(50);
+      const drained = await drainLocalAgentRuns(50);
 
-    expect(drained).toEqual({ settled: 0, interrupted: 1 });
-    expect(await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id))).toMatchObject({
-      status: 'failed',
-      errorReason: 'interrupted',
-      stopReason: 'error',
+      expect(drained).toEqual({ settled: 0, interrupted: 1, handedOff: 0 });
+      expect(await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id))).toMatchObject({
+        status: 'failed',
+        errorReason: 'interrupted',
+        stopReason: 'error',
+      });
+      await job;
+    } finally {
+      delete process.env.AGENT_DURABLE_RUNS;
+      reloadConfig();
+    }
+  });
+
+  it('with durable runs, the shutdown drain hands a run still going to another node instead of failing it', async () => {
+    process.env.AGENT_DURABLE_RUNS = 'true';
+    reloadConfig();
+    try {
+      hoisted.executeAgentChatLocal.mockImplementation(() => new Promise(() => undefined));
+      const run = await startQueued('conv-drain-handoff');
+      const runId = String(run._id);
+      const job = runAgentJobLocal({ runId, tenantId, tenantDbName: dbName });
+      await vi.waitFor(() => {
+        expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
+      });
+      hoisted.publish.mockClear();
+
+      const drained = await drainLocalAgentRuns(50);
+
+      expect(drained).toEqual({ settled: 0, interrupted: 0, handedOff: 1 });
+      const db = await getDatabase();
+      await db.switchToTenant(dbName);
+      const after = await db.getAgentRunById(runId, tenantId, PROJECT_ID);
+      expect(after).toMatchObject({ status: 'queued', lastRecoveryReason: 'handoff', queueGeneration: 2 });
+      expect(after?.recoveryCount ?? 0).toBe(0);
+      expect(after?.recoveryDeadlineAt).toBeTruthy();
+      expect(hoisted.publish).toHaveBeenCalledWith(AGENT_RUN_QUEUE, 'run', expect.objectContaining({ runId }), expect.anything());
+      await job;
+      // The old execution, cut off, does not finalize the run it handed over.
+      expect((await db.getAgentRunById(runId, tenantId, PROJECT_ID))?.status).toBe('queued');
+    } finally {
+      delete process.env.AGENT_DURABLE_RUNS;
+      reloadConfig();
+    }
+  });
+
+  it('with durable runs off, a run moved here from a node that stopped is not run again from the start', async () => {
+    const run = await startQueued('conv-moved-flag-off');
+    const runId = String(run._id);
+    const db = await getDatabase();
+    await db.switchToTenant(dbName);
+    // A node with durable runs claimed it and handed it off (or it was recovered).
+    await db.claimAgentRun(runId, tenantId, 'node-a', new Date(), { durable: true });
+    await db.writeAgentRunCheckpoint({
+      runId, tenantId, conversationId: 'conv-moved-flag-off', generation: 1, seq: 1, mode: 'reset', head: 'h',
+      messageChunks: ['m'], toolHistoryChunks: [], messageCount: 1, toolHistoryCount: 0, sizeBytes: 2, schema: 1,
+      expiresAt: new Date(Date.now() + 3_600_000),
     });
-    await job;
+    await db.requeueAgentRunForRecovery(runId, tenantId, {}, { reason: 'handoff', deadlineAt: new Date(Date.now() + 60_000) });
+    process.env.AGENT_DURABLE_RUNS = 'false';
+    reloadConfig();
+    try {
+      await runAgentJobLocal({ runId, tenantId, tenantDbName: dbName });
+      expect(hoisted.executeAgentChatLocal).not.toHaveBeenCalled();
+      expect(await db.getAgentRunById(runId, tenantId, PROJECT_ID)).toMatchObject({ status: 'failed', errorReason: 'worker_lost' });
+      // Its checkpoint goes with it: nothing will continue from it.
+      expect(await db.findAgentRunCheckpoint(runId, tenantId)).toBeNull();
+    } finally {
+      delete process.env.AGENT_DURABLE_RUNS;
+      reloadConfig();
+    }
+  });
+
+  it('with durable runs, a handoff not done by the end of the drain neither fails the run nor counts as handed off', async () => {
+    process.env.AGENT_DURABLE_RUNS = 'true';
+    reloadConfig();
+    let release: (() => void) | undefined;
+    try {
+      hoisted.executeAgentChatLocal.mockImplementation(() => new Promise(() => undefined));
+      const run = await startQueued('conv-drain-handoff-slow');
+      const runId = String(run._id);
+      const job = runAgentJobLocal({ runId, tenantId, tenantDbName: dbName });
+      await vi.waitFor(() => {
+        expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
+      });
+      // The queue does not answer before the process would end.
+      hoisted.publish.mockImplementation(() => new Promise<void>((resolve) => { release = resolve; }));
+
+      const started = performance.now();
+      const drained = await drainLocalAgentRuns(50);
+
+      // Bounded: the drain does not wait on the handoff past its reserve (at least the time a
+      // handoff gives a running tool and the flush: 3.5 s).
+      expect(performance.now() - started).toBeLessThan(4_500);
+      expect(drained).toEqual({ settled: 0, interrupted: 0, handedOff: 0 });
+      const db = await getDatabase();
+      await db.switchToTenant(dbName);
+      // Not failed: requeued, and the reconciler republishes a queued run the queue never got.
+      const after = await db.getAgentRunById(runId, tenantId, PROJECT_ID);
+      expect(after?.status).toBe('queued');
+      expect(after?.errorReason ?? null).toBeNull();
+      release?.();
+      await job;
+    } finally {
+      release?.();
+      hoisted.publish.mockReset();
+      delete process.env.AGENT_DURABLE_RUNS;
+      reloadConfig();
+    }
+  });
+
+  it('with durable runs, a handed-off run that another node already took is not ended by the old execution', async () => {
+    process.env.AGENT_DURABLE_RUNS = 'true';
+    reloadConfig();
+    try {
+      const db = await getDatabase();
+      await db.switchToTenant(dbName);
+      // The old execution has written a checkpoint (the next node goes on from it), and its turn
+      // ends as soon as it sees its cell tripped, the way a real one stops at its next check.
+      hoisted.executeAgentChatLocal.mockImplementation((request: { cancellationCell?: { cancelled?: boolean; checkpointer?: unknown } }) => {
+        const cell = request.cancellationCell;
+        if (cell) {
+          cell.checkpointer = {
+            wrote: true, sealed: false, stop: () => undefined, idle: async () => undefined, flush: async () => true, handoff: async () => true,
+            onStateChange: () => true, beforeTool: async () => undefined, afterTool: () => undefined,
+          };
+        }
+        return new Promise((resolve) => {
+          const poll = setInterval(() => {
+            if (!cell?.cancelled) return;
+            clearInterval(poll);
+            resolve(fakeResponse('resp_cut_off'));
+          }, 5);
+        });
+      });
+      const run = await startQueued('conv-drain-handoff-taken');
+      const runId = String(run._id);
+      const job = runAgentJobLocal({ runId, tenantId, tenantDbName: dbName });
+      await vi.waitFor(() => {
+        expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
+      });
+      await db.writeAgentRunCheckpoint({
+        runId, tenantId, conversationId: 'conv-drain-handoff-taken', generation: 1, seq: 1, mode: 'reset', head: 'h',
+        messageChunks: ['m'], toolHistoryChunks: [], messageCount: 1, toolHistoryCount: 0, sizeBytes: 2, schema: 1,
+        expiresAt: new Date(Date.now() + 3_600_000),
+      });
+      // Another node takes the job the moment it is published, before the old execution's tail runs.
+      hoisted.publish.mockImplementation(async (_queue: string, _name: string, payload: { runId?: string }) => {
+        if (payload.runId === runId) await db.claimAgentRun(runId, tenantId, 'node-b', new Date());
+      });
+
+      expect(await drainLocalAgentRuns(50)).toEqual({ settled: 0, interrupted: 0, handedOff: 1 });
+      await job;
+
+      const after = await db.getAgentRunById(runId, tenantId, PROJECT_ID);
+      expect(after).toMatchObject({ status: 'running', workerId: 'node-b', queueGeneration: 2 });
+      expect(after?.errorReason ?? null).toBeNull();
+      // Its checkpoint stays for the execution that has the run now.
+      expect(await db.findAgentRunCheckpoint(runId, tenantId)).not.toBeNull();
+      // The old execution keeps it alive no more either.
+      expect(await db.updateAgentRunHeartbeat(runId, 'node-b', new Date(), { generation: 1 })).toBeNull();
+      expect(await db.updateAgentRunHeartbeat(runId, 'node-b', new Date(), { generation: 2 })).not.toBeNull();
+    } finally {
+      hoisted.publish.mockReset();
+      delete process.env.AGENT_DURABLE_RUNS;
+      reloadConfig();
+    }
+  });
+
+  it('with durable runs, the claim and each accepted heartbeat renew the hold on the run, and losing the run stops its tools at once', async () => {
+    process.env.AGENT_DURABLE_RUNS = 'true';
+    process.env.AGENT_RUN_HEARTBEAT_INTERVAL_MS = '1000';
+    reloadConfig();
+    try {
+      const db = await getDatabase();
+      await db.switchToTenant(dbName);
+      let cell: { cancelled?: boolean; leaseRenewedAt?: number; checkpointer?: unknown } | undefined;
+      // Whether the turn was already cancelled each time its checkpointer was stopped.
+      const stoppedWhileCancelled: boolean[] = [];
+      hoisted.executeAgentChatLocal.mockImplementation((request: { cancellationCell?: typeof cell }) => {
+        cell = request.cancellationCell;
+        if (cell) {
+          cell.checkpointer = {
+            wrote: false, sealed: false, stop: () => { stoppedWhileCancelled.push(Boolean(cell?.cancelled)); }, idle: async () => undefined, flush: async () => true, handoff: async () => true,
+            onStateChange: () => false, beforeTool: async () => undefined, afterTool: () => undefined,
+          };
+        }
+        return new Promise((resolve) => {
+          const poll = setInterval(() => {
+            if (!cell?.cancelled) return;
+            clearInterval(poll);
+            resolve(fakeResponse('resp_lost'));
+          }, 5);
+        });
+      });
+      const run = await startQueued('conv-lease');
+      const runId = String(run._id);
+      const before = performance.now();
+      const job = runAgentJobLocal({ runId, tenantId, tenantDbName: dbName });
+      await vi.waitFor(() => {
+        expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
+      });
+      // The hold counts from the claim, and an accepted heartbeat renews it.
+      const claimedAt = cell!.leaseRenewedAt!;
+      expect(claimedAt).toBeGreaterThanOrEqual(before);
+      await vi.waitFor(() => {
+        expect(cell!.leaseRenewedAt!).toBeGreaterThan(claimedAt);
+      }, { timeout: 5000 });
+      expect(stoppedWhileCancelled).toEqual([]);
+
+      // The run is given to another node: the next heartbeat finds it gone, and the checkpointer is
+      // stopped before the turn is even told to end (no tool with side effects starts in between).
+      await db.requeueAgentRunForRecovery(runId, tenantId, {}, { reason: 'orphaned', deadlineAt: new Date(Date.now() + 60_000) });
+      await job;
+      expect(stoppedWhileCancelled[0]).toBe(false);
+      expect(await db.getAgentRunById(runId, tenantId, PROJECT_ID)).toMatchObject({ status: 'queued', queueGeneration: 2 });
+    } finally {
+      delete process.env.AGENT_DURABLE_RUNS;
+      delete process.env.AGENT_RUN_HEARTBEAT_INTERVAL_MS;
+      reloadConfig();
+    }
   });
   describe('the agents service switched off', () => {
     /** Runs `fn` with the agents service off for the deployment, and puts the environment back. */

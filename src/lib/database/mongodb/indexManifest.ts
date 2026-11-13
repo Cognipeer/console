@@ -208,6 +208,10 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   ],
   // Lease documents behind the one-active-run guarantee; expired ones are swept by expiresAt.
   agent_run_locks: [{ key: { expiresAt: 1 }, options: { name: 'idx_expiresAt' } }],
+  // Durable-run checkpoints are deleted when their run ends; the TTL removes one a crash left behind.
+  // The segments are read and deleted by _id range (`<runId>:…`), so the TTL is their only index.
+  agent_run_checkpoints: [{ key: { expiresAt: 1 }, options: { name: 'ttl_expiresAt', expireAfterSeconds: 0 } }],
+  agent_run_checkpoint_segments: [{ key: { expiresAt: 1 }, options: { name: 'ttl_expiresAt', expireAfterSeconds: 0 } }],
   rag_chunks: [
     { key: { documentId: 1, chunkIndex: 1 }, options: { name: 'idx_doc_chunk' } },
     { key: { vectorId: 1 }, options: { name: 'idx_vectorId' } },

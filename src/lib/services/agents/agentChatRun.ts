@@ -20,7 +20,7 @@ import type {
     SmartAgentEvent as AgentSdkEvent,
     ToolInterface as AgentSdkToolInterface,
 } from '@cognipeer/agent-sdk';
-import { resolveAgentRuntimeOptions, resolveAgentSkillPolicy, resolveTurnOutputSchema } from './agentRuntimeConfig';
+import { keepRecoveredTurn, resolveAgentRuntimeOptions, resolveAgentSkillPolicy, resolveTurnOutputSchema } from './agentRuntimeConfig';
 import { buildAgentSkills } from './agentSkillService';
 import { buildAgentMemoryOption } from './agentMemoryAdapter';
 import { resolveAgentMemoryStore } from './agentMemoryStore';
@@ -82,6 +82,7 @@ import { buildFileOutputTools, fileOutputsPrompt, mergeOutputCollectors, type Fi
 import { buildReminderTools, reminderApprovalMode, reminderNoteText, remindersPrompt, type ReminderTools, type ReminderWake } from './agentReminderTools';
 import { resolveRemindersConfig } from './agentRemindersConfig';
 import { getConfig } from '@/lib/core/config';
+import { createRunCheckpointer, runLeaseHolds, stampRunTurn, withCheckpointBeforeTool, type CheckpointTurn, type RunCheckpointer } from './runCheckpoint';
 import { inspectFileBucket } from './sessionFilesBucket';
 import { outputsAvailability } from './sessionFilesConfig';
 import {
@@ -493,6 +494,10 @@ export async function buildLocalAgentRun(input: {
     accountableUserId?: string;
     /** The person a continued pause is for (stored with the pause): replaces the runtime context's caller, who may be the approver. */
     identity?: ConsoleIdentityPerson;
+    /** Durable runs: every tool waits for the turn's checkpoint before it runs (runCheckpoint.ts). */
+    checkpointer?: RunCheckpointer;
+    /** A recovered turn's steps so far: the model is shown all of them (see `keepRecoveredTurn`). */
+    recoveredTurnSteps?: number;
 }) {
     const { db, tenantDbName, tenantId, projectId, agentKey, agent, runtimeContext, actorId, source } = input;
     // Who MCP servers and connected agents set up for Console identity are told this run is for.
@@ -1009,7 +1014,19 @@ export async function buildLocalAgentRun(input: {
         name: agent.name,
         version: input.version != null ? String(input.version) : undefined,
         model: sdkModel,
-        ...(gatedTools.length + clientTools.length > 0 ? { tools: [...gatedTools.map((tool) => withToolMedia(tool, toolMedia)), ...clientTools] } : {}),
+        // A durable run's checkpoint is written before a tool can act (runCheckpoint.ts). Client
+        // tools are not wrapped: the host page runs them, the turn only pauses for them.
+        ...(gatedTools.length + clientTools.length > 0
+            ? {
+                tools: [
+                    ...gatedTools.map((tool) => {
+                        const withMedia = withToolMedia(tool, toolMedia);
+                        return input.checkpointer ? withCheckpointBeforeTool(withMedia, input.checkpointer) : withMedia;
+                    }),
+                    ...clientTools,
+                ],
+            }
+            : {}),
         // Nobody to ask in the other modes, so the question tool is not offered.
         ...(hitlMode === 'ask' && hitl.askUserEnabled ? { humanInTheLoop: { askUser: { allowFreeText: hitl.allowFreeText } } } : {}),
         // Omitted entirely when empty: an empty array and no key mean the same
@@ -1018,7 +1035,9 @@ export async function buildLocalAgentRun(input: {
         ...(guardrailPlugins.length > 0 ? { plugins: guardrailPlugins } : {}),
         // Carries the module defaults for every knob an operator left untouched
         // — see `agentRuntimeConfig.CONSOLE_AGENT_DEFAULTS`.
-        ...resolveAgentRuntimeOptions(config),
+        ...(input.recoveredTurnSteps
+            ? keepRecoveredTurn(resolveAgentRuntimeOptions(config), input.recoveredTurnSteps)
+            : resolveAgentRuntimeOptions(config)),
         ...(outputSchema ? { outputSchema } : {}),
         ...(subagents.length > 0 ? { subagents } : {}),
         ...(skills.length > 0 ? { skills } : {}),
@@ -1508,6 +1527,27 @@ async function runAgentChatTurn(
         });
     }
 
+    // Durable runs: the turn checkpoints itself so another node can continue it (runCheckpoint.ts).
+    // What it records about the user turn is filled in once that turn is built (below).
+    let checkpointTurn: (state: { messages?: unknown[] }) => CheckpointTurn = () => ({ kind: 'chat' });
+    const checkpointer = request.durable && request.runId
+        ? createRunCheckpointer({
+            db,
+            runId: request.runId,
+            tenantId,
+            conversationId,
+            generation: request.durable.generation,
+            deadlineAt: request.cancellationCell?.deadlineAt ?? Date.now() + getConfig().agent.backgroundMaxDurationMs,
+            intervalMs: getConfig().agent.checkpointIntervalMs,
+            turn: (state) => checkpointTurn(state),
+            onFenced: () => {
+                if (request.cancellationCell) request.cancellationCell.cancelled = true;
+            },
+            leaseHolds: () => runLeaseHolds(request.cancellationCell),
+        })
+        : undefined;
+    if (checkpointer && request.cancellationCell) request.cancellationCell.checkpointer = checkpointer;
+
     // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
     const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, outputLimit, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity, hitlLog } = await buildLocalAgentRun({
         db,
@@ -1529,6 +1569,7 @@ async function runAgentChatTurn(
         threadId: conversationId,
         onMessageRewrite: (rewrite) => rewriteLedger.record(rewrite),
         unattended: request.unattended,
+        ...(checkpointer ? { checkpointer } : {}),
         ...(request.answersClientTools ? { answersClientTools: true } : {}),
         ...(spend ? { spend } : {}),
         ...(modelChoice ? { modelChoice } : {}),
@@ -1563,6 +1604,23 @@ async function runAgentChatTurn(
         attachments: await earlierAttachments({ db, conversation, config, model }),
     });
     const userTurnIndex = inputState.messages.length - 1;
+    // The user turn the transcript gets, read the way the end of the turn reads it.
+    checkpointTurn = (state) => ({
+        kind: 'chat',
+        userTurnIndex,
+        userMessage: {
+            role: 'user',
+            content: persistedUserTurn({
+                result: { messages: (state.messages ?? []) as Array<{ role?: string; content?: unknown }> },
+                index: userTurnIndex,
+                fallback: userMessage,
+                ledger: rewriteLedger,
+            }),
+            ...(attached.attachments.length > 0 ? { attachments: attached.attachments } : {}),
+            ...(reminderMeta ? { metadata: reminderMeta } : {}),
+            timestamp: now,
+        },
+    });
     // Tool calls the carried state already holds belong to earlier turns.
     const priorExecutionIds = new Set(
         (carried?.toolHistory ?? [])
@@ -1589,6 +1647,7 @@ async function runAgentChatTurn(
                 ? { timeoutMs: Math.max(0, request.cancellationCell.deadlineAt - Date.now()) }
                 : {}),
             ...sessionBudgetInvokeOptions(budgetPlan),
+            ...(checkpointer ? { onStateChange: checkpointer.onStateChange } : {}),
         };
 
         const settled: AgentSdkInvokeResult | null = await runWithTurnSignal(cancellationBridge.signal, () => sdkAgent.invoke(inputState, liveInvokeConfig))
@@ -1744,6 +1803,7 @@ async function runAgentChatTurn(
             },
         ];
 
+        if (request.durable) stampRunTurn(updatedMessages[updatedMessages.length - 1], request.durable.turnKey);
         if (!supersededByDeadlineOrCancel) {
             await db.updateAgentConversation(conversationId, {
                 messages: updatedMessages,

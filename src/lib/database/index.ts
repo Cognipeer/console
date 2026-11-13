@@ -495,6 +495,8 @@ export type {
   IAgentConversationSearchHit,
   IAgentConversationSearchMatch,
   IAgentConversationState,
+  IAgentRunCheckpoint,
+  AgentRunCheckpointWrite,
   IAgentPendingAction,
   IAgentMessageFeedback,
   IAgentMessageVersion,

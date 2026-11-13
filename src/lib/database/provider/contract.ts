@@ -12,6 +12,9 @@ import type {
   IAgentConversationSearchHit,
   AgentSessionRuntimeStatus,
   IAgentConversationState,
+  IAgentRunCheckpoint,
+  AgentRunCheckpointWrite,
+  AgentRunExecutionGuard,
   IAgentPendingAction,
   IAgentMessageFeedback,
   AgentMessageFeedbackFilter,
@@ -2513,17 +2516,21 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     tenantId: string,
     workerId: string,
     startedAt: Date,
+    /** `durable`: this execution checkpoints its turn (stored as `IAgentRun.durable`). */
+    options?: { durable?: boolean },
   ): Promise<IAgentRun | null>;
   /**
    * Update `heartbeatAt` for a run this worker still owns. Guarded by
    * `status = 'running' AND workerId = ?` so a worker that has already been
    * superseded (e.g. reclaimed by the reconciler) cannot resurrect a run by
-   * writing a fresh heartbeat to it.
+   * writing a fresh heartbeat to it. With `guard.generation`, also only while
+   * the row is still that execution's (see `AgentRunExecutionGuard`).
    */
   updateAgentRunHeartbeat(
     id: string,
     workerId: string,
     heartbeatAt: Date,
+    guard?: AgentRunExecutionGuard,
   ): Promise<IAgentRun | null>;
   /**
    * Record a cancellation request, scoped by tenantId + projectId (§12.11).
@@ -2544,12 +2551,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * `succeeded` by an abandoned `invoke()` call that eventually settles
    * (§12.12) — the CAS guard, not the caller's discretion, is the actual
    * protection. A paused (`requires_action`) run can be finalized as well:
-   * a cancel, or a continuation that completed inline.
+   * a cancel, or a continuation that completed inline. With `guard.generation`,
+   * only while the row is still that execution's: one that was handed off or
+   * recovered elsewhere is running again, and is not this execution's to end.
    */
   finalizeAgentRun(
     id: string,
     tenantId: string,
     data: Partial<Omit<IAgentRun, '_id' | 'tenantId' | 'createdAt'>>,
+    guard?: AgentRunExecutionGuard,
   ): Promise<IAgentRun | null>;
   /**
    * Puts a paused (`requires_action`) run back in the queue to continue its
@@ -2566,6 +2576,30 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     resumeActionIds: string[],
     continuation?: { trigger: 'resume' | 'timeout'; userId?: string | null; apiTokenId?: string | null },
   ): Promise<IAgentRun | null>;
+  /**
+   * Durable runs: puts a `running` run back in the queue so another node
+   * continues it. CAS on `status: 'running'` and, when given, the worker that
+   * holds it (`fromWorkerId`, a handoff) or a heartbeat older than
+   * `staleBefore` (an orphan). Increments `queueGeneration` (the old
+   * execution's checkpoint writes and heartbeats are refused from then on) and,
+   * for an orphan, `recoveryCount`; sets `lastRecoveredAt` and the turn's
+   * ceiling (`recoveryDeadlineAt`); clears `workerId`. Null when the run was not in that state.
+   */
+  requeueAgentRunForRecovery(
+    id: string,
+    tenantId: string,
+    guard: { fromWorkerId?: string; staleBefore?: Date },
+    recovery: { reason: 'handoff' | 'orphaned'; deadlineAt: Date },
+  ): Promise<IAgentRun | null>;
+  /**
+   * Writes a run's checkpoint. `reset` replaces it (creating it when absent);
+   * `append` adds chunks to the stored one. Refused — false — when a newer
+   * execution of the run (`generation`) has written since, or, for `append`,
+   * when there is nothing stored to append to.
+   */
+  writeAgentRunCheckpoint(write: AgentRunCheckpointWrite): Promise<boolean>;
+  findAgentRunCheckpoint(runId: string, tenantId: string): Promise<IAgentRunCheckpoint | null>;
+  deleteAgentRunCheckpoint(runId: string, tenantId: string): Promise<void>;
   /**
    * Updates callback delivery bookkeeping ONLY (`callbackStatus`,
    * `callbackAttempts`) — deliberately NOT guarded by `status = 'running'`

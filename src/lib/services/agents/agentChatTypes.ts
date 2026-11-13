@@ -14,6 +14,7 @@ import type { ClientFileAnnotation, ClientOutputFile, ClientPendingAction } from
 import type { AgentRunCaller } from './agentQuota';
 import type { ReminderWake } from './agentReminderTools';
 import type { AgentStopReason } from './agentTurnState';
+import type { DurableTurn, RunCheckpointer } from './runCheckpoint';
 import { isDelegationTool, subagentStampOf } from './subagentEvents';
 import type { AgentCompactionEvent, AgentPlanEvent, AgentSubagentEvent, AgentToolCallSubagentStamp } from '@/lib/shared/agentTurnFlow';
 import type { EmbeddedRunContext } from './agentClientTools';
@@ -45,6 +46,13 @@ export interface AgentRunCancellationCell {
      * its end is recorded only if no newer turn took the session (`runtimeTurnId`).
      */
     abandoned?: boolean;
+    /** Durable runs: the turn's checkpointer, so a shutdown can write the latest step and hand the run off. */
+    checkpointer?: RunCheckpointer;
+    /**
+     * Background runs: when this execution last renewed its hold on the run (`performance.now()`
+     * when the claim, or a heartbeat the store accepted, was sent). See `runLeaseHolds`.
+     */
+    leaseRenewedAt?: number;
 }
 
 /** True once a deadline has passed or an explicit cancel has been recorded. */
@@ -136,6 +144,8 @@ export interface AgentChatRequest {
     accountableUserId?: string;
     /** The background run executing this turn, when there is one — stamped on its session events. */
     runId?: string;
+    /** Durable runs: set for a run that writes checkpoints (see runCheckpoint.ts). */
+    durable?: DurableTurn;
     /**
      * The reminder this turn is the wake-up of (a run of `channel: 'reminder'`): the turn starts
      * with a note framed as the agent's own (`reminderNoteText`), stored with `metadata.origin`.

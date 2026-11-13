@@ -585,6 +585,17 @@ export interface AppConfig {
     runConcurrency: number;
     /** A `queued` run older than this with no worker is republished by the reconciler. */
     runRequeueAfterMs: number;
+    /**
+     * Durable runs (`AGENT_DURABLE_RUNS`, on by default in SaaS): a background run's turn writes
+     * sparse checkpoints, a shutting-down node hands its runs to another node, and the reconciler
+     * continues an orphaned run from its checkpoint instead of failing it `worker_lost`.
+     * See docs/guide/agent-background-execution.md "Durable runs".
+     */
+    durableRuns: boolean;
+    /** Least time between two checkpoints a turn writes on its own (a side-effecting tool always writes one first). */
+    checkpointIntervalMs: number;
+    /** How many times one run is continued on another node before it fails `worker_lost` (a run that keeps killing nodes). */
+    runMaxRecoveries: number;
     /** Default class: queued+running runs per tenant, every mode (sync, inline, background); 0 = no cap. The tenant quota `maxConcurrentAgentRuns` lowers it. */
     runMaxActivePerTenant: number;
     /** Default class: queued+running runs per project; 0 = off. */
@@ -1351,6 +1362,9 @@ function buildConfig(source: ConfigSource): AppConfig {
       sessionEventRetentionDays: Math.max(int(source, 'AGENT_SESSION_EVENT_RETENTION_DAYS', 30), 1),
       stateMaxBytes: Math.min(Math.max(int(source, 'AGENT_STATE_MAX_BYTES', DEFAULT_AGENT_STATE_MAX_BYTES), 100_000), 15_000_000),
       ...boundedAgentRunConfig(source),
+      durableRuns: bool(source, 'AGENT_DURABLE_RUNS', deploymentMode === 'saas'),
+      checkpointIntervalMs: Math.max(int(source, 'AGENT_CHECKPOINT_INTERVAL_MS', 10_000), 1_000),
+      runMaxRecoveries: Math.min(Math.max(int(source, 'AGENT_RUN_MAX_RECOVERIES', 2), 0), 10),
     },
 
     webhooks: {

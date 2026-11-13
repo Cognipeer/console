@@ -133,8 +133,10 @@ export async function startAgentQueueConsumer(): Promise<void> {
     if (ctx.name === 'callback') return deliverAgentRunCallbackJob(ctx.data as unknown as CallbackJobPayload);
     throw new Error(`Unknown ${AGENT_RUN_CALLBACK_QUEUE} job: ${ctx.name}`);
   }, { concurrency: agent.runCallbackConcurrency });
-  // Registered after the queue and database handlers, so (LIFO) it runs before them.
-  registerShutdownHandler('agent-runs', drainAgentRunConsumers);
+  // Before every other handler: the queue and database close after it, and a flush registered
+  // later (usage) must not use up the shutdown time the runs' handoff needs. A flush that runs
+  // after it also takes in what the runs did during the drain.
+  registerShutdownHandler('agent-runs', drainAgentRunConsumers, { first: true });
   started = true;
   log.info('Agent queue consumer registered', {
     concurrency: chatConcurrency,

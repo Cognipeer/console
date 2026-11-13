@@ -347,7 +347,7 @@ describe('an inline turn whose row was ended elsewhere', () => {
     const settled = outcome.then(() => 'completed', (error: unknown) => error);
     await delay(100);
 
-    expect(await drainLocalAgentRuns(50)).toEqual({ settled: 0, interrupted: 1 });
+    expect(await drainLocalAgentRuns(50)).toEqual({ settled: 0, interrupted: 1, handedOff: 0 });
 
     const error = await settled;
     expect(error).toBeInstanceOf(AgentRunInterruptedError);

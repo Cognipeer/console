@@ -8,7 +8,7 @@
  * irreversible tool side effects that crawl jobs do not.
  */
 
-import type { AgentRunClass, IAgentRun } from '../provider.interface';
+import type { AgentRunCheckpointWrite, AgentRunClass, AgentRunExecutionGuard, IAgentRun, IAgentRunCheckpoint } from '../provider.interface';
 import { AgentRunConflictError, AgentRunIdempotencyKeyTakenError } from '../provider/errors';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
@@ -140,25 +140,31 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       tenantId: string,
       workerId: string,
       startedAt: Date,
+      options?: { durable?: boolean },
     ): Promise<IAgentRun | null> {
       return this.updateAgentRunIf(id, `
         UPDATE ${TABLES.agentRuns}
         SET status = 'running', workerId = @workerId, startedAt = @startedAt,
-            heartbeatAt = @startedAt, updatedAt = @updatedAt
+            heartbeatAt = @startedAt, durable = @durable, updatedAt = @updatedAt
         WHERE id = @id AND tenantId = @tenantId AND status = 'queued'
-      `, { id, tenantId, workerId, startedAt: startedAt.toISOString(), updatedAt: this.now() });
+      `, { id, tenantId, workerId, startedAt: startedAt.toISOString(), durable: options?.durable ? 1 : 0, updatedAt: this.now() });
     }
 
     async updateAgentRunHeartbeat(
       id: string,
       workerId: string,
       heartbeatAt: Date,
+      guard?: AgentRunExecutionGuard,
     ): Promise<IAgentRun | null> {
+      const generation = guard?.generation;
       return this.updateAgentRunIf(id, `
         UPDATE ${TABLES.agentRuns}
         SET heartbeatAt = @heartbeatAt, updatedAt = @updatedAt
-        WHERE id = @id AND workerId = @workerId AND status = 'running'
-      `, { id, workerId, heartbeatAt: heartbeatAt.toISOString(), updatedAt: this.now() });
+        WHERE id = @id AND workerId = @workerId AND status = 'running'${generation === undefined ? '' : ' AND COALESCE(queueGeneration, 1) = @generation'}
+      `, {
+        id, workerId, heartbeatAt: heartbeatAt.toISOString(), updatedAt: this.now(),
+        ...(generation === undefined ? {} : { generation }),
+      });
     }
 
     async requestAgentRunCancel(
@@ -189,14 +195,124 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       id: string,
       tenantId: string,
       data: Partial<Omit<IAgentRun, '_id' | 'tenantId' | 'createdAt'>>,
+      guard?: AgentRunExecutionGuard,
     ): Promise<IAgentRun | null> {
       const { sets, params } = this.buildAgentRunSetClause(data, id, this.now());
       params.tenantId = tenantId;
-      return this.updateAgentRunIf(
-        id,
-        `UPDATE ${TABLES.agentRuns} SET ${sets.join(', ')} WHERE id = @id AND tenantId = @tenantId AND status IN ('running', 'requires_action')`,
-        params,
-      );
+      let where = "id = @id AND tenantId = @tenantId AND status IN ('running', 'requires_action')";
+      if (guard?.generation !== undefined) {
+        where += ' AND COALESCE(queueGeneration, 1) = @guardGeneration';
+        params.guardGeneration = guard.generation;
+      }
+      return this.updateAgentRunIf(id, `UPDATE ${TABLES.agentRuns} SET ${sets.join(', ')} WHERE ${where}`, params);
+    }
+
+    async requeueAgentRunForRecovery(
+      id: string,
+      tenantId: string,
+      guard: { fromWorkerId?: string; staleBefore?: Date },
+      recovery: { reason: 'handoff' | 'orphaned'; deadlineAt: Date },
+    ): Promise<IAgentRun | null> {
+      const now = this.now();
+      const conditions = ["id = @id", "tenantId = @tenantId", "status = 'running'"];
+      // Only an orphan counts toward the limit: a run that keeps killing its node.
+      const params: Record<string, unknown> = {
+        id, tenantId, now, reason: recovery.reason, orphaned: recovery.reason === 'orphaned' ? 1 : 0,
+        deadlineAt: recovery.deadlineAt.toISOString(),
+      };
+      if (guard.fromWorkerId !== undefined) {
+        conditions.push('workerId = @fromWorkerId');
+        params.fromWorkerId = guard.fromWorkerId;
+      }
+      if (guard.staleBefore) {
+        conditions.push('heartbeatAt < @staleBefore');
+        params.staleBefore = guard.staleBefore.toISOString();
+      }
+      // The row stays active (queued), so it keeps the conversation's slot.
+      return this.updateAgentRunIf(id, `
+        UPDATE ${TABLES.agentRuns}
+        SET status = 'queued', workerId = NULL, notBefore = @now, updatedAt = @now,
+            queueGeneration = COALESCE(queueGeneration, 1) + 1,
+            recoveryCount = COALESCE(recoveryCount, 0) + @orphaned,
+            lastRecoveredAt = @now, lastRecoveryReason = @reason, recoveryDeadlineAt = @deadlineAt
+        WHERE ${conditions.join(' AND ')}
+      `, params);
+    }
+
+    async writeAgentRunCheckpoint(write: AgentRunCheckpointWrite): Promise<boolean> {
+      const db = this.getTenantDb();
+      const now = this.now();
+      const row = db.prepare(`SELECT generation, messageChunks, toolHistoryChunks FROM ${TABLES.agentRunCheckpoints} WHERE id = ? AND tenantId = ?`)
+        .get(write.runId, write.tenantId) as { generation: number; messageChunks: string; toolHistoryChunks: string } | undefined;
+      if (write.mode === 'append') {
+        if (!row || Number(row.generation) !== write.generation) return false;
+        const messages = [...this.parseJson(row.messageChunks, [] as string[]), ...write.messageChunks];
+        const tools = [...this.parseJson(row.toolHistoryChunks, [] as string[]), ...write.toolHistoryChunks];
+        db.prepare(`
+          UPDATE ${TABLES.agentRunCheckpoints}
+          SET head = COALESCE(@head, head), messageChunks = @messageChunks, toolHistoryChunks = @toolHistoryChunks,
+              messageCount = @messageCount, toolHistoryCount = @toolHistoryCount, sizeBytes = @sizeBytes,
+              schema = @schema, sealed = @sealed, updatedAt = @now, expiresAt = @expiresAt
+          WHERE id = @id AND tenantId = @tenantId AND generation = @generation
+        `).run({
+          id: write.runId, tenantId: write.tenantId, generation: write.generation, head: write.head ?? null,
+          messageChunks: JSON.stringify(messages), toolHistoryChunks: JSON.stringify(tools),
+          messageCount: write.messageCount, toolHistoryCount: write.toolHistoryCount, sizeBytes: write.sizeBytes,
+          schema: write.schema, sealed: write.sealed ?? null, now, expiresAt: write.expiresAt.toISOString(),
+        });
+        return true;
+      }
+      // A newer execution's checkpoint is not overwritten.
+      if (row && Number(row.generation) > write.generation) return false;
+      db.prepare(`
+        INSERT INTO ${TABLES.agentRunCheckpoints}
+        (id, tenantId, conversationId, generation, schema, head, messageChunks, toolHistoryChunks,
+         messageCount, toolHistoryCount, sizeBytes, sealed, createdAt, updatedAt, expiresAt)
+        VALUES (@id, @tenantId, @conversationId, @generation, @schema, @head, @messageChunks, @toolHistoryChunks,
+         @messageCount, @toolHistoryCount, @sizeBytes, @sealed, @now, @now, @expiresAt)
+        ON CONFLICT(id) DO UPDATE SET
+          conversationId = excluded.conversationId, generation = excluded.generation, schema = excluded.schema,
+          head = excluded.head, messageChunks = excluded.messageChunks, toolHistoryChunks = excluded.toolHistoryChunks,
+          messageCount = excluded.messageCount, toolHistoryCount = excluded.toolHistoryCount,
+          sizeBytes = excluded.sizeBytes, sealed = excluded.sealed, updatedAt = excluded.updatedAt,
+          expiresAt = excluded.expiresAt
+      `).run({
+        id: write.runId, tenantId: write.tenantId, conversationId: write.conversationId, generation: write.generation,
+        schema: write.schema, head: write.head ?? '',
+        messageChunks: JSON.stringify(write.messageChunks), toolHistoryChunks: JSON.stringify(write.toolHistoryChunks),
+        messageCount: write.messageCount, toolHistoryCount: write.toolHistoryCount, sizeBytes: write.sizeBytes,
+        sealed: write.sealed ?? null, now, expiresAt: write.expiresAt.toISOString(),
+      });
+      return true;
+    }
+
+    async findAgentRunCheckpoint(runId: string, tenantId: string): Promise<IAgentRunCheckpoint | null> {
+      const row = this.getTenantDb()
+        .prepare(`SELECT * FROM ${TABLES.agentRunCheckpoints} WHERE id = ? AND tenantId = ?`)
+        .get(runId, tenantId) as Record<string, unknown> | undefined;
+      if (!row) return null;
+      return {
+        _id: String(row.id),
+        runId: String(row.id),
+        tenantId: String(row.tenantId),
+        conversationId: String(row.conversationId),
+        generation: Number(row.generation),
+        schema: Number(row.schema),
+        head: String(row.head),
+        messageChunks: this.parseJson(row.messageChunks, [] as string[]),
+        toolHistoryChunks: this.parseJson(row.toolHistoryChunks, [] as string[]),
+        messageCount: Number(row.messageCount),
+        toolHistoryCount: Number(row.toolHistoryCount),
+        sizeBytes: Number(row.sizeBytes),
+        sealed: (row.sealed as IAgentRunCheckpoint['sealed']) ?? null,
+        createdAt: this.toDate(row.createdAt),
+        updatedAt: this.toDate(row.updatedAt),
+        expiresAt: this.toDate(row.expiresAt) ?? new Date(),
+      };
+    }
+
+    async deleteAgentRunCheckpoint(runId: string, tenantId: string): Promise<void> {
+      this.getTenantDb().prepare(`DELETE FROM ${TABLES.agentRunCheckpoints} WHERE id = ? AND tenantId = ?`).run(runId, tenantId);
     }
 
     async requeueAgentRunForResume(
@@ -212,7 +328,8 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
               errorReason = NULL, errorMessage = NULL, workerId = NULL, cancelRequestedAt = NULL,
               completedAt = NULL, updatedAt = @updatedAt,
               queueGeneration = COALESCE(queueGeneration, 1) + 1, notBefore = @updatedAt,
-              resumeTrigger = @resumeTrigger, resumeUserId = @resumeUserId, resumeApiTokenId = @resumeApiTokenId
+              resumeTrigger = @resumeTrigger, resumeUserId = @resumeUserId, resumeApiTokenId = @resumeApiTokenId,
+              lastRecoveredAt = NULL, lastRecoveryReason = NULL, recoveryDeadlineAt = NULL
           WHERE id = @id AND tenantId = @tenantId AND status = 'requires_action'
         `, {
           id,
@@ -679,6 +796,11 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         resumeApiTokenId: (row.resumeApiTokenId as string) ?? null,
         accountableUserId: (row.accountableUserId as string) ?? null,
         accountableTokenId: (row.accountableTokenId as string) ?? null,
+        ...(row.recoveryCount !== null && row.recoveryCount !== undefined ? { recoveryCount: Number(row.recoveryCount) } : {}),
+        lastRecoveredAt: this.toDate(row.lastRecoveredAt) ?? null,
+        ...(row.durable !== null && row.durable !== undefined ? { durable: Boolean(row.durable) } : {}),
+        lastRecoveryReason: (row.lastRecoveryReason as IAgentRun['lastRecoveryReason']) ?? null,
+        recoveryDeadlineAt: this.toDate(row.recoveryDeadlineAt) ?? null,
         createdAt: this.toDate(row.createdAt),
         startedAt: this.toDate(row.startedAt) ?? null,
         completedAt: this.toDate(row.completedAt) ?? null,
