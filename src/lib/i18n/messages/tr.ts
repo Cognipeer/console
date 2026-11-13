@@ -86,6 +86,7 @@ export const tr: typeof en = {
           evaluationTarget: 'değerlendirme hedefi',
           evaluationDataset: 'veri seti',
           evaluationSuite: 'değerlendirme paketi',
+          evaluationRun: 'değerlendirme çalıştırması',
           datasetItem: 'veri seti öğesi',
           redteamCampaign: 'red-team kampanyası',
           customProbe: 'özel prob',

@@ -124,6 +124,23 @@ describe('Fastify client inference errors', () => {
     });
   });
 
+  it.each([
+    ['an empty messages array', { model: 'test-model', messages: [] }],
+    ['a missing messages field', { model: 'test-model' }],
+  ])('returns a 400 for %s without calling the model', async (_label, payload) => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/chat/completions',
+      headers: { authorization: 'Bearer tok_abc' },
+      payload,
+    });
+    const body = parseJsonBody<{ error: Record<string, unknown> }>(response.body);
+
+    expect(response.statusCode).toBe(400);
+    expect(body.error).toMatchObject({ type: 'invalid_request_error', code: 'missing_messages', param: 'messages' });
+    expect(handleChatCompletion).not.toHaveBeenCalled();
+  });
+
   it('returns a structured 404 for a missing model', async () => {
     mockFn(handleChatCompletion).mockRejectedValue(new Error('Model not found: test-model'));
 

@@ -1029,6 +1029,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     data: Partial<Omit<IEvaluationRun, 'tenantId' | 'suiteKey' | 'createdBy'>>,
   ): Promise<IEvaluationRun | null>;
   findEvaluationRunById(id: string): Promise<IEvaluationRun | null>;
+  /** Removes a run with the item results it holds. True when a run was removed. */
+  deleteEvaluationRun(id: string): Promise<boolean>;
   listEvaluationRuns(filters?: {
     projectId?: string;
     suiteKey?: string;

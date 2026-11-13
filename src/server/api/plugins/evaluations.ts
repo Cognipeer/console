@@ -33,6 +33,7 @@ import {
   listDatasetItems,
   listDatasets,
   listRuns,
+  deleteRun,
   listSuites,
   listTargets,
   updateDataset,
@@ -1008,6 +1009,21 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
       const run = await getRun(session.tenantDbName, id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
       return reply.code(200).send({ run: await withoutRestrictedRunItems(request, { tenantDbName: session.tenantDbName, viewerUserId: session.userId }, run) });
+    } catch (error) {
+      return internalError(reply, error);
+    }
+  }));
+
+  app.delete('/evaluation/runs/:id', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { id } = request.params as { id: string };
+      const outcome = await deleteRun(session.tenantDbName, id, projectId);
+      if (outcome === 'not_found') return reply.code(404).send({ error: 'Run not found' });
+      if (outcome === 'in_progress') {
+        return reply.code(409).send({ error: 'The run is still in progress; wait for it to finish before deleting it' });
+      }
+      return reply.code(200).send({ success: true });
     } catch (error) {
       return internalError(reply, error);
     }

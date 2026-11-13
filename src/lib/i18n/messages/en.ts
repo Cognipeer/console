@@ -88,6 +88,7 @@ export const en = {
           evaluationTarget: 'evaluation target',
           evaluationDataset: 'dataset',
           evaluationSuite: 'evaluation suite',
+          evaluationRun: 'evaluation run',
           datasetItem: 'dataset item',
           redteamCampaign: 'red-team campaign',
           customProbe: 'custom probe',

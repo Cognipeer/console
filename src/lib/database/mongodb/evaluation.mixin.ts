@@ -524,6 +524,12 @@ export function EvaluationMixin<TBase extends Constructor<MongoDBProviderBase>>(
       return { ...result, _id: result._id?.toString() } as IEvaluationRun;
     }
 
+    async deleteEvaluationRun(id: string): Promise<boolean> {
+      const db = this.getTenantDb();
+      const result = await db.collection(COLLECTIONS.evaluationRuns).deleteOne({ _id: new ObjectId(id) });
+      return result.deletedCount === 1;
+    }
+
     async findEvaluationRunById(id: string): Promise<IEvaluationRun | null> {
       const db = this.getTenantDb();
       const doc = await db.collection(COLLECTIONS.evaluationRuns).findOne({ _id: new ObjectId(id) });
