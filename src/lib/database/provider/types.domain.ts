@@ -4653,6 +4653,11 @@ export interface AgentRunCheckpointWrite {
   generation: number;
   schema: number;
   mode: 'reset' | 'append';
+  /**
+   * The writer's number for this write, increasing within one execution (generation). A store that keeps
+   * each write as its own record keys it by this; others ignore it.
+   */
+  seq?: number;
   /** Required on `reset`; on `append`, absent = unchanged. */
   head?: string;
   messageChunks: string[];

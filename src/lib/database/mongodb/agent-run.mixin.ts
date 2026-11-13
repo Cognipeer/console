@@ -40,6 +40,62 @@ interface AgentRunLockDoc {
 
 const isDuplicateKey = isDuplicateKeyError;
 
+/**
+ * A durable run's checkpoint, as stored: one small document per run naming the
+ * segments that make it up (in order), and one insert-only document per write
+ * holding that write's chunks. A write costs an insert of its own delta and a
+ * small update, never a rewrite of everything written before.
+ */
+interface CheckpointRunDoc {
+  _id: string;
+  tenantId: string;
+  conversationId: string;
+  generation: number;
+  segments: number[];
+  schema: number;
+  messageCount: number;
+  toolHistoryCount: number;
+  sizeBytes: number;
+  sealed?: 'too_large' | null;
+  createdAt?: Date;
+  updatedAt?: Date;
+  expiresAt: Date;
+}
+
+interface CheckpointSegmentDoc {
+  /** `<runId>:<generation>:<seq>`: a run's segments are one _id range. */
+  _id: string;
+  tenantId: string;
+  head?: string;
+  messageChunks: string[];
+  toolHistoryChunks: string[];
+  expiresAt: Date;
+}
+
+const checkpointSegmentId = (runId: string, generation: number, seq: number) => `${runId}:${generation}:${seq}`;
+/** Every segment of a run: ids start with `<runId>:`, and `;` sorts right after `:`. */
+const checkpointSegmentRange = (runId: string) => ({ $gt: `${runId}:`, $lt: `${runId};` });
+
+let checkpointSeqFallback = 0;
+/** For a write that names no sequence number: unique within this process. */
+const nextCheckpointSeq = () => Date.now() * 1000 + (checkpointSeqFallback++ % 1000);
+
+const checkpointFields = (run: CheckpointRunDoc): Omit<IAgentRunCheckpoint, 'head' | 'messageChunks' | 'toolHistoryChunks'> => ({
+  _id: run._id,
+  runId: run._id,
+  tenantId: run.tenantId,
+  conversationId: run.conversationId,
+  generation: run.generation,
+  schema: run.schema,
+  messageCount: run.messageCount,
+  toolHistoryCount: run.toolHistoryCount,
+  sizeBytes: run.sizeBytes,
+  sealed: run.sealed ?? null,
+  createdAt: run.createdAt,
+  updatedAt: run.updatedAt,
+  expiresAt: run.expiresAt,
+});
+
 type IAgentRunListFn = (filter: {
   tenantId: string;
   projectId: string;
@@ -358,10 +414,30 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
     }
 
     async writeAgentRunCheckpoint(write: AgentRunCheckpointWrite): Promise<boolean> {
-      const collection = this.getTenantDb().collection<IAgentRunCheckpoint>(COLLECTIONS.agentRunCheckpoints);
+      // Stored as a small run document plus one insert-only segment per write (see
+      // CheckpointRunDoc). A document store rewrites a whole document on every update,
+      // so appending to one growing document would cost the full checkpoint per write.
+      const runs = this.getTenantDb().collection<CheckpointRunDoc>(COLLECTIONS.agentRunCheckpoints);
+      const segments = this.getTenantDb().collection<CheckpointSegmentDoc>(COLLECTIONS.agentRunCheckpointSegments);
       const now = new Date();
-      const common = {
+      const seq = write.seq ?? nextCheckpointSeq();
+      const segmentId = checkpointSegmentId(write.runId, write.generation, seq);
+      if (write.mode === 'reset') {
+        await ensureTenantCollectionsIndexes(this.getTenantDb(), [
+          COLLECTIONS.agentRunCheckpoints,
+          COLLECTIONS.agentRunCheckpointSegments,
+        ]);
+      }
+      // The segment first: the run document only ever names segments that exist.
+      await segments.insertOne({
+        _id: segmentId,
+        tenantId: write.tenantId,
         ...(write.head !== undefined ? { head: write.head } : {}),
+        messageChunks: write.messageChunks,
+        toolHistoryChunks: write.toolHistoryChunks,
+        expiresAt: write.expiresAt,
+      });
+      const common = {
         messageCount: write.messageCount,
         toolHistoryCount: write.toolHistoryCount,
         sizeBytes: write.sizeBytes,
@@ -372,54 +448,68 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       };
       if (write.mode === 'append') {
         // Only onto this execution's own checkpoint: an older or newer generation's is not ours to extend.
-        const result = await collection.updateOne(
+        const result = await runs.updateOne(
           { _id: write.runId, tenantId: write.tenantId, generation: write.generation },
-          {
-            $set: common,
-            $push: {
-              messageChunks: { $each: write.messageChunks },
-              toolHistoryChunks: { $each: write.toolHistoryChunks },
-            },
-          },
+          { $set: common, $push: { segments: seq } },
         );
-        return result.matchedCount === 1;
+        if (result.matchedCount === 1) return true;
+        await segments.deleteOne({ _id: segmentId }).catch(() => undefined);
+        return false;
       }
-      await ensureTenantCollectionsIndexes(this.getTenantDb(), [COLLECTIONS.agentRunCheckpoints]);
       try {
         // A newer execution's checkpoint does not match the filter; the upsert then collides on _id.
-        await collection.updateOne(
+        await runs.updateOne(
           { _id: write.runId, tenantId: write.tenantId, generation: { $lte: write.generation } },
           {
-            $set: {
-              ...common,
-              runId: write.runId,
-              conversationId: write.conversationId,
-              generation: write.generation,
-              messageChunks: write.messageChunks,
-              toolHistoryChunks: write.toolHistoryChunks,
-            },
+            $set: { ...common, conversationId: write.conversationId, generation: write.generation, segments: [seq] },
             $setOnInsert: { tenantId: write.tenantId, createdAt: now },
           },
           { upsert: true },
         );
-        return true;
       } catch (error) {
+        await segments.deleteOne({ _id: segmentId }).catch(() => undefined);
         if (isDuplicateKeyError(error)) return false;
         throw error;
       }
+      // The segments a reset replaced are not read any more.
+      await segments
+        .deleteMany({ _id: { ...checkpointSegmentRange(write.runId), $ne: segmentId } })
+        .catch(() => undefined);
+      return true;
     }
 
     async findAgentRunCheckpoint(runId: string, tenantId: string): Promise<IAgentRunCheckpoint | null> {
-      const doc = await this.getTenantDb()
-        .collection<IAgentRunCheckpoint>(COLLECTIONS.agentRunCheckpoints)
+      const run = await this.getTenantDb()
+        .collection<CheckpointRunDoc>(COLLECTIONS.agentRunCheckpoints)
         .findOne({ _id: runId, tenantId });
-      return doc ? { ...doc, _id: String(doc._id) } : null;
+      if (!run) return null;
+      const ids = (run.segments ?? []).map((seq) => checkpointSegmentId(runId, run.generation, seq));
+      const found = ids.length === 0 ? [] : await this.getTenantDb()
+        .collection<CheckpointSegmentDoc>(COLLECTIONS.agentRunCheckpointSegments)
+        .find({ _id: { $in: ids } })
+        .toArray();
+      const byId = new Map(found.map((segment) => [segment._id, segment]));
+      let head: string | undefined;
+      const messageChunks: string[] = [];
+      const toolHistoryChunks: string[] = [];
+      for (const id of ids) {
+        const segment = byId.get(id);
+        // A named segment that is gone: the checkpoint cannot be put back together (reads as unreadable).
+        if (!segment) return { ...checkpointFields(run), head: '', messageChunks: [], toolHistoryChunks: [] };
+        if (segment.head !== undefined) head = segment.head;
+        messageChunks.push(...segment.messageChunks);
+        toolHistoryChunks.push(...segment.toolHistoryChunks);
+      }
+      return { ...checkpointFields(run), head: head ?? '', messageChunks, toolHistoryChunks };
     }
 
     async deleteAgentRunCheckpoint(runId: string, tenantId: string): Promise<void> {
       await this.getTenantDb()
-        .collection<IAgentRunCheckpoint>(COLLECTIONS.agentRunCheckpoints)
+        .collection<CheckpointRunDoc>(COLLECTIONS.agentRunCheckpoints)
         .deleteOne({ _id: runId, tenantId });
+      await this.getTenantDb()
+        .collection<CheckpointSegmentDoc>(COLLECTIONS.agentRunCheckpointSegments)
+        .deleteMany({ _id: checkpointSegmentRange(runId), tenantId });
     }
 
     async updateAgentRunCallback(

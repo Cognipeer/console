@@ -203,6 +203,8 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
     let fenced = false;
     let sealed = false;
     let wrote = false;
+    /** Numbers this execution's writes (a segment store keys each write by it). */
+    let seq = 0;
 
     const expiresAt = () => new Date(Math.max(options.deadlineAt, now()) + CHECKPOINT_TTL_SLACK_MS);
 
@@ -252,6 +254,7 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
             const sealedHead = head ?? await encodeStoredStateAsync(headJson);
             const ok = await options.db.writeAgentRunCheckpoint({
                 ...base,
+                seq: ++seq,
                 mode: 'reset',
                 head: sealedHead,
                 messageChunks: [],
@@ -275,6 +278,7 @@ export function createRunCheckpointer(options: RunCheckpointerOptions): RunCheck
 
         const ok = await options.db.writeAgentRunCheckpoint({
             ...base,
+            seq: ++seq,
             mode: reset ? 'reset' : 'append',
             ...(head !== undefined ? { head } : {}),
             messageChunks,
