@@ -357,3 +357,70 @@ describe('turn keys', () => {
         expect(transcriptHasTurn(undefined, 'r1:turn')).toBe(false);
     });
 });
+
+describe('a recovered turn reaches the model whole', () => {
+    // One turn as a checkpoint carries it: a user message, then 12 tool steps, the last one cut
+    // off (settled with the unknown-outcome result).
+    const recoveredMessages = (): Message[] => {
+        const messages: Message[] = [{ role: 'user', content: 'handle the case' } as Message];
+        for (let step = 1; step <= 12; step += 1) {
+            const name = step % 2 === 0 ? 'create_ticket' : 'get_order';
+            messages.push({ role: 'assistant', content: '', tool_calls: [{ id: `call_${step}`, type: 'function', function: { name, arguments: '{}' } }] } as unknown as Message);
+            if (step < 12) messages.push({ role: 'tool', tool_call_id: `call_${step}`, name, content: `done ${step}` } as unknown as Message);
+        }
+        return settleInterruptedToolCalls(messages).messages as Message[];
+    };
+
+    /** The tool steps the model is shown on the recovered execution's first call. */
+    async function stepsTheModelSees(recoveredTurnSteps: number | undefined): Promise<number> {
+        const { createSmartAgent, createTool } = await import('@cognipeer/agent-sdk');
+        const { z } = await import('zod');
+        const { keepRecoveredTurn, resolveAgentRuntimeOptions } = await import('@/lib/services/agents/agentRuntimeConfig');
+        const { buildContinueInputState } = await import('@/lib/services/agents/agentTurnState');
+        const seen: number[] = [];
+        const model = {
+            modelName: 'test-model',
+            bindTools() { return this; },
+            async invoke(messages: Message[]) {
+                seen.push(messages.filter((m) => m.role === 'assistant' && (m as { tool_calls?: unknown[] }).tool_calls?.length).length);
+                return { role: 'assistant', content: 'done' };
+            },
+        };
+        const options = resolveAgentRuntimeOptions({ modelKey: 'm' });
+        const tools = ['get_order', 'create_ticket'].map((name) => createTool({ name, description: name, schema: z.object({}), func: async () => 'ok' }));
+        const agent = createSmartAgent({
+            name: 'recovered',
+            model: model as never,
+            tools: tools as never,
+            ...(recoveredTurnSteps ? keepRecoveredTurn(options, recoveredTurnSteps) : options),
+        });
+        await agent.invoke(buildContinueInputState({ carried: { messages: recoveredMessages() } as never }) as never);
+        return seen[0];
+    }
+
+    it('without keeping the turn, the context policy drops its first steps (the reason for keepRecoveredTurn)', async () => {
+        expect(await stepsTheModelSees(undefined)).toBeLessThan(12);
+    });
+
+    it('keepRecoveredTurn shows the model every step of the recovered turn', async () => {
+        const { stepsOfTurnInProgress } = await import('@/lib/services/agents/agentRuntimeConfig');
+        const steps = stepsOfTurnInProgress(recoveredMessages());
+        expect(steps).toBe(12);
+        expect(await stepsTheModelSees(steps)).toBe(12);
+    });
+
+    it('a short turn keeps the configured window', async () => {
+        const { keepRecoveredTurn, resolveAgentRuntimeOptions } = await import('@/lib/services/agents/agentRuntimeConfig');
+        const options = resolveAgentRuntimeOptions({ modelKey: 'm' });
+        expect(keepRecoveredTurn(options, 3)).toBe(options);
+        expect(keepRecoveredTurn(options, 10).context?.lastTurnsToKeep).toBe(11);
+    });
+
+    it('counts only the steps after the last user message', async () => {
+        const { stepsOfTurnInProgress } = await import('@/lib/services/agents/agentRuntimeConfig');
+        expect(stepsOfTurnInProgress([
+            { role: 'user' }, { role: 'assistant' }, { role: 'user' }, { role: 'assistant' }, { role: 'tool' }, { role: 'assistant' },
+        ])).toBe(2);
+        expect(stepsOfTurnInProgress([])).toBe(0);
+    });
+});

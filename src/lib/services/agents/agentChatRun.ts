@@ -20,7 +20,7 @@ import type {
     SmartAgentEvent as AgentSdkEvent,
     ToolInterface as AgentSdkToolInterface,
 } from '@cognipeer/agent-sdk';
-import { resolveAgentRuntimeOptions, resolveAgentSkillPolicy, resolveTurnOutputSchema } from './agentRuntimeConfig';
+import { keepRecoveredTurn, resolveAgentRuntimeOptions, resolveAgentSkillPolicy, resolveTurnOutputSchema } from './agentRuntimeConfig';
 import { buildAgentSkills } from './agentSkillService';
 import { buildAgentMemoryOption } from './agentMemoryAdapter';
 import { resolveAgentMemoryStore } from './agentMemoryStore';
@@ -496,6 +496,8 @@ export async function buildLocalAgentRun(input: {
     identity?: ConsoleIdentityPerson;
     /** Durable runs: every tool waits for the turn's checkpoint before it runs (runCheckpoint.ts). */
     checkpointer?: RunCheckpointer;
+    /** A recovered turn's steps so far: the model is shown all of them (see `keepRecoveredTurn`). */
+    recoveredTurnSteps?: number;
 }) {
     const { db, tenantDbName, tenantId, projectId, agentKey, agent, runtimeContext, actorId, source } = input;
     // Who MCP servers and connected agents set up for Console identity are told this run is for.
@@ -1033,7 +1035,9 @@ export async function buildLocalAgentRun(input: {
         ...(guardrailPlugins.length > 0 ? { plugins: guardrailPlugins } : {}),
         // Carries the module defaults for every knob an operator left untouched
         // — see `agentRuntimeConfig.CONSOLE_AGENT_DEFAULTS`.
-        ...resolveAgentRuntimeOptions(config),
+        ...(input.recoveredTurnSteps
+            ? keepRecoveredTurn(resolveAgentRuntimeOptions(config), input.recoveredTurnSteps)
+            : resolveAgentRuntimeOptions(config)),
         ...(outputSchema ? { outputSchema } : {}),
         ...(subagents.length > 0 ? { subagents } : {}),
         ...(skills.length > 0 ? { skills } : {}),

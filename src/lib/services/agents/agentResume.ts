@@ -81,6 +81,7 @@ import { answeredWithMetadata, createReasoningTap, liveStreamOptions, createTurn
 import { outputFileEvents, mergeSessionRuntimeContext } from './agentAttachments';
 import { buildLocalAgentRun, agentMayStreamAnswer, firstTurnTitle, sessionStopReason, toAgentChatResponse } from './agentChatRun';
 import { createRunCheckpointer, settleInterruptedToolCalls, stampRunTurn, type CheckpointTurn, type DurableTurn, type LoadedCheckpoint } from './runCheckpoint';
+import { stepsOfTurnInProgress } from './agentRuntimeConfig';
 import { extractPlaygroundSteps, describeStructuredOutputError } from './agentPlaygroundSteps';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
@@ -523,6 +524,7 @@ async function runAgentResumeTurn(
         ...(turnOptions.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
         ...(turnOptions.literalVariables ? { literalVariables: turnOptions.literalVariables } : {}),
         ...(checkpointer ? { checkpointer } : {}),
+        ...(recoveredTurn && continued ? { recoveredTurnSteps: stepsOfTurnInProgress(continued.carried.messages ?? []) } : {}),
         // A continued turn already holds tool results and answers from outside.
         reminders: {
             ...(request.runId ? { runId: request.runId } : {}),

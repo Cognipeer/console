@@ -105,6 +105,30 @@ function resolveReasoning(runtime: IAgentRuntimeConfig | undefined) {
 // pure, config-only function has no way to construct, and it moved to its
 // own tab (`IAgentConfig.memory`) rather than living under `runtime`.
 
+/**
+ * A recovered turn reaches the SDK as input state, and the SDK trims input history to the last
+ * `lastTurnsToKeep` turns, counting each assistant step as a turn while the conversation has
+ * fewer user messages than that. The turn's own first steps would drop out of what the model is
+ * shown, and a step that acted (a ticket, an email) could be taken again. Keeps the whole turn,
+ * plus the message before it; token limits and summarization still bound the context.
+ */
+export function keepRecoveredTurn(options: ResolvedAgentRuntimeOptions, turnSteps: number): ResolvedAgentRuntimeOptions {
+    const configured = options.context?.lastTurnsToKeep ?? CONSOLE_AGENT_DEFAULTS.lastTurnsToKeep;
+    if (turnSteps < configured) return options;
+    return { ...options, context: { ...options.context, lastTurnsToKeep: turnSteps + 1 } };
+}
+
+/** The assistant steps of the turn in progress: those after the last user message. */
+export function stepsOfTurnInProgress(messages: ReadonlyArray<{ role?: unknown }>): number {
+    let steps = 0;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const role = messages[index].role;
+        if (role === 'user') break;
+        if (role === 'assistant') steps += 1;
+    }
+    return steps;
+}
+
 export function resolveAgentRuntimeOptions(config: IAgentConfig): ResolvedAgentRuntimeOptions {
     const runtime = config.runtime;
     const planning = runtime?.planning;
