@@ -105,6 +105,8 @@ export const TRIGGER_DESCRIPTION_MAX_LENGTH = 2000;
 export const TRIGGER_PROMPT_MAX_LENGTH = 32_000;
 /** A `run_at` this far in the past still counts as "now" (the caller's clock, the request's time in flight). */
 const RUN_AT_PAST_TOLERANCE_MS = 60_000;
+/** A once trigger fires at most this far ahead; a larger time is a client mistake (often milliseconds sent as seconds). */
+export const MAX_ONCE_TRIGGER_AHEAD_MS = 365 * 86_400_000;
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -152,6 +154,8 @@ function readTypeSettings(
   return { ok: true, type: type as AgentTriggerType, settings };
 }
 
+const ONCE_TOO_FAR_MESSAGE = (field: string) => `${field} is too far ahead: a once trigger can be set at most ${Math.round(MAX_ONCE_TRIGGER_AHEAD_MS / 86_400_000)} days ahead`;
+
 /**
  * The `type` and settings of a `schedule`, `once` or `manual` trigger from a
  * request. `schedule` takes `cron` and `timezone`; `once` takes `run_at`
@@ -182,11 +186,15 @@ export function parseTriggerTypeSettings(
         if (typeof delay !== 'number' || !Number.isInteger(delay) || delay < 0) {
           return issue('once.delay_seconds', 'delay_seconds must be a whole number of seconds (0 or more)');
         }
+        if (delay * 1000 > MAX_ONCE_TRIGGER_AHEAD_MS) return issue('once.delay_seconds', ONCE_TOO_FAR_MESSAGE('delay_seconds'));
         return { ok: true, settings: { type, once: { runAt: new Date(now.getTime() + delay * 1000) } } };
       }
       const runAt = parseTimestamp(settings.run_at);
       if (!runAt) return issue('once.run_at', 'run_at must be an ISO-8601 date or unix seconds');
       if (runAt.getTime() < now.getTime() - RUN_AT_PAST_TOLERANCE_MS) return issue('once.run_at', 'run_at is in the past');
+      if (runAt.getTime() - now.getTime() > MAX_ONCE_TRIGGER_AHEAD_MS) {
+        return issue('once.run_at', `${ONCE_TOO_FAR_MESSAGE('run_at')}${typeof settings.run_at !== 'string' || /^\d+(\.\d+)?$/.test(settings.run_at.trim()) ? ' (run_at is unix seconds, not milliseconds)' : ''}`);
+      }
       return { ok: true, settings: { type, once: { runAt } } };
     }
     default:

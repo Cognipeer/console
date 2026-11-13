@@ -31002,7 +31002,7 @@ components:
     AgentTriggerOnceRequest:
       type: object
       description: >-
-        The `once` of a create / PATCH body with `type: once`: `run_at` (ISO-8601 or unix seconds, at most 60 seconds in the past) or `delay_seconds` (whole seconds from now), exactly one of them.
+        The `once` of a create / PATCH body with `type: once`: `run_at` (ISO-8601 or unix seconds, at most 60 seconds in the past and at most 365 days ahead) or `delay_seconds` (whole seconds from now, at most 365 days), exactly one of them.
       properties:
         run_at:
           oneOf:

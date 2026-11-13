@@ -116,10 +116,15 @@ export function parsePreferHeader(value: string | null | undefined): { wait?: nu
 
 /** Unix seconds (number or numeric string) or an ISO-8601 date. */
 export function parseTimestamp(value: unknown): Date | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return new Date(value * 1000);
+  // A value past the range of a Date (about 8.64e12 seconds) is an Invalid Date: not a time.
+  const fromSeconds = (seconds: number): Date | null => {
+    const date = new Date(seconds * 1000);
+    return Number.isNaN(date.getTime()) ? null : date;
+  };
+  if (typeof value === 'number' && Number.isFinite(value)) return fromSeconds(value);
   if (typeof value !== 'string' || value.trim() === '') return null;
   const text = value.trim();
-  if (/^\d+(\.\d+)?$/.test(text)) return new Date(Number(text) * 1000);
+  if (/^\d+(\.\d+)?$/.test(text)) return fromSeconds(Number(text));
   const parsed = new Date(text);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
@@ -129,6 +134,7 @@ export function parseRunSchedule(body: Record<string, unknown>, now = Date.now()
   const hasRunAt = body.run_at !== undefined && body.run_at !== null;
   const hasDelay = body.delay_seconds !== undefined && body.delay_seconds !== null;
   if (hasRunAt && hasDelay) return { error: 'send run_at or delay_seconds, not both', param: 'run_at' };
+  const scheduleAheadError = `a run can be scheduled at most ${Math.round(MAX_RUN_SCHEDULE_AHEAD_MS / 86_400_000)} days ahead`;
   let at: Date | undefined;
   if (hasDelay) {
     const delay = body.delay_seconds;
@@ -136,6 +142,8 @@ export function parseRunSchedule(body: Record<string, unknown>, now = Date.now()
       return { error: 'delay_seconds must be a whole number of seconds (0 or more)', param: 'delay_seconds' };
     }
     at = new Date(now + delay * 1000);
+    // delay * 1000 can leave the range of a Date: that is far past the ceiling, not "now".
+    if (Number.isNaN(at.getTime())) return { error: scheduleAheadError, param: 'delay_seconds' };
   } else if (hasRunAt) {
     const parsed = parseTimestamp(body.run_at);
     if (!parsed) return { error: 'run_at must be an ISO-8601 date or unix seconds', param: 'run_at' };
@@ -143,7 +151,7 @@ export function parseRunSchedule(body: Record<string, unknown>, now = Date.now()
   }
   if (!at) return {};
   if (at.getTime() - now > MAX_RUN_SCHEDULE_AHEAD_MS) {
-    return { error: `a run can be scheduled at most ${Math.round(MAX_RUN_SCHEDULE_AHEAD_MS / 86_400_000)} days ahead`, param: hasDelay ? 'delay_seconds' : 'run_at' };
+    return { error: scheduleAheadError, param: hasDelay ? 'delay_seconds' : 'run_at' };
   }
   // A time already past is "now".
   return at.getTime() > now ? { notBefore: at } : {};
