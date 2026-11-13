@@ -649,6 +649,10 @@ async function runAgentResumeTurn(
             ...(checkpointer ? { onStateChange: checkpointer.onStateChange } : {}),
         };
 
+        // A resume goes straight to the approved tools: the SDK reports no step before they run.
+        // The checkpointer starts from this one, so the step that asked for them is stored before
+        // one runs, and a node that stops then does not run an approved tool again elsewhere.
+        checkpointer?.onStateChange(state);
         request.onInvokeStart?.();
         const settled: AgentSdkInvokeResult | null = await runWithTurnSignal(cancellationBridge.signal, () => sdkAgent.invoke(state, invokeConfig))
             .catch((error: unknown) => {
