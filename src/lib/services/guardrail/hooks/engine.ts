@@ -363,7 +363,7 @@ function dlpPiiRules(emailAction: SafetyAction): RegexPolicyConfig['rules'] {
   ];
 }
 
-function defaultToolGuardrailHooks(): GuardrailHooksConfig {
+export function defaultToolGuardrailHooks(): GuardrailHooksConfig {
   return {
     contractVersion: GUARDRAIL_CONTRACT_VERSION,
     policies: [

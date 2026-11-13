@@ -62,6 +62,11 @@ import {
   ensureHooks,
 } from '@/lib/services/guardrail/hooks/legacy';
 import { runGuardrailRedTeam } from '@/lib/services/guardrail/hooks/redteam';
+import {
+  GuardrailTemplateNotFoundError,
+  listGuardrailTemplates,
+  prepareGuardrailTemplate,
+} from '@/lib/services/guardrail/templates/service';
 import { capabilities as sdkGuardrailCapabilities } from '@/lib/services/guardrail/sdkAdapter';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 import {
@@ -679,6 +684,83 @@ export const guardrailsApiPlugin: FastifyPluginAsync = async (app) => {
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',
         });
+    }
+  }));
+
+  // ── Templates ──────────────────────────────────────────────────────────
+  // Static segments, so Fastify matches them ahead of `/guardrails/:id`.
+
+  app.get('/guardrails/templates', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const list = await listGuardrailTemplates(session.tenantDbName, projectId);
+      return reply.code(200).send(list);
+    } catch (error) {
+      logger.error('List guardrail templates error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal error' });
+    }
+  }));
+
+  /**
+   * Create a NEW guardrail from a template. Always `monitor`: a template is a
+   * starting posture, and the operator turns it to enforce once the evaluation
+   * log looks right. The config goes through the same parse/validate/project
+   * path as `POST /guardrails`, so a template cannot produce a record a
+   * hand-authored request could not.
+   */
+  app.post('/guardrails/templates/:key/apply', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { key } = request.params as { key: string };
+      const body = safeReadJsonBody<Record<string, unknown>>(request) ?? {};
+      if (body.name !== undefined && (typeof body.name !== 'string' || body.name.trim() === '')) {
+        return reply.code(400).send({ error: 'name must be a non-empty string' });
+      }
+      if (body.description !== undefined && typeof body.description !== 'string') {
+        return reply.code(400).send({ error: 'description must be a string' });
+      }
+
+      const ctx = {
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId,
+        actorId: session.userId,
+      };
+      const prepared = await prepareGuardrailTemplate({ ...ctx, key });
+
+      const parsed = parseGuardrailCreateBody({
+        name: typeof body.name === 'string' ? body.name : prepared.template.name,
+        description: typeof body.description === 'string' ? body.description : prepared.template.description,
+        type: 'preset',
+        mode: 'monitor',
+        enabled: true,
+        hooks: prepared.hooks,
+      });
+      if (!parsed.ok) {
+        // A catalog entry the validator refuses is a bug in the catalog, not in
+        // the request; the unit suite builds every template through the same
+        // validator so this should never be reached.
+        logger.error('Guardrail template failed validation', { key, errors: parsed.errors ?? [parsed.error] });
+        return reply.code(500).send({ error: `Template "${key}" is invalid: ${parsed.error}` });
+      }
+
+      const guardrail = await createGuardrailFromRequest(ctx, parsed.value, {
+        metadata: { template: prepared.marker },
+      });
+
+      return reply.code(201).send({
+        guardrail,
+        template: prepared.marker,
+        ...(prepared.piiPolicy ? { piiPolicy: prepared.piiPolicy } : {}),
+      });
+    } catch (error) {
+      if (error instanceof GuardrailTemplateNotFoundError) {
+        return reply.code(404).send({ error: error.message });
+      }
+      logger.error('Apply guardrail template error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal error' });
     }
   }));
 

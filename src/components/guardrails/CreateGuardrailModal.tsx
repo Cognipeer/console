@@ -61,22 +61,44 @@
  * rather than a stated intent, and the day it changed every new guardrail would
  * have been created reading as monitoring while evaluating nothing. The pair is
  * assembled in exactly one place, here as everywhere else.
+ *
+ * START FROM A TEMPLATE. "Blank" is still the default and still sends the
+ * request above. Choosing a template instead calls
+ * `POST /api/guardrails/templates/:key/apply`, which creates the guardrail with
+ * the template's policies already in place (and the template's PII policy,
+ * when it needs one) through the same write path, in the same `monitor` mode.
+ * The template list is only an offer: if it cannot be loaded, Blank still works.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Text, Textarea, TextInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconShield, IconPlus } from '@tabler/icons-react';
+import {
+  IconBrain,
+  IconFileDots,
+  IconLock,
+  IconMessageCircle,
+  IconPlus,
+  IconShield,
+  IconShieldCheck,
+  IconTool,
+} from '@tabler/icons-react';
 import FormShell, {
   FormField,
   FormRow,
   FormSection,
+  SourceCard,
+  SourceToggle,
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
 import type { GuardrailView } from '@/lib/services/guardrail/constants';
 import { writeGuardrailMode } from '@/lib/services/guardrail/hooks/contract';
+import type {
+  GuardrailTemplateItem,
+  GuardrailTemplateList,
+} from '@/lib/services/guardrail/templates/service';
 
 interface CreateGuardrailModalProps {
   opened: boolean;
@@ -107,12 +129,44 @@ interface FormValues {
   description: string;
 }
 
+/** The "Blank" choice in the Start-from section. Not a template key: keys are kebab-case. */
+const BLANK = '';
+
+const CATEGORY_ICONS: Record<string, ReactNode> = {
+  baseline: <IconShieldCheck size={15} />,
+  data: <IconLock size={15} />,
+  security: <IconBrain size={15} />,
+  agents: <IconTool size={15} />,
+  content: <IconMessageCircle size={15} />,
+};
+
+const TARGET_LABELS: Record<string, string> = {
+  model: 'models',
+  agent: 'agents',
+  mcp: 'MCP servers',
+};
+
+function TemplateCardBody({ template }: { template: GuardrailTemplateItem }) {
+  return (
+    <>
+      {template.description}
+      <span style={{ display: 'block', marginTop: 6 }} className="ds-faint">
+        For {template.attachTo.map((t) => TARGET_LABELS[t] ?? t).join(', ')}
+        {template.usedBy > 0 ? ` · used ${template.usedBy}× in this project` : ''}
+      </span>
+    </>
+  );
+}
+
 export default function CreateGuardrailModal({
   opened,
   onClose,
   onCreated,
 }: CreateGuardrailModalProps) {
   const [loading, setLoading] = useState(false);
+  const [catalog, setCatalog] = useState<GuardrailTemplateList | null>(null);
+  const [catalogError, setCatalogError] = useState(false);
+  const [templateKey, setTemplateKey] = useState<string>(BLANK);
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -127,11 +181,56 @@ export default function CreateGuardrailModal({
   useEffect(() => {
     if (!opened) {
       form.reset();
+      setTemplateKey(BLANK);
+      return;
     }
+    // Re-read on every open: `usedBy` and the reusable PII policy change as
+    // guardrails are created.
+    let cancelled = false;
+    setCatalogError(false);
+    fetch('/api/guardrails/templates')
+      .then(async (res) => {
+        if (!res.ok) throw new Error(String(res.status));
+        return (await res.json()) as GuardrailTemplateList;
+      })
+      .then((data) => {
+        if (!cancelled) setCatalog(data);
+      })
+      .catch(() => {
+        if (!cancelled) setCatalogError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
 
   const { values: formValues } = form;
+
+  const template = useMemo(
+    () => catalog?.templates.find((t) => t.key === templateKey) ?? null,
+    [catalog, templateKey],
+  );
+
+  const chooseTemplate = (next: GuardrailTemplateItem | null) => {
+    // Follow the choice with the name until the operator types their own.
+    const current = form.getValues().name.trim();
+    const previousDefault = template?.name ?? '';
+    if (!current || current === previousDefault) {
+      form.setFieldValue('name', next?.name ?? '');
+    }
+    setTemplateKey(next?.key ?? BLANK);
+  };
+
+  const groups = useMemo(() => {
+    if (!catalog) return [];
+    return catalog.categories
+      .map((category) => ({
+        ...category,
+        templates: catalog.templates.filter((t) => t.category === category.id),
+      }))
+      .filter((group) => group.templates.length > 0);
+  }, [catalog]);
 
   const handleSubmit = async () => {
     const validation = form.validate();
@@ -140,19 +239,30 @@ export default function CreateGuardrailModal({
 
     setLoading(true);
     try {
-      const res = await fetch('/api/guardrails', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: values.name,
-          description: values.description || undefined,
-          // Required by the route (`VALID_TYPES` is checked before anything
-          // else), and no longer a question — see the note at the top.
-          type: 'preset',
-          // `{ mode: 'monitor', enabled: true }` — never one without the other.
-          ...writeGuardrailMode(INITIAL_MODE),
-        }),
-      });
+      const res = template
+        ? await fetch(`/api/guardrails/templates/${encodeURIComponent(template.key)}/apply`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            // The route starts every template guardrail in monitor itself, and
+            // falls back to the template's description when none is given.
+            body: JSON.stringify({
+              name: values.name,
+              description: values.description || undefined,
+            }),
+          })
+        : await fetch('/api/guardrails', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: values.name,
+              description: values.description || undefined,
+              // Required by the route (`VALID_TYPES` is checked before anything
+              // else), and no longer a question — see the note at the top.
+              type: 'preset',
+              // `{ mode: 'monitor', enabled: true }` — never one without the other.
+              ...writeGuardrailMode(INITIAL_MODE),
+            }),
+          });
 
       if (!res.ok) {
         const data = await res.json();
@@ -162,7 +272,9 @@ export default function CreateGuardrailModal({
       const data = await res.json();
       notifications.show({
         title: 'Guardrail created',
-        message: `"${data.guardrail.name}" was created successfully`,
+        message: data.piiPolicy?.created
+          ? `"${data.guardrail.name}" was created, with the PII policy "${data.piiPolicy.name}"`
+          : `"${data.guardrail.name}" was created successfully`,
         color: 'teal',
       });
       onCreated(data.guardrail, { streamingEnabled: true });
@@ -186,11 +298,31 @@ export default function CreateGuardrailModal({
         label="Name"
         value={formValues.name || <span className="ds-faint">—</span>}
       />
+      <SummaryKV label="Start from" value={template ? template.name : 'Blank'} />
       <SummaryKV
         label="Mode"
         value={<span className="ds-badge ds-badge-info">monitor</span>}
       />
-      <SummaryKV label="Policies" value={<span className="ds-faint">Chosen next</span>} />
+      <SummaryKV
+        label="Policies"
+        value={
+          template ? (
+            template.policies.join(', ')
+          ) : (
+            <span className="ds-faint">Chosen next</span>
+          )
+        }
+      />
+      {template?.piiPolicy ? (
+        <SummaryKV
+          label="PII policy"
+          value={
+            template.piiPolicy.existingKey
+              ? `${template.piiPolicy.name} (existing)`
+              : `${template.piiPolicy.name} (created)`
+          }
+        />
+      ) : null}
     </SummaryGroup>
   );
 
@@ -200,7 +332,7 @@ export default function CreateGuardrailModal({
       onClose={onClose}
       icon={<IconShield size={16} />}
       title="Create guardrail"
-      subtitle="Name it now, then say what it checks for. Attach it as an input or output guardrail on a model or agent."
+      subtitle="Start blank or from a template, name it, then attach it as an input or output guardrail on a model or agent."
       summary={summary}
       footerStatus={validName ? 'Ready' : 'Needs a name'}
       primaryAction={{
@@ -213,6 +345,57 @@ export default function CreateGuardrailModal({
     >
       <FormSection
         number={1}
+        title="Start from"
+        description="A template is a finished set of policies for one job. It is copied into the new guardrail, which you can then edit like any other."
+        done
+      >
+        <SourceToggle>
+          <SourceCard
+            selected={!template}
+            onClick={() => chooseTemplate(null)}
+            icon={<IconFileDots size={15} />}
+            title="Blank"
+            description="No policies yet. You add them on the guardrail's Hooks tab."
+          />
+        </SourceToggle>
+        {groups.map((group) => (
+          <div key={group.id} data-testid={`guardrail-template-group-${group.id}`}>
+            <Text size="xs" fw={600} c="dimmed" tt="uppercase" mb={6}>
+              {group.label}
+            </Text>
+            <SourceToggle>
+              {group.templates.map((item) => (
+                <SourceCard
+                  key={item.key}
+                  selected={templateKey === item.key}
+                  onClick={() => chooseTemplate(item)}
+                  icon={CATEGORY_ICONS[item.category] ?? <IconShield size={15} />}
+                  title={
+                    <>
+                      {item.name}
+                      {item.recommended ? (
+                        <span className="ds-badge ds-badge-teal" style={{ marginLeft: 8 }}>
+                          recommended
+                        </span>
+                      ) : null}
+                    </>
+                  }
+                  description={<TemplateCardBody template={item} />}
+                />
+              ))}
+            </SourceToggle>
+          </div>
+        ))}
+        {!catalog && !catalogError ? (
+          <Text size="xs" c="dimmed">Loading templates…</Text>
+        ) : null}
+        {catalogError ? (
+          <Text size="xs" c="dimmed">Templates could not be loaded. You can still start blank.</Text>
+        ) : null}
+      </FormSection>
+
+      <FormSection
+        number={2}
         title="Identity"
         description="How the guardrail surfaces in dashboards and audit logs. Everything else is configured on the guardrail itself, next to the policies it will run."
         done={validName}
@@ -228,7 +411,7 @@ export default function CreateGuardrailModal({
         <FormRow cols={1}>
           <FormField label="Description" optional>
             <Textarea
-              placeholder="What does this guardrail protect against?"
+              placeholder={template ? template.description : 'What does this guardrail protect against?'}
               autosize
               minRows={2}
               {...form.getInputProps('description')}
@@ -237,8 +420,7 @@ export default function CreateGuardrailModal({
         </FormRow>
 
         {/* The one line the brief asks for, and the only thing this screen says
-            about posture. Stated rather than offered: there is nothing to
-            enforce yet. */}
+            about posture. Stated rather than offered. */}
         <div
           className="ds-card ds-card-pad-sm"
           style={{
@@ -255,8 +437,10 @@ export default function CreateGuardrailModal({
           />
           <Text size="xs" c="dimmed">
             It starts in <strong>Monitor</strong>: everything it checks is evaluated and recorded,
-            and nothing is blocked. Add the policies it should run, watch the evaluation log, then
-            switch it to Enforce.
+            and nothing is blocked.{' '}
+            {template
+              ? 'Attach it, watch the evaluation log, then switch it to Enforce.'
+              : 'Add the policies it should run, watch the evaluation log, then switch it to Enforce.'}
           </Text>
         </div>
       </FormSection>

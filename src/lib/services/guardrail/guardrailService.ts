@@ -242,6 +242,7 @@ export async function createGuardrail(
     hooks,
     hooksVersion: hooks ? (input.hooksVersion ?? GUARDRAIL_CONTRACT_VERSION) : undefined,
     mode: input.mode,
+    ...(input.metadata ? { metadata: input.metadata } : {}),
     createdBy,
   });
 
