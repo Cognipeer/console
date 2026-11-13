@@ -1253,6 +1253,13 @@ export interface HookCall<S extends HookSubject = HookSubject> {
    */
   shadow?: boolean;
   skipLogging?: boolean;
+  /**
+   * The text the evaluation log keeps instead of the subject's own text. Set when the
+   * subject holds values that must not be stored, e.g. the call of an MCP server with
+   * PII protection, which is judged on the real values and logged with their tokens.
+   * When set, the findings' value hints are not stored either.
+   */
+  logText?: string;
 }
 
 export interface HookVerdict<S extends HookSubject = HookSubject> {

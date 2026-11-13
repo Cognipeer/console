@@ -25,7 +25,12 @@ import FormShell, {
 import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
 import ConsoleIdentityNote, { type ConsoleIdentityIssuerInfo } from '@/components/iam/ConsoleIdentityNote';
 import type { McpServerView } from '@/lib/services/mcp';
-import { MCP_PROTECTION_GUARDRAIL_KEY, withMcpProtectionOption } from './mcpProtectionOption';
+import {
+  MCP_GUARDRAIL_MODE_HINTS,
+  mcpGuardrailSelectData,
+  readMcpGuardrailOptions,
+  type McpGuardrailOption,
+} from './mcpGuardrailOptions';
 
 interface CreateMcpModalProps {
   opened: boolean;
@@ -43,11 +48,6 @@ type SourceType = 'openapi' | 'remote' | 'stdio' | 'internal' | 'composite';
 type StdioRuntime = 'npx' | 'uvx';
 type ExecutionMode = 'subprocess' | 'sandbox';
 type AccessMode = 'token' | 'public';
-/**
- * Keeps the MCP vocabulary ('off' rather than 'disabled') — this is the wire
- * shape of `IMcpGuardrailConfig.mode`, not `GuardrailMode`.
- */
-type GuardrailBindingMode = 'off' | 'monitor' | 'enforce';
 
 interface InternalProviderConfigField {
   key: string;
@@ -101,20 +101,6 @@ interface McpCapabilities {
   internalProviders?: InternalProviderInfo[];
 }
 
-/**
- * A guardrail the operator can bind to this server's tool calls.
- * `toolBound` is what the hint column reports: a guardrail only touches an MCP
- * call through its `tool.pre` / `tool.post` bindings, and a legacy record lifts
- * onto `input.pre`/`output.pre` only — so most existing guardrails will bind
- * nothing here until someone adds a tool hook to them.
- */
-interface GuardrailOption {
-  key: string;
-  name: string;
-  enabled: boolean;
-  toolBound: boolean;
-}
-
 interface InternalInstanceOption {
   key: string;
   label: string;
@@ -142,11 +128,6 @@ interface McpMemberOption {
 
 const NEW_HUB_VALUE = '__new__';
 const NO_HUB_VALUE = '__none__';
-// An ABSENT guardrailKey means "use the tenant's default tool guardrail"
-// (IMcpGuardrailConfig), which is a real choice an operator makes — so it needs
-// its own option value rather than the empty string, which Mantine's Select
-// treats as "nothing selected".
-const DEFAULT_GUARDRAIL_VALUE = '__default__';
 // Providers without an entry in INSTANCE_PICKERS aren't scoped to a
 // per-instance resource (one MCP server covers the whole project) — this must
 // match the instance key each such provider's `listInstances()` returns.
@@ -230,8 +211,7 @@ interface FormValues {
   accessMode: AccessMode;
   endpointSlug: string;
   // guardrail
-  guardrailMode: GuardrailBindingMode;
-  /** Guardrail key, or DEFAULT_GUARDRAIL_VALUE for the default tool guardrail. */
+  /** The guardrail on this server's tool calls ('' = none); its own mode applies. */
   guardrailKey: string;
 }
 
@@ -264,7 +244,7 @@ export default function CreateMcpModal({
   const ownedByAgent = Boolean(ownerAgentId);
   const [loading, setLoading] = useState(false);
   const [capabilities, setCapabilities] = useState<McpCapabilities | null>(null);
-  const [guardrails, setGuardrails] = useState<GuardrailOption[]>([]);
+  const [guardrails, setGuardrails] = useState<McpGuardrailOption[]>([]);
   const [instanceOptions, setInstanceOptions] = useState<Record<string, InternalInstanceOption[]>>({});
   const [hubs, setHubs] = useState<McpHubOption[]>([]);
   const [memberOptions, setMemberOptions] = useState<McpMemberOption[]>([]);
@@ -302,10 +282,7 @@ export default function CreateMcpModal({
       protocolSse: true,
       accessMode: 'token',
       endpointSlug: '',
-      // A new server starts with the built-in MCP protection in monitor mode: findings are recorded, nothing is
-      // blocked until the operator switches to enforce.
-      guardrailMode: 'monitor',
-      guardrailKey: MCP_PROTECTION_GUARDRAIL_KEY,
+      guardrailKey: '',
     },
     validate: (values) => {
       const errors: Partial<Record<keyof FormValues, string>> = {};
@@ -358,29 +335,12 @@ export default function CreateMcpModal({
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => setCapabilities(data))
       .catch(() => setCapabilities(null));
-    // Guardrails available to bind to this server's tool calls. Every guardrail
-    // is listed, not just the tool-bound ones — binding one that has no tool
-    // hook yet is a legitimate half-finished setup, so it is flagged in the
-    // option label rather than hidden.
+    // Guardrails the server can select. Every guardrail is listed, not just the
+    // tool-bound ones — one with no tool hook yet is a legitimate half-finished
+    // setup, so it is flagged below rather than hidden.
     fetch('/api/guardrails')
       .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        const list = Array.isArray(data?.guardrails) ? data.guardrails : [];
-        setGuardrails(list.map((g: {
-          key?: string;
-          name?: string;
-          enabled?: boolean;
-          hooks?: { bindings?: Record<string, { enabled?: boolean } | undefined> };
-        }) => ({
-          key: String(g.key ?? ''),
-          name: String(g.name ?? g.key ?? ''),
-          enabled: g.enabled !== false,
-          toolBound: Boolean(
-            g.hooks?.bindings?.['tool.pre']?.enabled
-            || g.hooks?.bindings?.['tool.post']?.enabled,
-          ),
-        })).filter((g: GuardrailOption) => g.key));
-      })
+      .then((data) => setGuardrails(readMcpGuardrailOptions(data)))
       .catch(() => setGuardrails([]));
     // Instances for the "internal" providers that publish one chosen resource.
     type InstanceRow = { key?: string; id?: string; name: string; description?: string; persist?: boolean; actualState?: string };
@@ -528,17 +488,9 @@ export default function CreateMcpModal({
         endpointSlug: v.accessMode === 'public' && v.endpointSlug.trim()
           ? v.endpointSlug.trim()
           : undefined,
-        // Omitted entirely when off — an absent block and `{ mode: 'off' }`
-        // mean the same thing to the gateway, and a guardrail key without a
-        // mode to run it in would just be dead configuration.
-        guardrail: v.guardrailMode !== 'off'
-          ? {
-              mode: v.guardrailMode,
-              guardrailKey: v.guardrailKey === DEFAULT_GUARDRAIL_VALUE
-                ? undefined
-                : v.guardrailKey,
-            }
-          : undefined,
+        // Omitted when no guardrail is selected: the server is then unguarded.
+        // The selected guardrail's own mode applies.
+        guardrail: v.guardrailKey ? { guardrailKey: v.guardrailKey } : undefined,
         ...(ownerAgentId ? { ownerAgentId } : {}),
       };
 
@@ -697,8 +649,6 @@ export default function CreateMcpModal({
   const instancePicker = INSTANCE_PICKERS[v.internalProvider];
   const providerInstances = instanceOptions[v.internalProvider] ?? [];
   const selectedInstance = providerInstances.find((m) => m.key === v.internalInstanceKey);
-  // undefined while the default option is selected — that binding names no
-  // guardrail at all, so there is nothing to warn about.
   const selectedGuardrail = guardrails.find((g) => g.key === v.guardrailKey);
 
   const sandboxAvailable = capabilities?.stdioSandbox.available ?? false;
@@ -812,12 +762,10 @@ export default function CreateMcpModal({
             ) : null}
           </>
         )}
-        {v.guardrailMode !== 'off' ? (
+        {v.guardrailKey ? (
           <SummaryKV
             label="Guardrail"
-            value={`${v.guardrailMode} · ${v.guardrailKey === DEFAULT_GUARDRAIL_VALUE
-              ? 'default tool guardrail'
-              : v.guardrailKey === MCP_PROTECTION_GUARDRAIL_KEY ? 'MCP protection' : v.guardrailKey}`}
+            value={selectedGuardrail ? `${selectedGuardrail.name} · ${selectedGuardrail.mode}` : v.guardrailKey}
           />
         ) : null}
       </SummaryGroup>
@@ -1304,58 +1252,35 @@ export default function CreateMcpModal({
       <FormSection
         number={(v.sourceType === 'stdio' || v.sourceType === 'internal' || v.sourceType === 'composite' ? 4 : 5) - (ownedByAgent ? 1 : 0)}
         title="Guardrail"
-        description="Guardrail enforcement on this server's tool calls, on the tool.pre and tool.post hooks."
+        description="The guardrail that checks this server's tool calls (tool.pre and tool.post). Its own mode applies."
         done
       >
         {capabilities && !guardrailAvailable ? (
           <Alert color="gray" icon={<IconInfoCircle size={16} />}>
-            Tool-call enforcement is not wired on this deployment. The binding is saved and starts
-            enforcing as soon as it is.
+            Tool-call checks are not wired on this deployment. The selection is saved and applies as
+            soon as they are.
           </Alert>
         ) : null}
-        <FormRow cols={2}>
-          <FormField
-            label="Mode"
-            hint={v.guardrailMode === 'enforce'
-              ? 'A blocking finding fails the tool call before it reaches the upstream.'
-              : v.guardrailMode === 'monitor'
-                ? 'Findings are recorded, but the call still runs — use this to see what would be blocked.'
-                : 'No guardrail runs for this server’s tool calls.'}
-          >
-            <ChipPicker<GuardrailBindingMode>
-              options={[
-                { value: 'off', label: 'Off' },
-                { value: 'monitor', label: 'Monitor' },
-                { value: 'enforce', label: 'Enforce' },
-              ]}
-              value={v.guardrailMode}
-              onChange={(val) => form.setFieldValue('guardrailMode', val as GuardrailBindingMode)}
-            />
-          </FormField>
-          <FormField
-            label="Guardrail"
-            hint="MCP protection checks call size, private-network addresses, secrets and prompt injection in results. The default tool guardrail is the tenant-wide one every unbound tool call already runs through."
-          >
-            <Select
-              disabled={v.guardrailMode === 'off'}
-              allowDeselect={false}
-              data={withMcpProtectionOption([
-                { value: DEFAULT_GUARDRAIL_VALUE, label: 'Default tool guardrail' },
-                ...guardrails.map((g) => ({
-                  value: g.key,
-                  label: `${g.name}${g.enabled ? '' : ' · disabled'}${g.toolBound ? ' · tool hooks' : ''}`,
-                })),
-              ])}
-              value={v.guardrailKey}
-              onChange={(val) => form.setFieldValue('guardrailKey', val ?? DEFAULT_GUARDRAIL_VALUE)}
-            />
-          </FormField>
-        </FormRow>
-        {v.guardrailMode !== 'off' && selectedGuardrail && !selectedGuardrail.toolBound ? (
+        <FormField
+          label="Guardrail"
+          hint={selectedGuardrail
+            ? MCP_GUARDRAIL_MODE_HINTS[selectedGuardrail.mode]
+            : 'Optional. Choose one of your guardrails; create and edit them under Guardrails.'}
+        >
+          <Select
+            clearable
+            searchable
+            placeholder="No guardrail"
+            nothingFoundMessage="No guardrail found"
+            data={mcpGuardrailSelectData(guardrails, v.guardrailKey || null)}
+            value={v.guardrailKey || null}
+            onChange={(val) => form.setFieldValue('guardrailKey', val ?? '')}
+          />
+        </FormField>
+        {selectedGuardrail && !selectedGuardrail.toolBound ? (
           <Alert color="yellow" icon={<IconInfoCircle size={16} />}>
-            “{selectedGuardrail.name}” has no tool.pre or tool.post hook enabled, so binding it here
-            changes nothing yet. Add a tool hook to it under Dashboard → Guardrails, or bind the
-            default tool guardrail instead.
+            “{selectedGuardrail.name}” has no tool.pre or tool.post hook enabled, so it checks nothing on
+            this server’s calls yet. Add a tool hook to it under Guardrails.
           </Alert>
         ) : null}
       </FormSection>

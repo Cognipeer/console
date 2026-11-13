@@ -47,12 +47,7 @@ import type {
   HookId,
   HookScope,
 } from './hooks/contract';
-import {
-  DEFAULT_TOOL_GUARDRAIL_KEY,
-  MCP_PROTECTION_GUARDRAIL_KEY,
-  resolveGuardrail,
-  runHook,
-} from './hooks/engine';
+import { DEFAULT_TOOL_GUARDRAIL_KEY, resolveGuardrail, runHook } from './hooks/engine';
 import { invalidateGuardrailCache } from './hooks/recordCache';
 
 // ── Serialization ─────────────────────────────────────────────────────────
@@ -90,8 +85,6 @@ async function generateUniqueKey(
     // own the row every unbound tool call in the tenant is evaluated against —
     // and a `mode: 'disabled'` copy of it would disarm the sandbox toolbox.
     if (candidate === DEFAULT_TOOL_GUARDRAIL_KEY) return true;
-    // Same for the MCP protection preset, materialised when a server binds it.
-    if (candidate === MCP_PROTECTION_GUARDRAIL_KEY) return true;
     if (await db.findGuardrailByKey(candidate, projectId)) return true;
     // A project-scoped key must not shadow a tenant-wide one either: the
     // engine resolves project first and then falls back to the tenant-wide

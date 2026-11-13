@@ -8,12 +8,16 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { exposedMcpToolNames } from '@/lib/services/agents/boundToolNames';
 import { applyToolApprovals, resolveHitlConfig } from '@/lib/services/agents/agentHumanInTheLoop';
-import { MCP_PROTECTION_GUARDRAIL_KEY as ENGINE_KEY } from '@/lib/services/guardrail/hooks/engine';
+import { DEFAULT_TOOL_GUARDRAIL_KEY as ENGINE_DEFAULT_KEY } from '@/lib/services/guardrail/hooks/engine';
 import { pinnedPackageSpecError } from '@/lib/services/mcp/stdioRunner';
 import { mcpRuntimeHeaderPolicyError, resolveRuntimeHeaders } from '@/lib/services/runtimeContext';
-import { publishesPublicly, readMcpSecurityUpdate } from '@/server/api/plugins/mcp-shared';
+import { parseGuardrail, publishesPublicly, readMcpSecurityUpdate } from '@/server/api/plugins/mcp-shared';
 import { lineDiff } from '@/components/mcp/lineDiff';
-import { MCP_PROTECTION_GUARDRAIL_KEY, withMcpProtectionOption } from '@/components/mcp/mcpProtectionOption';
+import {
+  DEFAULT_TOOL_GUARDRAIL_KEY,
+  mcpGuardrailSelectData,
+  readMcpGuardrailOptions,
+} from '@/components/mcp/mcpGuardrailOptions';
 
 describe('MCP tool names in an agent run', () => {
   it('keeps a unique name and gives clashing ones their server key', () => {
@@ -120,6 +124,12 @@ describe('security fields of a server update', () => {
     await expect(readMcpSecurityUpdate({ toolReview: { reject: [{ name: 'b', hash, extra: 1 }, 'c'] } }, scope)).resolves.toEqual({
       fields: { toolReview: { reject: [{ name: 'b', hash }, 'c'] } },
     });
+    await expect(readMcpSecurityUpdate({ definitionGuardrail: { guardrailKey: ' checks ' } }, scope)).resolves.toEqual({
+      fields: { definitionGuardrail: { guardrailKey: 'checks' } },
+    });
+    await expect(readMcpSecurityUpdate({ definitionGuardrail: null }, scope)).resolves.toEqual({
+      fields: { definitionGuardrail: null },
+    });
   });
 
   it('refuses malformed fields', async () => {
@@ -133,6 +143,9 @@ describe('security fields of a server update', () => {
       { toolReview: { approve: [{ name: 'a', hash: 'not-a-hash' }] } },
       { toolReview: { approve: [7] } },
       { piiProtection: { policyKey: '' } },
+      { definitionGuardrail: { guardrailKey: '' } },
+      { definitionGuardrail: 'checks' },
+      { definitionGuardrail: ['checks'] },
     ]) {
       expect(await readMcpSecurityUpdate(body, scope), JSON.stringify(body)).toHaveProperty('error');
     }
@@ -151,13 +164,47 @@ describe('approval settings of a renamed MCP tool', () => {
   });
 });
 
+describe('the guardrail of a server', () => {
+  it('is selected by key, and the guardrail’s own mode applies', () => {
+    expect(parseGuardrail({ guardrailKey: ' checks ' })).toEqual({ guardrailKey: 'checks', mode: 'enforce' });
+    expect(parseGuardrail({ mode: 'off', guardrailKey: 'checks' })).toEqual({ mode: 'off' });
+    expect(parseGuardrail({})).toEqual({ mode: 'off' });
+    expect(parseGuardrail(null)).toBeUndefined();
+  });
+
+  it('still takes the mode an older client sends', () => {
+    expect(parseGuardrail({ mode: 'enforce' })).toEqual({ mode: 'enforce' });
+    expect(parseGuardrail({ mode: 'monitor', guardrailKey: 'checks' })).toEqual({ guardrailKey: 'checks', mode: 'monitor' });
+    expect(parseGuardrail({ mode: 'enforce', guardrailKey: 'checks' })).toEqual({ guardrailKey: 'checks', mode: 'enforce' });
+  });
+});
+
 describe('Security tab helpers', () => {
-  it('mirror the managed preset key and offer it before it exists', () => {
-    expect(MCP_PROTECTION_GUARDRAIL_KEY).toBe(ENGINE_KEY);
-    const data = withMcpProtectionOption([{ value: '__default__', label: 'Default' }, { value: 'mine', label: 'Mine' }]);
-    expect(data.map((item) => item.value)).toEqual(['__default__', MCP_PROTECTION_GUARDRAIL_KEY, 'mine']);
-    const listed = [{ value: MCP_PROTECTION_GUARDRAIL_KEY, label: 'MCP protection' }];
-    expect(withMcpProtectionOption(listed)).toBe(listed);
+  it('list the workspace guardrails with their own mode', () => {
+    const options = readMcpGuardrailOptions({
+      guardrails: [
+        { key: 'calls', name: 'Calls', mode: 'monitor', hooks: { bindings: { 'tool.pre': { enabled: true } } } },
+        { key: 'inputs', name: 'Inputs', hooks: { bindings: { 'input.pre': { enabled: true } } } },
+        { key: 'legacy', name: 'Legacy', target: 'input' },
+        { key: 'off', name: 'Off', enabled: false },
+        { name: 'no key' },
+      ],
+    });
+    expect(options.map((option) => [option.key, option.mode, option.toolBound, option.definitionBound])).toEqual([
+      ['calls', 'monitor', true, false],
+      ['inputs', 'enforce', false, true],
+      ['legacy', 'enforce', false, true],
+      ['off', 'disabled', false, true],
+    ]);
+    expect(mcpGuardrailSelectData(options.slice(0, 1))).toEqual([{ value: 'calls', label: 'Calls · monitor' }]);
+  });
+
+  it('keep a selected guardrail that is not listed visible', () => {
+    expect(DEFAULT_TOOL_GUARDRAIL_KEY).toBe(ENGINE_DEFAULT_KEY);
+    expect(mcpGuardrailSelectData([], 'gone')).toEqual([{ value: 'gone', label: 'gone · not found' }]);
+    expect(mcpGuardrailSelectData([], DEFAULT_TOOL_GUARDRAIL_KEY)).toEqual([
+      { value: DEFAULT_TOOL_GUARDRAIL_KEY, label: 'Default tool guardrail' },
+    ]);
   });
 
   it('diff two definitions by line', () => {

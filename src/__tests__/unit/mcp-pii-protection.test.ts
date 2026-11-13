@@ -3,7 +3,7 @@
  * executeMcpToolLocal): the upstream gets tokens, the caller gets the values,
  * and the request log keeps the tokens.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { remoteCallTool, loadPolicyScanner } = vi.hoisted(() => ({
   remoteCallTool: vi.fn(),
@@ -29,6 +29,8 @@ vi.mock('@/lib/services/availability/serviceAvailability', async (importActual) 
 }));
 
 import type { IMcpServer } from '@/lib/database';
+import { mcpGuardrailHook, type McpGuardrailContext, type McpGuardrailHook } from '@/enterprise/registry';
+import { getMcpGuardrailLogView } from '@/lib/services/guardrail/hooks/mcpHook';
 import { executeMcpToolLocal } from '@/lib/services/mcp/mcpService';
 import { isMcpPiiProtected, piiLoggedPayloads } from '@/lib/services/mcp/mcpPii';
 
@@ -179,5 +181,107 @@ describe('MCP PII protection', () => {
     expect(isMcpPiiProtected({ metadata }, 'internal', 'a')).toBe(false);
     expect(isMcpPiiProtected({ metadata }, 'composite', 'a')).toBe(false);
     expect(isMcpPiiProtected({ metadata: {} }, 'remote', 'a')).toBe(false);
+  });
+});
+
+describe('MCP PII protection with a guardrail on the server', () => {
+  /** What the server's guardrail was handed, and what its evaluation log would keep. */
+  const seen: Array<{ hook: 'pre' | 'post'; value: unknown; logged: unknown }> = [];
+  let claimed: McpGuardrailHook | null = null;
+
+  function guardrail(patch: Partial<McpGuardrailHook> = {}): McpGuardrailHook {
+    return {
+      beforeToolCall: async (ctx: McpGuardrailContext, args) => {
+        seen.push({ hook: 'pre', value: args, logged: getMcpGuardrailLogView(ctx)?.args });
+        return { allowed: true };
+      },
+      afterToolCall: async (ctx: McpGuardrailContext, result) => {
+        seen.push({ hook: 'post', value: result, logged: getMcpGuardrailLogView(ctx)?.result?.value });
+        return { allowed: true };
+      },
+      ...patch,
+    };
+  }
+
+  const guarded = (patch: Partial<IMcpServer> = {}) => server({ guardrail: { guardrailKey: 'checks', mode: 'enforce' }, ...patch });
+
+  beforeEach(() => {
+    remoteCallTool.mockReset();
+    loadPolicyScanner.mockReset();
+    loadPolicyScanner.mockResolvedValue(SCANNER);
+    seen.length = 0;
+    claimed = mcpGuardrailHook.current;
+  });
+  afterEach(() => {
+    mcpGuardrailHook.current = claimed;
+  });
+
+  it('judges the real values on both sides and logs their tokens', async () => {
+    mcpGuardrailHook.current = guardrail();
+    remoteCallTool.mockImplementation(echo);
+    const args = { email: 'ayse@example.com' };
+
+    const outcome = await executeMcpToolLocal(guarded(), 'find_contact', args);
+
+    const [pre, post] = seen;
+    expect(pre.value).toEqual({ email: 'ayse@example.com' });
+    expect((pre.logged as { email: string }).email).toMatch(TOKEN);
+    expect(JSON.stringify(post.value)).toContain('ayse@example.com');
+    expect(JSON.stringify(post.logged)).not.toContain('ayse@example.com');
+    expect(JSON.stringify(post.logged)).toMatch(/\[EMAIL_[a-z]{8}\]/);
+    // The request log keeps what crossed: the same tokens.
+    expect(outcome.piiLog?.result).toEqual(post.logged);
+    expect(JSON.stringify(outcome.result)).toContain('ayse@example.com');
+  });
+
+  it('logs a result the guardrail rewrote as the caller got it, tokenized again', async () => {
+    mcpGuardrailHook.current = guardrail({
+      afterToolCall: async () => ({ allowed: true, result: { note: 'Owner ayse@example.com, phone [REDACTED]' } }),
+    });
+    remoteCallTool.mockImplementation(echo);
+
+    const outcome = await executeMcpToolLocal(guarded(), 'find_contact', { email: 'ayse@example.com' });
+
+    expect(outcome.result).toEqual({ note: 'Owner ayse@example.com, phone [REDACTED]' });
+    const loggedNote = (outcome.piiLog?.result as { note: string }).note;
+    expect(loggedNote).toMatch(/^Owner \[EMAIL_[a-z]{8}\], phone \[REDACTED\]$/);
+    // The same value gets the same token it had on the way out.
+    const sent = remoteCallTool.mock.calls[0][2] as { email: string };
+    expect(loggedNote).toContain(sent.email);
+  });
+
+  it('logs a call the guardrail blocks with its tokens, not the values', async () => {
+    mcpGuardrailHook.current = guardrail({ beforeToolCall: async () => ({ allowed: false, reason: 'not allowed' }) });
+    const args = { email: 'ayse@example.com' };
+
+    await expect(executeMcpToolLocal(guarded(), 'find_contact', args)).rejects.toThrow('not allowed');
+
+    expect(remoteCallTool).not.toHaveBeenCalled();
+    const logged = piiLoggedPayloads({ arguments: args }, undefined);
+    expect((logged.requestPayload.arguments as { email: string }).email).toMatch(TOKEN);
+  });
+
+  it('sends arguments the guardrail rewrote, tokenized', async () => {
+    mcpGuardrailHook.current = guardrail({
+      beforeToolCall: async () => ({ allowed: true, args: { email: 'other@example.com' } }),
+    });
+    remoteCallTool.mockImplementation(echo);
+
+    await executeMcpToolLocal(guarded(), 'find_contact', { email: 'ayse@example.com' });
+    await executeMcpToolLocal(server(), 'find_contact', { email: 'ayse@example.com' });
+
+    const [rewritten, original] = remoteCallTool.mock.calls.map((call) => (call[2] as { email: string }).email);
+    expect(rewritten).toMatch(TOKEN);
+    expect(rewritten).not.toBe(original);
+  });
+
+  it('hands a server without PII protection the values, with no log view', async () => {
+    mcpGuardrailHook.current = guardrail();
+    remoteCallTool.mockImplementation(echo);
+
+    await executeMcpToolLocal(guarded({ metadata: {} } as Partial<IMcpServer>), 'find_contact', { email: 'ayse@example.com' });
+
+    expect(seen.map((entry) => entry.logged)).toEqual([undefined, undefined]);
+    expect(remoteCallTool.mock.calls[0][2]).toEqual({ email: 'ayse@example.com' });
   });
 });

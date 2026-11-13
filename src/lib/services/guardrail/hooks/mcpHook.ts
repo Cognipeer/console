@@ -2,8 +2,10 @@
  * MCP gateway bridge — the community implementation of the `McpGuardrailHook`
  * seam declared at `src/enterprise/registry.ts:196-207`.
  *
- * Every MCP tool call on a server whose binding is not 'off' is evaluated by
- * the guardrail hook plane: arguments at `tool.pre`, the result at `tool.post`.
+ * Every MCP tool call on a server bound to a guardrail is evaluated by the
+ * guardrail hook plane: arguments at `tool.pre`, the result at `tool.post`. The
+ * guardrail's own mode (enforce / monitor / disabled) decides what a finding
+ * does; the server only selects the guardrail.
  * It replaces `aegis/mcpGuardrailHook.ts` with the SAME seam — the interface,
  * the context shape and the `{ current }` ref are untouched, so
  * `mcpService.ts:1710-1727` and `:1780-1786` keep working and the enterprise
@@ -16,8 +18,9 @@
  * `Guardrail with key "..." not found`, and that throw propagates out of
  * `beforeToolCall` into `executeMcpTool` — breaking EVERY tool call on every
  * server whose binding is not 'off'. The binding is resolved from the SERVER
- * record instead (`server.guardrail?.guardrailKey`), falling back to the
- * tenant's default tool guardrail.
+ * record instead (`server.guardrail?.guardrailKey`). A binding stored without a
+ * key (written before a guardrail could be selected) falls back to the tenant's
+ * default tool guardrail.
  *
  * ── NOTHING HERE THROWS ────────────────────────────────────────────────────
  * A missing guardrail is not an error: `runHook` returns a vacuous allow
@@ -190,6 +193,31 @@ function traceIdFor(ctx: McpGuardrailContext): string {
   return traceId;
 }
 
+/**
+ * What the evaluation log keeps for a call whose values must not be stored: the
+ * call of a server with PII protection is judged on the real values and logged
+ * with their tokens, as the request log keeps it. `mcpService` sets it on the
+ * call's context before each hook; keyed on the context object like the trace
+ * id, so the seam (which an overlay may also implement) needs no new field.
+ */
+export interface McpGuardrailLogView {
+  /** The arguments as they leave for the upstream. */
+  args?: Record<string, unknown>;
+  /** The result as the upstream returned it (`value` may itself be undefined). */
+  result?: { value: unknown };
+}
+
+const logViews = new WeakMap<McpGuardrailContext, McpGuardrailLogView>();
+
+export function setMcpGuardrailLogView(ctx: McpGuardrailContext, view: McpGuardrailLogView): void {
+  logViews.set(ctx, { ...logViews.get(ctx), ...view });
+}
+
+/** The view set for this call, if any; an overlay implementing the seam reads it the same way. */
+export function getMcpGuardrailLogView(ctx: McpGuardrailContext): McpGuardrailLogView | undefined {
+  return logViews.get(ctx);
+}
+
 function buildScope(ctx: McpGuardrailContext, tenantDbName: string): HookScope {
   return {
     tenantId: ctx.tenantId,
@@ -250,6 +278,7 @@ async function evaluate<S extends HookSubject>(
   ctx: McpGuardrailContext,
   hook: 'tool.pre' | 'tool.post',
   subject: S,
+  logText: string | undefined,
 ): Promise<HookVerdict<S> | null> {
   const tenantDbName = await resolveTenantDbName(ctx.tenantId);
   if (!tenantDbName) {
@@ -287,17 +316,20 @@ async function evaluate<S extends HookSubject>(
     subject,
     scope: buildScope(ctx, tenantDbName),
     guardrailKeys: [guardrailKey],
+    ...(logText !== undefined ? { logText } : {}),
   });
 }
 
 /**
- * `ctx.mode` is the SERVER-level binding (off / monitor / enforce) and is a
- * SEPARATE dimension from the guardrail record's own mode, which the engine has
- * already applied to `verdict.decision`. Both have to say "enforce" before
- * anything binding happens — otherwise a server an operator put in monitor mode
- * would still have its arguments rewritten by an enforcing guardrail, because
- * `mcpService` applies `verdict.args` unconditionally while it only honours
- * `allowed` in 'enforce'.
+ * `ctx.mode` says whether the server is bound at all. A server bound to a
+ * guardrail is 'enforce', and the guardrail's own mode governs: the engine has
+ * already applied it to `verdict.decision`, so a monitor-mode guardrail never
+ * blocks or rewrites here. 'monitor' is only on servers saved before a
+ * guardrail could be selected, when the server carried a mode of its own; those
+ * keep evaluating without ever blocking or rewriting, as they did — otherwise
+ * an enforcing guardrail would rewrite their arguments, because `mcpService`
+ * applies `verdict.args` unconditionally while it only honours `allowed` in
+ * 'enforce'.
  */
 function isEnforcing(ctx: McpGuardrailContext): boolean {
   return ctx.mode === 'enforce';
@@ -306,18 +338,18 @@ function isEnforcing(ctx: McpGuardrailContext): boolean {
 export const consoleMcpGuardrailHook: McpGuardrailHook = {
   async beforeToolCall(ctx, args) {
     try {
+      // The canonical policy name, exactly as the plane this replaces built it.
+      // `toolName` is already the resolved (real) name — `mcpService` maps an
+      // exposed alias back before it builds the context — so a `sideEffects`
+      // entry written against the stored name matches.
+      const toolName = `${ctx.serverKey}/${ctx.toolName}`;
+      const providerRef = `mcp:${ctx.serverKey}`;
+      const logged = logViews.get(ctx)?.args;
       const verdict = await evaluate(
         ctx,
         'tool.pre',
-        toolCallSubject({
-          // The canonical policy name, exactly as the plane this replaces built
-          // it. `toolName` is already the resolved (real) name — `mcpService`
-          // maps an exposed alias back before it builds the context — so a
-          // `sideEffects` entry written against the stored name matches.
-          toolName: `${ctx.serverKey}/${ctx.toolName}`,
-          args,
-          providerRef: `mcp:${ctx.serverKey}`,
-        }),
+        toolCallSubject({ toolName, args, providerRef }),
+        logged ? toolCallSubject({ toolName, args: logged, providerRef }).text : undefined,
       );
       if (!verdict) return { allowed: true };
 
@@ -347,19 +379,23 @@ export const consoleMcpGuardrailHook: McpGuardrailHook = {
 
   async afterToolCall(ctx, result) {
     try {
+      const toolName = `${ctx.serverKey}/${ctx.toolName}`;
+      const providerRef = `mcp:${ctx.serverKey}`;
+      const logged = logViews.get(ctx)?.result;
       const verdict = await evaluate(
         ctx,
         'tool.post',
         toolResultSubject({
-          toolName: `${ctx.serverKey}/${ctx.toolName}`,
+          toolName,
           // The seam hands back only the result. The arguments ride on a
           // `tool_result` subject purely so a `tool_access` policy can see them,
           // and every argument-shaped rule already ran at `tool.pre`; passing
           // an empty object here loses nothing and invents nothing.
           args: {},
           result,
-          providerRef: `mcp:${ctx.serverKey}`,
+          providerRef,
         }),
+        logged ? toolResultSubject({ toolName, args: {}, result: logged.value, providerRef }).text : undefined,
       );
       if (!verdict) return { allowed: true };
 

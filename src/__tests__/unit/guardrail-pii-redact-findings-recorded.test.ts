@@ -147,3 +147,45 @@ describe('Customer PII Redaction preset on input.pre', () => {
     expect(log.inputText).not.toContain(PHONE);
   });
 });
+
+describe('the text an evaluation log keeps', () => {
+  it('is the log text the caller gives, with no hint of the values', async () => {
+    const LOGGED = 'Do I need to tell my manager first or HR? My email is [EMAIL_kqzvtmwb] and phone [PHONE_abcdefgh].';
+    await runHook({
+      contractVersion: 2,
+      hook: 'input.pre',
+      subject: { kind: 'text', text: USER_TURN, segments: [{ text: USER_TURN, path: '/text', offset: 0 }] },
+      scope,
+      guardrailKeys: ['customer-pii-redaction'],
+      logText: LOGGED,
+    });
+
+    await vi.waitFor(() => expect(hoisted.createGuardrailEvaluationLog).toHaveBeenCalledTimes(1));
+    const log = hoisted.createGuardrailEvaluationLog.mock.calls[0][0] as {
+      findings: Array<{ category: string; value?: string }>;
+      inputText: string;
+    };
+    expect(log.inputText).toBe(LOGGED);
+    expect(log.findings.map((f) => f.category).sort()).toEqual(['email', 'phone']);
+    expect(log.findings.every((f) => f.value === undefined)).toBe(true);
+  });
+
+  it('is the subject itself, masked, when the caller gives none', async () => {
+    await runHook({
+      contractVersion: 2,
+      hook: 'input.pre',
+      subject: { kind: 'text', text: USER_TURN, segments: [{ text: USER_TURN, path: '/text', offset: 0 }] },
+      scope,
+      guardrailKeys: ['customer-pii-redaction'],
+    });
+
+    await vi.waitFor(() => expect(hoisted.createGuardrailEvaluationLog).toHaveBeenCalledTimes(1));
+    const log = hoisted.createGuardrailEvaluationLog.mock.calls[0][0] as {
+      findings: Array<{ value?: string }>;
+      inputText: string;
+    };
+    expect(log.inputText).toContain('Do I need to tell my manager first or HR?');
+    // A short hint of each value, never the value itself.
+    expect(log.findings.every((f) => typeof f.value === 'string' && !f.value.includes(EMAIL))).toBe(true);
+  });
+});
