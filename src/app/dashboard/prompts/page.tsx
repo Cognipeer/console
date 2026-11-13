@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@mantine/core';
 import {
@@ -15,18 +15,8 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import PromptEditorModal from '@/components/prompts/PromptEditorModal';
+import { usePromptList, usePromptStats } from '@/lib/api/queries/prompts';
 import type { PromptView } from '@/lib/services/prompts';
-
-interface PromptsDashboardData {
-  overview: {
-    totalPrompts: number;
-    totalVersions: number;
-    totalVariablePrompts: number;
-    avgVersionsPerPrompt: number;
-  };
-  recentlyUpdated: Array<{ id: string; name: string; key: string; updatedAt: string }>;
-  versionDistribution: Array<{ label: string; count: number }>;
-}
 
 function formatDate(value?: string | Date) {
   if (!value) return '—';
@@ -36,48 +26,17 @@ function formatDate(value?: string | Date) {
 }
 
 export default function PromptsPage() {
-  const [prompts, setPrompts] = useState<PromptView[]>([]);
-  const [loading, setLoading] = useState(true);
+  const promptsQuery = usePromptList();
+  const statsQuery = usePromptStats();
+  const prompts = useMemo<PromptView[]>(() => promptsQuery.data ?? [], [promptsQuery.data]);
+  const dashboardData = statsQuery.data ?? null;
+  // Only the first load shows the table's loading state; a background refetch (after a save) keeps the rows.
+  const loading = promptsQuery.isPending;
+  const dashboardLoading = statsQuery.isPending;
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingPrompt, setEditingPrompt] = useState<PromptView | null>(null);
-  const [dashboardData, setDashboardData] = useState<PromptsDashboardData | null>(
-    null,
-  );
-  const [dashboardLoading, setDashboardLoading] = useState(true);
   const [query, setQuery] = useState('');
   const router = useRouter();
-
-  const loadPrompts = useCallback(async () => {
-    setLoading(true);
-    try {
-      const response = await fetch('/api/prompts', { cache: 'no-store' });
-      if (!response.ok) throw new Error('Failed to load prompts');
-      const data = await response.json();
-      setPrompts((data.prompts ?? []) as PromptView[]);
-    } catch (error) {
-      console.error('Failed to load prompts', error);
-      setPrompts([]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const loadDashboard = useCallback(async () => {
-    setDashboardLoading(true);
-    try {
-      const res = await fetch('/api/prompts/stats', { cache: 'no-store' });
-      if (res.ok) setDashboardData((await res.json()) as PromptsDashboardData);
-    } catch (err) {
-      console.error('Failed to load prompts dashboard', err);
-    } finally {
-      setDashboardLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadPrompts();
-    void loadDashboard();
-  }, [loadPrompts, loadDashboard]);
 
   const openCreateModal = () => {
     setEditingPrompt(null);
@@ -89,13 +48,10 @@ export default function PromptsPage() {
     setEditorOpen(true);
   };
 
-  const handleSaved = (saved: PromptView) => {
+  // The editor saves through the mutation hooks, which refresh the list and its stats.
+  const handleSaved = () => {
     setEditorOpen(false);
     setEditingPrompt(null);
-    setPrompts((current) => {
-      const filtered = current.filter((item) => item.id !== saved.id);
-      return [saved, ...filtered];
-    });
   };
 
   const stalePromptCount = prompts.filter((prompt) => {
@@ -225,8 +181,8 @@ export default function PromptsPage() {
           placeholder: 'Filter by name, key, or description…',
         }}
         onRefresh={() => {
-          void loadPrompts();
-          void loadDashboard();
+          void promptsQuery.refetch();
+          void statsQuery.refetch();
         }}
         empty={{
           icon: <IconTemplate size={26} stroke={1.7} />,

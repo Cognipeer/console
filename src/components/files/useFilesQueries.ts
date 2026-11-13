@@ -12,7 +12,7 @@
  * The fetchers, types and routes are in `filesApi.ts`.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import {
   useInfiniteQuery,
   useMutation,
@@ -25,7 +25,7 @@ import {
   type UseMutationResult,
   type UseQueryResult,
 } from '@tanstack/react-query';
-import { ACTIVE_PROJECT_CHANGED_EVENT } from '@/components/layout/useEffectivePermissions';
+import { getProjectScope, useResourceKey } from '@/lib/api/queries/projectScope';
 import type { OcrSettings } from '@/lib/services/extraction/types';
 import type { FileBucketView, FileRecordView } from '@/lib/services/files';
 import {
@@ -74,49 +74,15 @@ import { saveBlob } from './shared/saveBlob';
 
 /* ── The active project ──────────────────────────────────────────────────── */
 
-let projectGeneration = 0;
-const projectListeners = new Set<() => void>();
-
-function announceProjectChange(): void {
-  projectGeneration += 1;
-  projectListeners.forEach((listener) => listener());
-}
-
-// Registered when the module loads (browser only), so a switch made while no Files screen is mounted still
-// retires what an earlier visit cached.
-if (typeof window !== 'undefined') {
-  window.addEventListener(ACTIVE_PROJECT_CHANGED_EVENT, announceProjectChange);
-}
-
-function subscribeToProject(listener: () => void): () => void {
-  projectListeners.add(listener);
-  return () => {
-    projectListeners.delete(listener);
-  };
-}
-
 /** The marker of the project the app is in right now (changes when the app announces a project switch). */
-export function getFilesProjectScope(): string {
-  return `project:${projectGeneration}`;
-}
+export const getFilesProjectScope = getProjectScope;
 
 /**
  * The `<project>` part of every Files query key. Components use it through the hooks below; reach for it directly
  * only to build a key by hand. Queries of an earlier project that nothing observes any more are dropped.
  */
 export function useFilesProject(): string {
-  const queryClient = useQueryClient();
-  const project = useSyncExternalStore(subscribeToProject, getFilesProjectScope, () => 'project:0');
-
-  useEffect(() => {
-    queryClient.removeQueries({
-      queryKey: filesKeys.all,
-      type: 'inactive',
-      predicate: (query) => query.queryKey[1] !== project,
-    });
-  }, [project, queryClient]);
-
-  return project;
+  return useResourceKey('files')[1];
 }
 
 /* ── Keys ────────────────────────────────────────────────────────────────── */

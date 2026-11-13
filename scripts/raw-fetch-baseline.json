@@ -1,0 +1,29 @@
+{
+  "count": 673,
+  "allow": [
+    {
+      "file": "src/components/agents/session/AgentSessionView.tsx",
+      "reason": "streams the agent run (server-sent events)"
+    },
+    {
+      "file": "src/components/files/filesApi.ts",
+      "reason": "the Files API wrapper: its own error type, downloads and upload progress"
+    },
+    {
+      "file": "src/components/playground/ModelPlayground.tsx",
+      "reason": "streams model output"
+    },
+    {
+      "file": "src/components/playground/OcrPlayground.tsx",
+      "reason": "multipart upload"
+    },
+    {
+      "file": "src/components/playground/Playground.tsx",
+      "reason": "streams chat output"
+    },
+    {
+      "file": "src/components/playground/SttPlayground.tsx",
+      "reason": "multipart audio upload"
+    }
+  ]
+}

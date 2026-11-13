@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   ActionIcon,
@@ -47,9 +47,17 @@ import {
   IconVariable,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import {
+  useAddPromptComment,
+  useDeletePromptComment,
+  useInvalidatePrompt,
+  usePrompt,
+  usePromptComments,
+  usePromptVersions,
+} from '@/lib/api/queries/prompts';
 import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import { Playground } from '@/components/playground';
-import type { PromptView, PromptVersionView, PromptCommentView } from '@/lib/services/prompts';
+import type { PromptView, PromptVersionView } from '@/lib/services/prompts';
 import { renderPromptText } from '@/lib/shared/promptText';
 import PromptEditorModal from '@/components/prompts/PromptEditorModal';
 import PromptVersionHistoryModal from '@/components/prompts/PromptVersionHistoryModal';
@@ -75,77 +83,58 @@ export default function PromptDetailPage() {
   const t = useTranslations('promptDetail');
   const tConfirm = useTranslations('common.confirm');
   const deleteResource = useDeleteResource();
-  const [prompt, setPrompt] = useState<PromptView | null>(null);
-  const [versions, setVersions] = useState<PromptVersionView[]>([]);
-  const [comments, setComments] = useState<PromptCommentView[]>([]);
+  const promptId = params?.id;
+  const promptQuery = usePrompt(promptId);
+  const versionsQuery = usePromptVersions(promptId);
+  const commentsQuery = usePromptComments(promptId);
+  const addComment = useAddPromptComment(promptId);
+  const deleteComment = useDeletePromptComment(promptId);
+  const invalidatePrompt = useInvalidatePrompt();
+  const prompt: PromptView | null = promptQuery.data ?? null;
+  // Versions and comments are optional: when one cannot be read the page shows an empty list.
+  const versions = useMemo<PromptVersionView[]>(() => versionsQuery.data ?? [], [versionsQuery.data]);
+  const comments = commentsQuery.data ?? [];
+  const loading = promptQuery.isPending;
   const [newComment, setNewComment] = useState('');
-  const [submittingComment, setSubmittingComment] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
   const [previewData, setPreviewData] = useState('{\n  "name": "World"\n}');
   const [renderedSystemPrompt, setRenderedSystemPrompt] = useState('');
 
-  const promptId = params?.id;
+  const showRefreshed = () =>
+    notifications.show({
+      title: 'Data refreshed',
+      message: 'Latest prompt data is now visible.',
+      color: 'teal',
+    });
 
-  const fetchDetail = useCallback(async (showNotifications = false) => {
+  // The prompt could not be read (first load or a refresh): say so once per failure.
+  useEffect(() => {
+    if (!promptQuery.isError) return;
+    console.error('Failed to load prompt detail', promptQuery.error);
+    notifications.show({
+      title: 'Unable to load prompt',
+      message: 'We could not load the prompt detail. Please try again shortly.',
+      color: 'red',
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [promptQuery.errorUpdatedAt]);
+
+  const refreshDetail = async () => {
     if (!promptId) return;
+    setRefreshing(true);
     try {
-      const [promptResponse, versionsResponse, commentsResponse] = await Promise.all([
-        fetch(`/api/prompts/${promptId}`),
-        fetch(`/api/prompts/${promptId}/versions`),
-        fetch(`/api/prompts/${promptId}/comments`),
+      const [promptResult] = await Promise.all([
+        promptQuery.refetch(),
+        versionsQuery.refetch(),
+        commentsQuery.refetch(),
       ]);
-
-      if (!promptResponse.ok) {
-        throw new Error('Prompt not found');
-      }
-
-      const promptData = await promptResponse.json();
-      setPrompt(promptData.prompt);
-
-      if (versionsResponse.ok) {
-        const versionsData = await versionsResponse.json();
-        setVersions(versionsData.versions ?? []);
-      } else {
-        setVersions([]);
-      }
-
-      if (commentsResponse.ok) {
-        const commentsData = await commentsResponse.json();
-        setComments(commentsData.comments ?? []);
-      } else {
-        setComments([]);
-      }
-
-      if (showNotifications) {
-        notifications.show({
-          title: 'Data refreshed',
-          message: 'Latest prompt data is now visible.',
-          color: 'teal',
-        });
-      }
-    } catch (error) {
-      console.error('Failed to load prompt detail', error);
-      notifications.show({
-        title: 'Unable to load prompt',
-        message: 'We could not load the prompt detail. Please try again shortly.',
-        color: 'red',
-      });
+      if (!promptResult.isError) showRefreshed();
     } finally {
-      setLoading(false);
       setRefreshing(false);
     }
-  }, [promptId]);
-
-  useEffect(() => {
-    if (promptId) {
-      setLoading(true);
-      fetchDetail();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [promptId]);
+  };
 
   // Extract variables from template
   const variables = useMemo(() => {
@@ -194,39 +183,28 @@ export default function PromptDetailPage() {
     }
   }, [previewResult]);
 
-  const handlePromptSaved = (updatedPrompt: PromptView) => {
-    setPrompt(updatedPrompt);
+  // The editor saves through the mutation hooks, which put the saved prompt in the cache and refresh the rest.
+  const handlePromptSaved = () => {
     setEditorOpen(false);
-    fetchDetail(true);
+    showRefreshed();
   };
 
   const handleVersionRestored = () => {
-    fetchDetail(true);
+    if (promptId) void invalidatePrompt(promptId);
+    showRefreshed();
   };
 
   const handleAddComment = async () => {
     if (!newComment.trim() || !promptId) return;
 
-    setSubmittingComment(true);
     try {
-      const response = await fetch(`/api/prompts/${promptId}/comments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: newComment.trim() }),
+      await addComment.mutateAsync(newComment.trim());
+      setNewComment('');
+      notifications.show({
+        title: t('comments.addedTitle'),
+        message: t('comments.addedMessage'),
+        color: 'teal',
       });
-
-      if (response.ok) {
-        const data = await response.json();
-        setComments((prev) => [data.comment, ...prev]);
-        setNewComment('');
-        notifications.show({
-          title: t('comments.addedTitle'),
-          message: t('comments.addedMessage'),
-          color: 'teal',
-        });
-      } else {
-        throw new Error('Failed to add comment');
-      }
     } catch (error) {
       console.error('Failed to add comment:', error);
       notifications.show({
@@ -234,28 +212,19 @@ export default function PromptDetailPage() {
         message: t('comments.errorMessage'),
         color: 'red',
       });
-    } finally {
-      setSubmittingComment(false);
     }
   };
 
   const handleDeleteComment = async (commentId: string) => {
     if (!promptId) return;
 
-    const deleted = await deleteResource({
+    await deleteResource({
       noun: tConfirm('nouns.promptComment'),
       extraWarning: tConfirm('extras.promptCommentGone'),
       action: async () => {
-        const response = await fetch(`/api/prompts/${promptId}/comments/${commentId}`, {
-          method: 'DELETE',
-        });
-        if (!response.ok) {
-          const body = await response.json().catch(() => null);
-          throw new Error(body?.error || 'Failed to delete comment');
-        }
+        await deleteComment.mutateAsync(commentId);
       },
     });
-    if (deleted) setComments((prev) => prev.filter((c) => c.id !== commentId));
   };
 
   if (loading) {
@@ -355,7 +324,7 @@ export default function PromptDetailPage() {
               size="xs"
               leftSection={<IconRefresh size={14} />}
               loading={refreshing}
-              onClick={() => fetchDetail(true)}
+              onClick={() => void refreshDetail()}
             >
               {t('actions.refresh')}
             </Button>
@@ -569,7 +538,7 @@ export default function PromptDetailPage() {
                 />
                 <Button
                   leftSection={<IconSend size={16} />}
-                  loading={submittingComment}
+                  loading={addComment.isPending}
                   onClick={handleAddComment}
                   disabled={!newComment.trim()}
                 >

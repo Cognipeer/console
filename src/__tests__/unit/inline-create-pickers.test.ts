@@ -10,18 +10,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createElement as h, type ComponentProps, type ReactNode } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import {
-  buttonByText,
-  click,
-  installApiMock,
-  installDomStubs,
-  mount,
-  q,
-  qa,
-  settle,
-  text,
-  type Mounted,
-} from '../helpers/iamCenterUi';
+import { buttonByText, click, installApiMock, installDomStubs, q, qa, settle, text, type Mounted } from '../helpers/iamCenterUi';
+import { renderWithQuery } from '../helpers/renderWithQuery';
+
+/** `mount`, inside a query client (the screens read through React Query). */
+const mount = (element: ReactNode, locale = 'en') => renderWithQuery(element, { locale });
 
 vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(),
