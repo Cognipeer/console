@@ -66,6 +66,36 @@ export function readMcpGuardrailOptions(data: unknown): McpGuardrailOption[] {
  */
 export const DEFAULT_TOOL_GUARDRAIL_KEY = 'tool-safety-default';
 
+/** A guardrail template meant for MCP servers, from the guardrail module's catalog. */
+export interface McpGuardrailTemplate {
+  key: string;
+  name: string;
+  description: string;
+  recommended: boolean;
+}
+
+/** The templates of a `/api/guardrails/templates` response meant for MCP servers, recommended first. */
+export function readMcpGuardrailTemplates(data: unknown): McpGuardrailTemplate[] {
+  const list = isRecord(data) && Array.isArray(data.templates) ? data.templates : [];
+  const templates: McpGuardrailTemplate[] = [];
+  for (const item of list) {
+    if (!isRecord(item) || typeof item.key !== 'string' || !item.key) continue;
+    if (!Array.isArray(item.attachTo) || !item.attachTo.includes('mcp')) continue;
+    templates.push({
+      key: item.key,
+      name: typeof item.name === 'string' && item.name ? item.name : item.key,
+      description: typeof item.description === 'string' ? item.description : '',
+      recommended: item.recommended === true,
+    });
+  }
+  return templates.sort((a, b) => Number(b.recommended) - Number(a.recommended));
+}
+
+/** The guardrail a template apply (`POST /api/guardrails/templates/:key/apply`) created, as a picker option. */
+export function readAppliedMcpGuardrail(data: unknown): McpGuardrailOption | undefined {
+  return isRecord(data) ? readMcpGuardrailOptions({ guardrails: [data.guardrail] })[0] : undefined;
+}
+
 /** Picker entries; a selected key that is not listed (deleted, or another project's) stays visible. */
 export function mcpGuardrailSelectData(
   options: McpGuardrailOption[],

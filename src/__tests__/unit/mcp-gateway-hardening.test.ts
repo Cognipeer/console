@@ -13,10 +13,13 @@ import { pinnedPackageSpecError } from '@/lib/services/mcp/stdioRunner';
 import { mcpRuntimeHeaderPolicyError, resolveRuntimeHeaders } from '@/lib/services/runtimeContext';
 import { parseGuardrail, publishesPublicly, readMcpSecurityUpdate } from '@/server/api/plugins/mcp-shared';
 import { lineDiff } from '@/components/mcp/lineDiff';
+import { GUARDRAIL_TEMPLATES } from '@/lib/services/guardrail/templates/catalog';
 import {
   DEFAULT_TOOL_GUARDRAIL_KEY,
   mcpGuardrailSelectData,
+  readAppliedMcpGuardrail,
   readMcpGuardrailOptions,
+  readMcpGuardrailTemplates,
 } from '@/components/mcp/mcpGuardrailOptions';
 
 describe('MCP tool names in an agent run', () => {
@@ -208,6 +211,49 @@ describe('Security tab helpers', () => {
     expect(mcpGuardrailSelectData([], DEFAULT_TOOL_GUARDRAIL_KEY)).toEqual([
       { value: DEFAULT_TOOL_GUARDRAIL_KEY, label: 'Default tool guardrail' },
     ]);
+  });
+
+  it('offer the guardrail templates meant for MCP servers, recommended first', () => {
+    expect(readMcpGuardrailTemplates({
+      templates: [
+        { key: 'baseline', name: 'Baseline', attachTo: ['model', 'agent'], recommended: true },
+        { key: 'urls', name: 'URLs', description: 'Private networks', attachTo: ['agent', 'mcp'] },
+        { key: 'calls', name: 'Calls', description: 'Tool calls', attachTo: ['mcp'], recommended: true },
+        { key: 'not-a-list', attachTo: 'mcp' },
+        { name: 'no key', attachTo: ['mcp'] },
+      ],
+    })).toEqual([
+      { key: 'calls', name: 'Calls', description: 'Tool calls', recommended: true },
+      { key: 'urls', name: 'URLs', description: 'Private networks', recommended: false },
+    ]);
+    expect(readMcpGuardrailTemplates(null)).toEqual([]);
+    // The catalog's own MCP templates, as the picker lists them.
+    expect(readMcpGuardrailTemplates({ templates: GUARDRAIL_TEMPLATES }).map((template) => template.key)).toEqual([
+      'mcp-protection',
+      'indirect-injection',
+      'private-network',
+    ]);
+  });
+
+  it('read the guardrail a template created', () => {
+    expect(readAppliedMcpGuardrail({
+      guardrail: {
+        key: 'mcp-server-protection',
+        name: 'MCP server protection',
+        mode: 'monitor',
+        enabled: true,
+        hooks: { bindings: { 'tool.pre': { enabled: true }, 'tool.post': { enabled: true } } },
+      },
+      template: { key: 'mcp-protection', version: 1 },
+    })).toEqual({
+      key: 'mcp-server-protection',
+      name: 'MCP server protection',
+      mode: 'monitor',
+      toolBound: true,
+      definitionBound: true,
+    });
+    expect(readAppliedMcpGuardrail({ error: 'Template "x" not found' })).toBeUndefined();
+    expect(readAppliedMcpGuardrail(null)).toBeUndefined();
   });
 
   it('diff two definitions by line', () => {
